@@ -567,7 +567,22 @@ what the draft's first character makes of it (`ask`, `find`,
 cockpit has focus (`composer`, `thread`, `dash`), whether the glass
 shows both regions, how many turns the thread holds, and whether a
 draft is typed (never the draft itself). `bar` says
-whether the calm bar is on. A window's `name` is its tab's name as minted —
+whether the calm bar is on. `root` also carries `detail` (the narrow
+stack's detail is up), `selected` (the navigator's selection, by
+identity: `t:<rail id>` or `s:<index>`) and `vera` (`open`,
+`pinned`, `keys` — her pane holds the keyboard — and `about`, the
+task id the next request is about).
+
+An `agents` item may carry, beside its rail fields, the detail rook's
+inspector shows when it is there and never invents: `goal`,
+`started` (epoch ms), `plan` (strings, or `{"text","done"}`),
+`events` (`{"ms","text"}`), `files`, `commits`, `tests`, `artifacts`
+(`{"label","url"}`), `usage` (`{"tokens","cost"}`), `question` with
+`options` and `actions` (each `{"label","run","kind"}` — `run` is a
+command rook executes when a person confirms it; `kind` is one of
+`answer`, `pause`, `resume`, `stop`, `retry`, `redirect`, `review`).
+The frame may carry `session` (`{"tokens","cost"}`) beside `items`
+for the calm bar's `session` module. A window's `name` is its tab's name as minted —
 once, a person's word or the first program that was not the shell,
 and never changed by rook after (`named`) — and `program` is the live
 foreground program of its focused pane. A pane's `input` is who holds

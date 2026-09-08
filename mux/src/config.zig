@@ -17,6 +17,11 @@
 //!   zoom_view = "orbit"            # prefix-s: "orbit" draws each space as
 //!                                  # a figure; "ledger" is rows only
 //!   glyphs = "unicode"             # "ascii" for a glass without the marks
+//!   status_home = ["view", "-", "agents", "attention", "blocked", "session", "vera"]
+//!   status_space = ["input", "-", "working", "attention", "unread", "pins"]
+//!                                  # the calm bar's modules at home and in a
+//!                                  # space; "-" is where the right-aligned
+//!                                  # ones start (docs/altitude.md)
 //!   startup = "global"             # where plain `rook` lands: "global" is
 //!                                  # rook's home; "last-space" is the space
 //!                                  # you were in (docs/altitude.md)
@@ -125,6 +130,12 @@ pub const Mux = struct {
     /// `rook --space`). `last-space` is the opt-in that lands in the
     /// space the server is showing instead.
     startup_last_space: bool = false,
+    /// The calm bar's modules, newline-joined names, at home and in
+    /// a space. Empty means the default composition for that scope.
+    status_home: [256]u8 = @splat(0),
+    status_home_len: usize = 0,
+    status_space: [256]u8 = @splat(0),
+    status_space_len: usize = 0,
     /// The intent door: the command bare text at the root runs, with
     /// the text as its one argument (ask.zig). Unset means the
     /// companion's own `say`; set empty means no door, and the root
@@ -154,6 +165,13 @@ pub const Mux = struct {
     /// The ask command. Configured outright, else `vera say -c rook`
     /// while the companion is vera — rook knows her verb and no
     /// other program's — else nothing.
+    pub fn statusHome(self: *const Mux) []const u8 {
+        return if (self.status_home_len > 0) self.status_home[0..self.status_home_len] else default_status_home;
+    }
+    pub fn statusSpace(self: *const Mux) []const u8 {
+        return if (self.status_space_len > 0) self.status_space[0..self.status_space_len] else default_status_space;
+    }
+
     pub fn askSlice(self: *const Mux) []const u8 {
         if (self.ask_set) return self.ask[0..self.ask_len];
         if (std.mem.eql(u8, self.companionSlice(), "vera")) return default_ask;
@@ -194,6 +212,13 @@ pub const default_companion = "vera";
 /// How bare text reaches vera: her one-shot exchange, in a
 /// conversation of rook's own so the next request continues it.
 pub const default_ask = "vera say -c rook";
+
+/// The calm bar at home: the view, then ambient health — agents,
+/// what needs you, what failed, the session's spend, the companion.
+pub const default_status_home = "view\n-\nagents\nattention\nblocked\nsession\nvera";
+/// In a space: who holds the keys, then the signals, with one global
+/// attention count and no more of the dashboard than that.
+pub const default_status_space = "input\n-\nworking\nattention\nunread\npins";
 
 pub fn muxConfig() Mux {
     var out: Mux = .{};
@@ -277,6 +302,10 @@ pub fn parseMux(toml: []const u8, out: *Mux) void {
         } else if (std.mem.eql(u8, key, "glyphs")) {
             const v = std.mem.trim(u8, val, "\"'");
             out.ascii_glyphs = std.mem.eql(u8, v, "ascii");
+        } else if (std.mem.eql(u8, key, "status_home")) {
+            out.status_home_len = parseList(val, &out.status_home);
+        } else if (std.mem.eql(u8, key, "status_space")) {
+            out.status_space_len = parseList(val, &out.status_space);
         } else if (std.mem.eql(u8, key, "startup")) {
             const v = std.mem.trim(u8, val, "\"'");
             out.startup_last_space = std.mem.eql(u8, v, "last-space") or std.mem.eql(u8, v, "last_space") or std.mem.eql(u8, v, "space");
@@ -359,6 +388,15 @@ test "parseMux" {
     try std.testing.expect(s.startup_last_space);
     parseMux("[mux]\nstartup = \"global\"\n", &s);
     try std.testing.expect(!s.startup_last_space);
+}
+
+test "the status bar's modules are the default until a config names them" {
+    var d: Mux = .{};
+    try std.testing.expectEqualStrings(default_status_home, d.statusHome());
+    try std.testing.expectEqualStrings(default_status_space, d.statusSpace());
+    parseMux("[mux]\nstatus_home = [\"view\", \"-\", \"session\"]\nstatus_space = [\"input\"]\n", &d);
+    try std.testing.expectEqualStrings("view\n-\nsession", d.statusHome());
+    try std.testing.expectEqualStrings("input", d.statusSpace());
 }
 
 test "the ask command follows the companion unless said outright" {

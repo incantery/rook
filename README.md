@@ -48,31 +48,35 @@ calm bar across the bottom. No sidebar: the legacy spaces/agents
 panel is off unless `[mux] sidebar_mode = "open"` asks for it.
 
 **Home.** Plain `rook` lands at rook's home, not in a space: the
-scope slot is the system's chip, `rook` in the accent block, with the
-world in one line after it (`3 spaces · 2 agents working · 1 needs
-you`), and the canvas is a cockpit — the conversation with vera on
-the left, the composer at its foot (`› Ask vera…`), and the
-dashboard on the right: what needs you (her proposed actions, a pane
-that rang, a task a producer says is waiting or failed), what is in
-progress by goal (`◐ Fix flaky auth / api · codex · working /
-re-running the revoked-session test`), what finished with its
-result, and the spaces as compact rows. A card and a turn about the
-same task share its id: confirm her action on its card and the
-receipt lands in the thread; when the rail says the task finished,
-the card moves to recent and the thread gets the outcome. `⇥` moves
-focus between the composer, the dashboard and the thread, and a bare
-`ctrl-hjkl` walks the same three by where they sit — the thread above
-the composer, the dashboard right of both — so the vim motion does
-not stop at home's door; typing always reaches the composer; `↵` on a card opens its exact pane, or
-runs the approval. `/` finds, `:` commands, `prefix-o` from anywhere
-comes back home, Esc closes one layer at a time and at home does
-nothing — a space is a destination, not the parent. Under 85 columns
-the cockpit shows one view at a time, `vera` or `now`, with the
-attention count on the hidden one. `prefix-s` is orbit, the spatial
-subview; `rook .` and `rook --space <name>` land in a space outright;
-`startup = "last-space"` makes plain `rook` do that too.
-`docs/altitude.md` is the model and the ontology;
-`scripts/altitude-fixture.py` renders it deterministically.
+scope slot is the system's chip, `rook` in the accent block, then
+the view and what is selected. The canvas is a work navigator on
+the left — what needs you (vera's proposed actions, a pane that
+rang, a task a producer says is waiting or failed), what is in
+progress by goal, what finished, the spaces — and an inspector on
+the right for the selected thing: the goal, the current step, the
+plan with its progress, the timeline, files, commits, tests,
+artifacts, usage, the last lines its pane wrote, and the controls
+the producer supports (an answer to its question, pause, stop,
+retry), each a command run on ↵, plus `open its pane` and `ask
+vera about this`. `j k` move, `l` inspects, `h` is the list, `o`
+opens the exact workspace; typing a letter summons vera. `prefix-t`
+is vera's pane from anywhere — over the inspector, over a space's
+panes without resizing them — and again dismisses her with her
+thread and draft kept; `prefix-T` pins her. `/` finds, `:`
+commands, `prefix-o` from anywhere comes back home, Esc closes one
+layer at a time. Under 81 columns the navigator and the inspector
+are a stack. `prefix-s` is orbit; `rook .` and `rook --space
+<name>` land in a space outright; `startup = "last-space"` makes
+plain `rook` do that too. `docs/altitude.md` is the model and the
+ontology; `scripts/altitude-fixture.py` renders it deterministically.
+
+**The calm bar at home** is composed from `[mux] status_home`: `rook
+· home · navigator` on the left, and on the right `agents ◐ 2
+active · 1 idle`, `! 2 need you`, `✕ 1 failed`, `session $4.18 ·
+812k tokens` (the producer's usage, since this server started) and
+`vera ready` — warnings off at zero, usage off until someone reports
+it. A space's bar (`status_space`) keeps `you ▸ tool` and the
+signals, with one global `! n need you`.
 
 **The calm bar.** One row at the bottom: who holds the focused pane's
 keyboard on the left — `you ▸ nvim`, or `claude·main ▸ owns input ·

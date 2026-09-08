@@ -96,6 +96,7 @@ if [ "$1" = "say" ]; then
   shift
   while [ $# -gt 0 ]; do case "$1" in -c) shift 2;; *) break;; esac; done
   echo "· thinking" >&2
+  if [ -n "$ROOK_ABOUT_TASK" ]; then printf 'about %s: it is the one in %s; ask me to pause it if you like.\n' "$ROOK_ABOUT_TASK" "$ROOK_ABOUT_SPACE"; exit 0; fi
   case "$*" in
     *deploy*) printf '%s\n' '{"intent":"deploy the api from its current branch","plan":["run the tests in api","tag the release","roll it out to staging"],"space":"api","task":"t4","actions":[{"label":"start an agent on the deploy","run":"push-t4 && echo started deploy-agent in api"},{"label":"open the runbook","run":"echo runbook: docs/deploy.md"}]}' ;;
     *long*) printf 'This is a long answer to a long question, and it keeps going so that the thread has to wrap it across several lines of the conversation region without losing a word of it, because a reply that is cut short is a reply that was not given; the second sentence is here so that there are two, and the third is short.\n' ;;
@@ -109,17 +110,31 @@ exec "$ROOK_FIXTURE_LIB/vera" "$@"
 # The rail as the fixture pushes it, and as the fake vera's confirmed
 # action pushes it back with one more task: the card the conversation
 # is about, sharing its id (`t4`) with the plan turn.
+NOW_MS = int(time.time() * 1000)
 RAIL = [
-    {"id": "t1", "title": "Deploy plan", "subtitle": "3 approvals", "state": "waiting", "workspace": "vera", "actor": "main", "event": "asked which region first"},
-    {"id": "t2", "title": "Fix flaky auth", "subtitle": "attempt 2", "state": "working", "workspace": "api", "actor": "codex", "event": "re-running the revoked-session test"},
-    {"id": "t3", "title": "Rotate the signing key", "state": "done", "workspace": "api", "result": "PR #212 merged"},
+    {"id": "t1", "title": "Deploy plan", "subtitle": "3 approvals", "state": "waiting", "workspace": "vera", "actor": "main", "event": "asked which region first",
+     "goal": "Plan the 1.4.2 rollout across the three regions and get the approvals lined up.",
+     "question": "Which region goes first?", "options": [{"label": "us-east first", "run": "push-t1-answered && echo answered us-east", "kind": "answer"}, {"label": "eu-west first", "run": "echo answered eu-west", "kind": "answer"}],
+     "events": [{"ms": NOW_MS - 400000, "text": "drafted the plan"}, {"ms": NOW_MS - 120000, "text": "asked which region first"}]},
+    {"id": "t2", "title": "Fix flaky auth", "subtitle": "attempt 2", "state": "working", "workspace": "api", "actor": "codex", "event": "re-running the revoked-session test", "started": NOW_MS - 900000,
+     "goal": "Make the revoked-session test pass reliably by fixing the retry window in the auth middleware.",
+     "plan": [{"text": "read the failing test", "done": True}, {"text": "patch the retry window", "done": True}, {"text": "re-run the suite", "done": False}],
+     "events": [{"ms": NOW_MS - 900000, "text": "started in api › tests"}, {"ms": NOW_MS - 300000, "text": "patched middleware/retry.go"}, {"ms": NOW_MS - 60000, "text": "suite run 1: 1 failure"}],
+     "files": ["middleware/retry.go", "middleware/retry_test.go"], "commits": ["a1b2c3d fix the retry window"], "tests": "212 passed · 1 failed", "usage": {"tokens": 41200, "cost": 0.31},
+     "actions": [{"label": "pause", "run": "echo paused t2", "kind": "pause"}, {"label": "stop", "run": "echo stopped t2", "kind": "stop"}]},
+    {"id": "t3", "title": "Rotate the signing key", "state": "done", "workspace": "api", "result": "PR #212 merged", "commits": ["9f8e7d6 rotate the signing key"], "artifacts": [{"label": "PR #212", "url": "https://example.test/pr/212"}], "files": ["auth/keys.go"], "tests": "212 passed", "usage": {"tokens": 18000, "cost": 0.12}},
 ]
-T4_WORKING = {"id": "t4", "title": "Deploy api to staging", "state": "working", "workspace": "api", "actor": "claude", "event": "running the tests"}
-T4_DONE = {"id": "t4", "title": "Deploy api to staging", "state": "done", "workspace": "api", "actor": "claude", "result": "staging is on 1.4.2"}
+T1_ANSWERED = dict(RAIL[0], state="working", event="rolling out to us-east", question="", options=[])
+T4_WORKING = {"id": "t4", "title": "Deploy api to staging", "state": "working", "workspace": "api", "actor": "claude", "event": "running the tests", "started": NOW_MS}
+T4_DONE = {"id": "t4", "title": "Deploy api to staging", "state": "done", "workspace": "api", "actor": "claude", "result": "staging is on 1.4.2", "artifacts": [{"label": "staging", "url": "https://staging.example.test"}]}
+SESSION = {"tokens": 812000, "cost": 4.18}
 
 
-def rail_frame(items):
-    return json.dumps({"v": 1, "op": "items.push", "params": {"surface": "agents", "items": items}})
+def rail_frame(items, session=None):
+    params = {"surface": "agents", "items": items}
+    if session:
+        params["session"] = session
+    return json.dumps({"v": 1, "op": "items.push", "params": params})
 
 
 fails = []
@@ -156,12 +171,14 @@ class Rook:
         with open(self.root + "/bin/rook", "w") as f:
             f.write('#!/bin/sh\nexec "%s" "$@"\n' % ENGINE)
         os.chmod(self.root + "/bin/rook", 0o755)
-        with open(self.root + "/lib/with-t4.json", "w") as f:
-            f.write(rail_frame(RAIL + [T4_WORKING]) + "\n")
-        # what the fake vera's first action runs: one more task on the rail
-        with open(self.root + "/bin/push-t4", "w") as f:
-            f.write('#!/bin/sh\nexec "%s" side - < "%s/lib/with-t4.json" >/dev/null\n' % (ENGINE, self.root))
-        os.chmod(self.root + "/bin/push-t4", 0o755)
+        # what the fake vera's first action runs, and what answering
+        # t1's question runs: the rail again, changed
+        for name, items in (("t4", RAIL + [T4_WORKING]), ("t1-answered", [T1_ANSWERED] + RAIL[1:])):
+            with open(self.root + "/lib/with-%s.json" % name, "w") as f:
+                f.write(rail_frame(items, SESSION) + "\n")
+            with open(self.root + "/bin/push-" + name, "w") as f:
+                f.write('#!/bin/sh\nexec "%s" side - < "%s/lib/with-%s.json" >/dev/null\n' % (ENGINE, self.root, name))
+            os.chmod(self.root + "/bin/push-" + name, 0o755)
         self.env = dict(os.environ)
         for k in ("ROOK_MUX_PANE", "TMUX", "TMUX_PANE", "ROOK_MUX_SOCK"):
             self.env.pop(k, None)
@@ -355,7 +372,7 @@ def build_fixture(r):
     r.settle(0.8)
     # a producer says what the work is: the rail's own wire, with the
     # fields a work item may carry
-    r.rook("side", "-", stdin=rail_frame(RAIL) + "\n")
+    r.rook("side", "-", stdin=rail_frame(RAIL, SESSION) + "\n")
     r.settle(0.6)
     return {"claude": claude, "codex": codex, "server": server, "logs": logs, "chat": chat}
 
@@ -384,29 +401,48 @@ def slot_of(top):
     return top.split("┃")[-1]  # past the global pin dock
 
 
-MODULES = ("needs you", "in progress", "recent", "spaces")
+GROUPS = ("needs you", "in progress", "recent", "spaces")
 
 
-def right(lines, top):
-    """The dashboard's rows, past the divider."""
-    x = top.rindex("│") if "│" in top else None
-    return [l[x + 1:].rstrip() if x is not None and len(l) > x else "" for l in lines]
+def dividers(lines):
+    """The columns of the region dividers, read off the header row,
+    which no content shares."""
+    row = lines[1]
+    return [i for i, ch in enumerate(row) if ch == "│"]
 
 
-def left(lines, top):
-    """The conversation's rows, before the divider, past the dock."""
-    x = top.rindex("│") if "│" in top else len(top)
+def nav(lines):
+    """The navigator's rows, past the dock, before the first divider."""
+    d = dividers(lines)
+    x = d[0] if d else len(lines[1])
     return [slot_of(l[:x]).rstrip() for l in lines]
 
 
-def module(rows, name):
-    """The rows under a dashboard module header, up to the next, with
-    the edge, the marker and the age taken off, so a check reads the
-    words."""
+def insp(lines):
+    """The inspector's rows: between the first and second divider, or
+    to the edge."""
+    d = dividers(lines)
+    if not d:
+        return [slot_of(l).rstrip() for l in lines]
+    x0 = d[0] + 1
+    x1 = d[1] if len(d) > 1 else None
+    return [(l[x0:x1] if len(l) > x0 else "").rstrip() for l in lines]
+
+
+def vera(lines):
+    """The rightmost region past the last divider (vera's pane)."""
+    d = dividers(lines)
+    x = d[-1] + 1 if d else 0
+    return [(l[x:] if len(l) > x else "").rstrip() for l in lines]
+
+
+def group(rows, name):
+    """The rows under a navigator group header, up to the next, with
+    the edge, the marker and the edge word taken off."""
     out, on = [], False
     for l in rows[1:-1]:
         s = l.strip()
-        is_header = any(s.startswith(h + " ") or s == h for h in MODULES) and not l.startswith("     ")
+        is_header = any(s.startswith(h + " ") or s == h for h in GROUPS) and not l.startswith("     ")
         if on and is_header:
             break
         if is_header and s.startswith(name):
@@ -414,13 +450,21 @@ def module(rows, name):
             continue
         if on and s:
             s = s.lstrip("▎▸| ").strip()
-            s = re.sub(r"\s{2,}\d+[smhd]$", "", s)
+            s = re.sub(r"\s{2,}\S+$", "", s)
             out.append(s)
     return out
 
 
+def flat(rows):
+    return re.sub(r"\s+", " ", " ".join(re.sub(r"\s+\d+[smhd]$", "", l.rstrip()) for l in rows))
+
+
 def cell(r, y, x):
     return r.screen.buffer[y][x]
+
+
+def selected_nav(lines):
+    return [l.strip().lstrip("▸ ").strip() for l in nav(lines) if l.strip().startswith("▸")]
 
 
 def main():
@@ -428,254 +472,237 @@ def main():
         sys.stderr.write("altitude-fixture: build the engine first (make -C mux build)\n")
         sys.exit(2)
 
-    # ---- the representative state, from home. 160 columns: the global
-    # pin dock keeps its 40% at home (it never resizes), and both
-    # regions should still read whole beside it
+    # ---- the representative state, from home. 200 columns: the global
+    # pin dock keeps its 40% at home (it never resizes), and the
+    # navigator and the inspector should still read whole beside it
     r = Rook(cols=200, rows=44)
     try:
         ids = build_fixture(r)
         st = r.state()
         sizes_before = {p["id"]: (p["cols"], p["rows"]) for p in st["panes"]}
-        r.settle(0.3)
+        r.settle(0.4)
 
-        # 01: home, busy
+        # 01: home — the navigator left, the inspector right, the first
+        # thing that needs you selected and inspected
         r.snap("01-home")
         lines = r.lines()
         top, bar = lines[0], lines[-1]
-        L, R = left(lines, lines[1]), right(lines, lines[1])
+        N, I = nav(lines), insp(lines)
         slot = slot_of(top)
-        check("plain rook lands at home: scope root, view home, composer focused, wide", st["scope"] == "root" and st["root"]["view"] == "home" and st["root"]["region"] == "composer" and st["root"]["wide"], str(st.get("root")))
-        check("the scope slot is the system's chip, then the summary, no corner", slot.startswith("  rook  │ ") and "4 spaces · 2 agents working · 2 need you" in slot and "esc" not in top, repr(slot[:60]))
-        check("the system's chip is the accent fill", chip_bg(r, top, "rook") == ACCENT, chip_bg(r, top, "rook"))
-        check("two regions: the conversation left, the dashboard right, one quiet divider", L[1].startswith("  ✦ vera · ready") and R[1].strip().startswith("now") and lines[10].count("│") == 1, (L[1], R[1]))
-        check("the composer is at the foot of the conversation, above the calm bar", "› Ask vera…" in L[-3] and "↵ sends · / find · : command · ⇥ dashboard" in L[-2], (L[-3], L[-2]))
-        check("no field at the top of the screen", "›" not in L[1] and "›" not in L[2] and "›" not in L[3])
-        check("the thread holds rook's notes from the rail — what began, what needs you — and nothing invented", any("Deploy plan needs you · asked which region first" in l for l in L) and any("Fix flaky auth began in api · codex" in l for l in L) and not any("finished" in l for l in L), [l for l in L if "·" in l][:4])
-        check("the dashboard header carries the attention count", "now · ! 2 need you" in R[1], R[1])
-        needs = module(R, "needs you")
-        check("needs you: the bell as a card, the producer's ask as a card, the strongest first", needs[0] == "! rang the bell" and "api · bash · unread" in needs[1] and "in server, nobody was" in needs[2] and any(l.startswith("! Deploy plan") for l in needs) and any("vera · main · needs you" in l for l in needs), needs)
-        active = module(R, "in progress")
-        check("in progress: one card per task, by goal, with space, actor, state and the current step", active[0] == "◐ Fix flaky auth" and "api · codex · working" in active[1] and "re-running the revoked-session test" in " ".join(active[2:]), active)
-        check("no agent a producer claims is a card of its own, and no idle agent is", not any("at work" in l for l in R))
-        recent = module(R, "recent")
-        check("recent: one flat line with the result", recent == ["✓ Rotate the signing key · PR #212 merged"], recent)
-        spaces = module(R, "spaces")
-        check("spaces: compact rows with tabs and marks, never the task's title again", len(spaces) == 4 and spaces[0].startswith("rook") and any(l.startswith("vera") and "deploy · main ◐" in l and "Deploy plan" not in l for l in spaces), spaces)
-        check("the attention edge marks every needs-you card row", all(cell(r, y, lines[1].rindex("│") + 3).data == "▎" for y, l in enumerate(lines) if "rang the bell" in l or "nobody was looking" in l), "")
+        check("plain rook lands at home: scope root, view home, the navigator focused, wide", st["scope"] == "root" and st["root"]["view"] == "home" and st["root"]["region"] == "nav" and st["root"]["wide"], str(st.get("root")))
+        check("the top bar is identity, the view and the selection — no counts", slot.startswith("  rook  │  home ") and "rang the bell" in slot and "spaces" not in slot and "agents" not in slot, repr(slot[:70]))
+        check("the navigator is the left third, the inspector the rest, one quiet divider", len(dividers(lines)) == 1 and 0.3 < (dividers(lines)[0] - top.index("┃")) / (200 - top.index("┃")) < 0.4, (dividers(lines), top.index("┃")))
+        needs = group(N, "needs you")
+        check("needs you: the bell and the producer's ask, as rows, the strongest first", needs[0].startswith("! rang the bell") and any(l.startswith("! Deploy plan") for l in needs), needs)
+        active = group(N, "in progress")
+        check("in progress: one row per task, by goal, nothing about its pane", active[0].startswith("◐ Fix flaky auth") and len(active) == 1 and "re-running" not in "\n".join(N), active)
+        check("no idle agent, no agent a producer claims, is a row of its own", not any("at work" in l for l in N))
+        recent = group(N, "recent")
+        check("recent: one row, the title only", recent[0].startswith("✓ Rotate the signing key") and "PR #212" not in recent[0], recent)
+        spaces = group(N, "spaces")
+        check("spaces: compact rows with tab counts and marks, never a task's title", len(spaces) == 4 and spaces[0].startswith("rook") and any(l.startswith("vera") and "tab" in l for l in spaces) and "Deploy plan" not in "\n".join(spaces), spaces)
+        check("the first row is selected, and the selection is unmistakable", selected_nav(lines) and selected_nav(lines)[0].startswith("! rang the bell"), selected_nav(lines))
+        check("the inspector shows the selected signal: what happened, its pane, and what to do", I[1].strip().startswith("! rang the bell") and any("what happened" in l for l in I) and any("bash rang the bell in api › server" in l for l in I) and any("its pane" in l for l in I) and any("go see it" in l for l in I) and any("ask vera about this" in l for l in I), [l for l in I if l.strip()][:8])
+        check("the bar is ambient health: agents, attention, the session's spend with its period, vera", "agents ◐ 2 active" in bar and "! 2 need you" in bar and "session $4.18 · 812k tokens" in bar and "vera ready" in bar and "stale" not in bar, repr(bar))
         check("nothing was resized to paint home", {p["id"]: (p["cols"], p["rows"]) for p in r.state()["panes"]} == sizes_before)
-        check("the calm bar says rook · home, and counts the world", bar.startswith(" rook · home") and "◐ 2" in bar and "!2" in bar and "⊕g 1" in bar, repr(bar))
         r.keys("\x1b", settle=0.3)
         check("esc at home stays at home", r.state()["scope"] == "root")
 
-        # 02: a request, a reflection, an approval that becomes a card
-        r.keys("deploy the api\r", settle=0.3)
+        # 02: the active task inspected: goal, step, plan, timeline,
+        # files, tests, usage, its pane, the producer's controls
+        r.keys("j", settle=0.3)
+        r.keys("j", settle=0.4)
+        r.snap("02-active")
+        lines = r.lines()
+        I = insp(lines)
+        body = "\n".join(I)
+        check("j walks the navigator; the selection is the active task", selected_nav(lines)[0].startswith("◐ Fix flaky auth"), selected_nav(lines))
+        check("active detail: title, state · space · actor · age; the goal; now; the plan with progress", I[1].strip() == "◐ Fix flaky auth" and "working · in api · codex · 15m since it started" in I[2] and "Make the revoked-session test pass reliably" in body and "\n  now" in body and "plan 2 of 3" in body and "✓ read the failing test" in body and "◌ re-run the suite" in body, [l for l in I if l.strip()][:9])
+        check("active detail: the timeline with ages, files, commits, tests, usage", "timeline" in body and "suite run 1: 1 failure" in body and "files 2" in body and "middleware/retry.go" in body and "a1b2c3d" in body and "tests      212 passed · 1 failed" in body and "usage      41k tokens · $0.31" in body, [l for l in I if "tests" in l or "usage" in l])
+        check("active detail: the last lines of its pane, as output", "its pane codex" in body and "revoked session rejected" in body)
+        check("active detail: the producer's controls, then rook's own", any("◌ pause  $ echo paused t2" in l for l in I) and any("✕ stop" in l for l in I) and any("open its pane" in l for l in I) and any("ask vera about this" in l for l in I), [l for l in I if "$" in l or "open" in l])
+        r.keys("l", settle=0.3)
         st2 = r.state()
-        check("bare text goes to vera, and is a turn in the thread", st2["root"]["ask"] in ("running", "replied") and st2["root"]["turns"] >= 1, st2["root"])
-        r.settle(1.4)
-        r.snap("02-ask")
         lines = r.lines()
-        L, R = left(lines, lines[1]), right(lines, lines[1])
-        body = "\n".join(L)
-        check("the thread: your turn, then her reflection as a block — intent, plan, and the actions with their state",
-              any(l.strip().startswith("you deploy the api") for l in L) and "deploy the api from its current branch" in body and "1. run the tests in api" in body and "3. roll it out to staging" in body and "◌ start an agent on the deploy" in body and "needs you · ↵ on its card" in body, [l for l in L if l.strip()][:12])
-        plan_y = [i for i, l in enumerate(lines) if "1. run the tests in api" in l][0]
-        you_y = [i for i, l in enumerate(lines) if "you deploy the api" in l][0]
-        check("the plan is a tinted block, the prose is not", cell(r, plan_y, lines[plan_y].index("1. run") - 1).bg == RAISED and cell(r, you_y, lines[you_y].index("you deploy") + 8).bg == CHROME, (cell(r, plan_y, lines[plan_y].index("1. run") - 1).bg, cell(r, you_y, lines[you_y].index("you deploy") + 8).bg))
-        check("her status says she is waiting for you", "✦ vera · ! waiting for you" in L[1], L[1])
-        needs = module(R, "needs you")
-        check("the same actions are approval cards, first under needs you, with the command they would run", needs[0] == "◌ start an agent on the deploy" and needs[1].startswith("$ push-t4") and needs[2] == "◌ open the runbook", needs[:3])
-        check("the bar says vera answered", "vera answered" in lines[-1], repr(lines[-1]))
-        # ⇥ to the dashboard: the first card is the approval; ↵ runs it
-        r.keys("\t", settle=0.3)
-        st3 = r.state()
-        r.snap("02-ask-dash")
-        R = right(r.lines(), r.lines()[1])
-        check("tab moves focus to the dashboard, on the first approval, which says what enter does", st3["root"]["region"] == "dash" and any("↵ runs" in l for l in R[:8]), R[:8])
-        r.keys("\r", settle=1.5)
-        r.snap("02-ask-confirmed")
-        lines = r.lines()
-        L, R = left(lines, lines[1]), right(lines, lines[1])
-        body = "\n".join(L)
-        check("the confirmed action ran: a receipt in the thread, the action marked in the plan", "✓ start an agent on the deploy · started deploy-agent in api" in body and any(l.strip().lstrip("▸").strip().startswith("✓") and "ran start an agent on the deploy" in l for l in L), [l for l in L if "start an agent" in l])
-        active = module(R, "in progress")
-        check("its work is a new card in progress, from the rail — not a second copy of anything", any("Deploy api to staging" in l for l in active) and sum(1 for l in R if "Deploy api to staging" in l) == 1 and any("api · claude · working" in l for l in active), active)
-        needs = module(R, "needs you")
-        check("the other action is still an approval; the ran one is gone from needs you", any("open the runbook" in l for l in needs) and not any("start an agent" in l for l in needs), needs)
-        check("the note that it began is in the thread, about the same task", any("Deploy api to staging began in api · claude" in l for l in L), [l for l in L if "began" in l])
-        # the card and the plan share t4: selecting the card lights the plan turn
-        r.keys("\x1b[B", settle=0.2); r.keys("\x1b[B", settle=0.2); r.keys("\x1b[B", settle=0.3)
-        lines = r.lines()
-        R = right(lines, lines[1])
-        selected = [l for l in R if l.strip().startswith("▸")]
-        found_t4 = any("Deploy api to staging" in l for l in selected)
-        if not found_t4:
-            for _ in range(4):
-                r.keys("\x1b[B", settle=0.2)
-                R = right(r.lines(), r.lines()[1])
-                if any("Deploy api to staging" in l for l in R if l.strip().startswith("▸")):
-                    found_t4 = True
-                    break
-        r.snap("02-ask-linked")
-        lines = r.lines()
-        L = left(lines, lines[1])
-        check("selecting the task's card highlights the turn about it in the thread", found_t4 and any(l.strip().startswith("▸") for l in L), [l for l in L if "▸" in l])
+        I = insp(lines)
+        check("l moves focus into the inspector, on its first control", st2["root"]["region"] == "insp" and any(l.strip().startswith("▸") and "pause" in l for l in I), [l for l in I if "▸" in l])
+        r.keys("j", settle=0.3)
+        I = insp(r.lines())
+        check("j walks the controls; the selected one says enter", any(l.strip().startswith("▸") and "stop" in l and "↵" in l for l in I), [l for l in I if "▸" in l])
+        check("the top bar names the view and the selection", "  home " in slot_of(r.lines()[0]) and "Fix flaky auth" in r.lines()[0])
+        r.keys("h", settle=0.3)
+        check("h is the navigator again", r.state()["root"]["region"] == "nav")
 
-        # 24: completion — the rail says t4 finished
-        r.rook("side", "-", stdin=rail_frame(RAIL + [T4_DONE]) + "\n")
-        r.settle(0.6)
-        r.snap("24-completed")
+        # 03: an approval answered from home — the blocked task's options
+        r.keys("k", settle=0.3)
+        r.snap("03-blocked")
         lines = r.lines()
-        L, R = left(lines, lines[1]), right(lines, lines[1])
-        check("completion: the card moved to recent with its result, and only one card says so", any("✓ Deploy api to staging · staging is on 1" in l for l in module(R, "recent")) and not any("Deploy api to staging" in l for l in module(R, "in progress")) and sum(1 for l in R if "Deploy api to staging" in l) == 1, module(R, "recent"))
-        check("…and the thread has the linked outcome, once", sum(1 for l in L if "Deploy api to staging finished · staging is on 1.4.2" in l) == 1, [l for l in L if "finished" in l])
+        I = insp(lines)
+        body = "\n".join(I)
+        check("blocked detail: the question, what produced it, the options as controls", I[1].strip() == "! Deploy plan" and "waiting on you" in body and "Which region goes first?" in body and "timeline" in body and any("◌ us-east first" in l for l in I) and any("◌ eu-west first" in l for l in I), [l for l in I if l.strip()][:12])
+        r.keys("l", settle=0.3)
+        r.keys("\r", settle=1.2)
+        r.snap("03-answered")
+        lines = r.lines()
+        N = nav(lines)
+        check("answering from the inspector ran the option, the rail moved the task to in progress, and it stayed selected", any(l.startswith("◐ Deploy plan") for l in group(N, "in progress")) and not any("Deploy plan" in l for l in group(N, "needs you")) and r.state()["root"]["selected"] == "t:t1", (group(N, "in progress"), r.state()["root"]["selected"]))
+        check("the inspector followed: now it is rolling out", any("rolling out to us-east" in l for l in insp(lines)), [l for l in insp(lines) if "rolling" in l])
         r.keys("\x1b", settle=0.3)
-        check("esc from the dashboard returns focus to the composer", r.state()["root"]["region"] == "composer")
 
-        # 03: words, and the thread as a conversation
-        r.keys("what is running\r", settle=1.5)
-        r.snap("03-conversation")
+        # 04: vera, summoned and dismissed, with her state kept
+        r.keys("`t", settle=0.5)
+        r.snap("04-vera-open")
         lines = r.lines()
-        L = left(lines, lines[1])
-        body = "\n".join(L)
-        check("a reply in words is her turn, under yours, oldest first", body.index("you deploy the api") < body.index("you what is running") < body.index("Two things are running"), "")
-        check("every turn carries a quiet age at its edge", sum(1 for l in L if l.rstrip().endswith("s") and ("you" in l or "✦" in l)) >= 2, [l for l in L if "you" in l][:3])
-
-        # 22: focus states — thread, composer, dashboard
-        r.keys("\x1b[A", settle=0.3)
-        st22 = r.state()
-        r.snap("22-focus-thread")
-        L = left(r.lines(), r.lines()[1])
-        check("up from an empty composer walks into the thread, on the latest turn", st22["root"]["region"] == "thread" and any(l.strip().startswith("▸") for l in L), [l for l in L if "▸" in l])
-        r.keys("\x1b[A", settle=0.2); r.keys("\x1b[A", settle=0.2)
-        r.keys("\x1b[B", settle=0.2); r.keys("\x1b[B", settle=0.2); r.keys("\x1b[B", settle=0.3)
-        check("down past the latest turn is the composer again", r.state()["root"]["region"] == "composer")
+        st4 = r.state()
+        V = vera(lines)
+        check("prefix-t summons vera over the inspector's side, focused, the navigator untouched", st4["root"]["vera"]["open"] and st4["root"]["region"] == "vera" and len(dividers(lines)) == 2 and any("✦ vera · ready" in l for l in V) and any("› Ask vera" in l for l in V) and nav(lines)[1].strip().startswith("needs you"), (st4["root"]["vera"], V[1]))
         r.keys("half a thought", settle=0.3)
-        r.keys("\t", settle=0.3)
-        r.snap("22-focus-dash")
-        check("tab keeps the draft and moves to the dashboard", r.state()["root"]["region"] == "dash" and r.state()["root"]["draft"], str(r.state()["root"]))
-        r.keys("x", settle=0.3)
-        check("typing from the dashboard goes to the composer, never into a shortcut", r.state()["root"]["region"] == "composer" and "half a thoughtx" in "\n".join(left(r.lines(), r.lines()[1])[-4:]), left(r.lines(), r.lines()[1])[-3])
-        r.keys("\x7f", settle=0.2)
-
-        # 22b: the vim motion walks the regions — the thread above the
-        # composer, the dashboard right of both, the draft untouched
-        r.keys("\x0c", settle=0.3)  # C-l
-        check("ctrl-l from the composer is the dashboard, and the draft stays", r.state()["root"]["region"] == "dash" and r.state()["root"]["draft"], str(r.state()["root"]))
-        r.keys("\x08", settle=0.3)  # C-h
-        check("ctrl-h comes back to the composer it left", r.state()["root"]["region"] == "composer" and "half a thought" in "\n".join(left(r.lines(), r.lines()[1])[-4:]), left(r.lines(), r.lines()[1])[-3])
-        r.keys("\x0b", settle=0.3)  # C-k
-        check("ctrl-k walks up into the thread, on the latest turn", r.state()["root"]["region"] == "thread" and any(l.strip().startswith("▸") for l in left(r.lines(), r.lines()[1])), left(r.lines(), r.lines()[1]))
-        r.keys("\x0c", settle=0.3)
-        r.keys("\x08", settle=0.3)
-        check("ctrl-h lands where the hand left: the thread, not the composer", r.state()["root"]["region"] == "thread")
-        r.keys("\x0a", settle=0.3)  # C-j
-        check("ctrl-j from the thread is the composer again", r.state()["root"]["region"] == "composer")
-        r.keys("\x08", settle=0.3)
-        check("at the composer's edge ctrl-h is backspace again", "half a though" in "\n".join(left(r.lines(), r.lines()[1])[-4:]) and "half a thought" not in "\n".join(left(r.lines(), r.lines()[1])[-4:]), left(r.lines(), r.lines()[1])[-3])
-
-        # 04: find
+        r.keys("`t", settle=0.4)
+        st4b = r.state()
+        check("prefix-t again dismisses her; the draft is kept; focus is the navigator's", not st4b["root"]["vera"]["open"] and st4b["root"]["draft"] and st4b["root"]["region"] == "nav", str(st4b["root"]))
+        r.keys("`t", settle=0.4)
+        check("summoned again, the draft is still in the composer", "half a thought" in "\n".join(vera(r.lines())[-4:]))
         r.keys("\x15", settle=0.2)
-        r.keys("/serv", settle=0.4)
-        r.snap("04-find")
+        r.keys("deploy the api\r", settle=1.6)
+        r.snap("04-vera-plan")
         lines = r.lines()
-        body = "\n".join(lines)
-        check("/ takes the canvas over as one list: the tab by name", "api › server" in body and "matches" in body, "")
-        check("the bar says find", " rook · find" in lines[-1], repr(lines[-1][:30]))
+        V = vera(lines)
+        N = nav(lines)
+        check("her reflection is a block in her pane, and its actions are approvals in the navigator", "deploy the api from its current branch" in flat(V) and "1. run the tests in api" in flat(V) and any(l.startswith("◌ start an agent on the deploy") for l in group(N, "needs you")), (group(N, "needs you"), flat(V)[-200:]))
+        check("her status says she is waiting for you, and so does the bar", any("waiting for you" in l for l in V[:2]) and "vera waiting for you" in lines[-1], repr(lines[-1]))
         r.keys("\x1b", settle=0.3)
-        check("esc clears the query and is the cockpit again", r.state()["scope"] == "root" and "› Ask vera" in "\n".join(left(r.lines(), r.lines()[1])[-4:]))
-
-        # 05: command
-        r.keys(":", settle=0.4)
-        r.snap("05-command")
-        body = "\n".join(r.lines())
-        check(": completes every command, now and vera among them", ":go " in body and ":home" in body and ":orbit" in body and ":now" in body and ":vera" in body)
+        check("esc closes her pane; the approvals stay in the navigator", not r.state()["root"]["vera"]["open"] and any("start an agent" in l for l in group(nav(r.lines()), "needs you")))
+        r.keys("g", settle=0.3)
+        r.snap("04-approval")
+        lines = r.lines()
+        I = insp(lines)
+        check("the approval inspected: what she proposed, what it runs, why, her plan, and run it", I[1].strip().startswith("◌ start an agent on the deploy") and any("what vera proposed" in l for l in I) and any("runs       push-t4" in l for l in I) and any("because you asked for" in l for l in I) and any("her plan" in l for l in I) and any("run it" in l for l in I), [l for l in I if l.strip()][:10])
+        r.keys("l", settle=0.3)
+        r.keys("\r", settle=1.4)
+        r.snap("04-ran")
+        lines = r.lines()
+        N = nav(lines)
+        check("run it ran: the card its action pushed is in progress, the approval is gone", any(l.startswith("◐ Deploy api to staging") for l in group(N, "in progress")) and not any("start an agent" in l for l in group(N, "needs you")), group(N, "in progress"))
         r.keys("\x1b", settle=0.3)
 
-        # 06: drill from a card into its exact pane
-        r.keys("`a", settle=0.4)
-        R = right(r.lines(), r.lines()[1])
-        check("prefix-a lands the cursor on the first card in progress", r.state()["root"]["region"] == "dash" and any(l.strip().startswith("▸ ◐ Fix flaky auth") for l in R), [l for l in R if "▸" in l])
+        # 05: ask vera about this — the reference rides the request
+        r.keys("g", settle=0.2)
+        for _ in range(6):
+            if selected_nav(r.lines()) and selected_nav(r.lines())[0].startswith("◐ Fix flaky auth"):
+                break
+            r.keys("j", settle=0.2)
+        r.keys("l", settle=0.3)
+        for _ in range(6):
+            I = insp(r.lines())
+            if any(l.strip().startswith("▸") and "ask vera about this" in l for l in I):
+                break
+            r.keys("j", settle=0.2)
         r.keys("\r", settle=0.5)
-        r.snap("06-drill")
-        st6 = r.state()
-        top = r.lines()[0]
-        check("↵ on the card enters api at the agent's pane", st6["scope"] == "space" and st6["focus"]["pane"] == ids["codex"] and slot_of(top).startswith("  api  │"), (st6["scope"], st6["focus"], repr(top[:30])))
+        r.snap("05-about")
+        lines = r.lines()
+        st5 = r.state()
+        V = vera(lines)
+        check("ask vera about this opens her pane with the task attached as a reference", st5["root"]["vera"]["open"] and st5["root"]["vera"]["about"] == "t2" and any("about" in l and "Fix flaky auth" in l for l in V[:3]), (st5["root"]["vera"], V[:3]))
+        r.keys("why is it slow\r", settle=1.6)
+        lines = r.lines()
+        V = vera(lines)
+        check("the request carried the reference, and she answered about it", "about t2: it is the one in api" in flat(V), flat(V)[-200:])
+        r.keys("\x1b", settle=0.3)
+        r.keys("\x1b", settle=0.3)
+        check("esc clears the attachment, then closes the pane", not r.state()["root"]["vera"]["open"] and r.state()["root"]["vera"]["about"] == "")
 
-        # 07: return, with the cockpit as it was
+        # 06: the lifecycle transition keeps the selection
+        for _ in range(8):
+            if selected_nav(r.lines()) and selected_nav(r.lines())[0].startswith("◐ Deploy api to staging"):
+                break
+            r.keys("j", settle=0.2)
+        check("the new task is selected", selected_nav(r.lines())[0].startswith("◐ Deploy api to staging"), selected_nav(r.lines()))
+        r.rook("side", "-", stdin=rail_frame([T1_ANSWERED] + RAIL[1:] + [T4_DONE], SESSION) + "\n")
+        r.settle(0.7)
+        r.snap("06-completed")
+        lines = r.lines()
+        N, I = nav(lines), insp(lines)
+        check("it finished: moved to recent, still selected, the inspector showing the outcome and the artifact", any(l.startswith("✓ Deploy api to staging") for l in group(N, "recent")) and r.state()["root"]["selected"] == "t:t4" and any("outcome" in l for l in I) and any("staging is on 1.4.2" in l for l in I) and any("https://staging.example.test" in l for l in I), (group(N, "recent"), r.state()["root"]["selected"]))
+
+        # 07: open the workspace, and back with everything kept
+        for _ in range(8):
+            if selected_nav(r.lines()) and selected_nav(r.lines())[0].startswith("◐ Fix flaky auth"):
+                break
+            r.keys("k", settle=0.2)
+        r.keys("l", settle=0.2)
+        r.keys("o", settle=0.5)
+        r.snap("07-drill")
+        st7 = r.state()
+        top = r.lines()[0]
+        check("o opens the exact pane: api, the agent's pane", st7["scope"] == "space" and st7["focus"]["pane"] == ids["codex"] and slot_of(top).startswith("  api  │"), (st7["scope"], st7["focus"]))
+        check("in a space the bar is local: who holds the keys, and one global attention count", "codex ▸ codex owns input" in r.lines()[-1] and "! 1 needs you" in r.lines()[-1] and "session" not in r.lines()[-1], repr(r.lines()[-1]))
+
+        # 08: vera from the workspace, without perturbing it
+        r.keys("`t", settle=0.5)
+        r.snap("08-vera-space")
+        st8 = r.state()
+        lines = r.lines()
+        check("prefix-t in a space opens her pane over the panes, holding the keys, resizing nothing", st8["root"]["vera"]["open"] and st8["root"]["vera"]["keys"] and st8["focus"]["mode"] == "pane" and any("✦ vera" in l for l in lines[1:3]) and {p["id"]: (p["cols"], p["rows"]) for p in st8["panes"]}[ids["codex"]] == sizes_before[ids["codex"]] and "you ▸ vera" in lines[-1], (st8["root"]["vera"], repr(lines[-1][:30])))
+        r.keys("note to self", settle=0.3)
+        r.keys("`t", settle=0.4)
+        st8b = r.state()
+        check("prefix-t dismisses her; the keys are the pane's again; the draft is kept", not st8b["root"]["vera"]["open"] and not st8b["root"]["vera"]["keys"] and st8b["root"]["draft"] and st8b["focus"]["pane"] == ids["codex"], str(st8b["root"]["vera"]))
         r.keys("`o", settle=0.5)
         r.snap("07-return")
-        st7 = r.state()
-        check("prefix-o is home again, the dashboard still focused on its card, the thread intact", st7["scope"] == "root" and st7["root"]["region"] == "dash" and st7["root"]["turns"] >= 6, str(st7["root"]))
-        check("the space kept running, unresized", {p["id"]: (p["cols"], p["rows"]) for p in st7["panes"]}[ids["codex"]] == sizes_before[ids["codex"]])
-        r.keys("\x1b", settle=0.3)
-        r.keys("half a thought", settle=0.3)
-        r.keys("\t", settle=0.2)
-        for _ in range(12):
-            r.keys("\x1b[B", settle=0.1)
-        R = right(r.lines(), r.lines()[1])
-        on_space = any(l.strip().startswith("▸ vera") or l.strip().startswith("▸ infra") or l.strip().startswith("▸ rook") for l in R)
-        r.keys("\r", settle=0.5)
-        check("↵ on a space row enters it", r.state()["scope"] == "space", (on_space, r.state()["scope"]))
-        r.keys("`o", settle=0.5)
-        check("the draft survived the round trip", r.state()["root"]["draft"] and "half a thought" in "\n".join(left(r.lines(), r.lines()[1])[-4:]), str(r.state()["root"]))
+        st7b = r.state()
+        check("prefix-o is home again, the same task selected, the inspector focused, the draft kept", st7b["scope"] == "root" and st7b["root"]["selected"] == "t:t2" and st7b["root"]["region"] == "insp" and st7b["root"]["draft"], str(st7b["root"]))
         r.keys("\x15", settle=0.2)
         r.keys("\x1b", settle=0.3)
 
-        # 08: orbit, a subview, and back to the same home
+        # 09: orbit, and back to the same home
         r.keys("`s", settle=0.8)
-        r.snap("08-orbit")
+        r.snap("09-orbit")
         lines = r.lines()
-        slot = slot_of(lines[0])
-        check("orbit is named in the scope bar, esc rook in the corner, figures on the canvas", slot.startswith("  rook  │  orbit ") and "esc rook" in lines[0] and "┌┤" in "\n".join(lines), repr(slot[:50]))
+        check("orbit is named in the scope bar, esc rook in the corner, figures on the canvas", slot_of(lines[0]).startswith("  rook  │  orbit ") and "esc rook" in lines[0] and "┌┤" in "\n".join(lines), repr(slot_of(lines[0])[:50]))
         r.keys("\x1b", settle=0.4)
-        st8 = r.state()
-        check("esc from orbit is the cockpit again, with its thread", st8["root"]["view"] == "home" and st8["root"]["turns"] >= 6 and "› Ask vera" in "\n".join(left(r.lines(), r.lines()[1])[-4:]), str(st8["root"]))
+        st9 = r.state()
+        check("esc from orbit is home again, the selection kept", st9["root"]["view"] == "home" and st9["root"]["selected"] == "t:t2", str(st9["root"]))
 
-        # 09: inside a space
-        r.enter("vera")
-        r.snap("09-space")
-        lines = r.lines()
-        top, bar = lines[0], lines[-1]
-        slot = slot_of(top)
-        check("in a space the scope slot is the space's chip, then the tabs, then the way out", slot.startswith("  vera  │ ") and chip_bg(r, top, "vera") == RAISED and "`o rook" in top, repr(slot[:40]))
-        cells = selected_tab_cells(r, top, "deploy")
-        check("the selected tab's index, label and mark share one fill and one underline", all(c.bg == RAISED and c.underscore for c in cells), "")
-        check("the calm bar names actor ▸ tool and counts the world", "main ▸ claude" in bar and "◐ 2" in bar and "!2" in bar, repr(bar))
-        r.home()
-
-        # 10: narrow — one view at a time, with the switcher
+        # 10: narrow — the list-to-detail stack
         r.resize(100, 30)
-        r.snap("10-narrow-vera")
+        r.snap("10-narrow-list")
         lines = r.lines()
-        L = [slot_of(l) for l in lines]
         st10 = r.state()
-        check("narrow glass shows one view: vera first, with the switcher and the attention badge on now", not st10["root"]["wide"] and "vera" in L[1] and re.search(r"now !\s*\d", L[1]) and "│" not in "".join(lines[3:6]).replace("┃", ""), L[1])
-        check("the composer is still at the foot", "› Ask vera" in "\n".join(L[-4:]))
-        r.keys("\t", settle=0.4)
-        r.snap("10-narrow-now")
+        check("narrow glass is the list alone, the selection kept", not st10["root"]["wide"] and len(dividers(lines)) == 0 and any("needs you" in l for l in lines) and selected_nav(lines), str(st10["root"]))
+        r.keys("l", settle=0.4)
+        r.snap("10-narrow-detail")
         lines = r.lines()
-        L = [slot_of(l) for l in lines]
-        check("tab switches to now: the same modules, cards, selection", r.state()["root"]["region"] == "dash" and "needs you" in "\n".join(L) and "in progress" in "\n".join(L) and any("▸" in l for l in L), L[1])
-        r.keys("\t", settle=0.3); r.keys("\t", settle=0.3)
-        check("tab again is vera again, the thread scrolled to its foot", r.state()["root"]["region"] == "composer" and "› Ask vera" in "\n".join([slot_of(l) for l in r.lines()][-4:]))
-        r.keys("\x1b", settle=0.3)
-        r.keys("`s", settle=0.8)
-        r.snap("10-narrow-orbit")
-        lines = r.lines()
-        check("narrow orbit is the ledger, and says so", "ledger" in lines[-1] and "ledger" in lines[0], repr(lines[-1]) + repr(lines[0]))
+        check("l is the detail, full width, with the way back", r.state()["root"]["detail"] and any("h ‹ list" in l for l in lines[1:3]) and "◐ Fix flaky auth" in "\n".join(lines[1:4]), lines[1:4])
+        r.keys("h", settle=0.3)
+        check("h is the list again", not r.state()["root"]["detail"] and r.state()["root"]["region"] == "nav")
+        r.keys("`t", settle=0.4)
+        r.snap("10-narrow-vera")
+        check("narrow: vera is a full-width view, and the bar keeps the attention count", any("✦ vera" in l for l in r.lines()[1:3]) and "need" in r.lines()[-1], repr(r.lines()[-1]))
         r.keys("\x1b", settle=0.3)
 
-        # 11: wide
-        r.resize(220, 50)
-        r.snap("11-wide")
+        # 11: wide, pinned: three columns when all three fit
+        r.resize(240, 50)
+        r.keys("`T", settle=0.5)
+        r.snap("11-wide-pinned")
         lines = r.lines()
-        L, R = left(lines, lines[1]), right(lines, lines[1])
-        region_w = 220 - lines[1].index("┃") - 1
-        check("wide: the split holds its ratio, the cards do not stretch into boxes", abs((lines[1].rindex("│") - lines[1].index("┃") - 1) - region_w * 62 // 100) <= 1 and any(l.strip() == "◐ Fix flaky auth" for l in R), (lines[1].rindex("│"), lines[1].index("┃"), region_w))
+        st11 = r.state()
+        check("pinned on a wide glass, vera is a third column, every region at its floor or above", st11["root"]["vera"]["pinned"] and len(dividers(lines)) == 2 and dividers(lines)[1] - dividers(lines)[0] >= 50 and 240 - dividers(lines)[1] >= 40 and any("pinned" in l for l in vera(lines)[:2]), dividers(lines))
+        r.keys("`t", settle=0.3)
+        to_vera = r.state()["root"]["region"]
+        r.keys("`t", settle=0.3)
+        check("pinned, prefix-t only moves focus, there and back", r.state()["root"]["vera"]["pinned"] and to_vera == "vera" and r.state()["root"]["region"] == "nav", (to_vera, r.state()["root"]["region"]))
+        r.resize(180, 40)
+        r.snap("11-pinned-fallback")
+        lines = r.lines()
+        check("pinned without room for three, she overlays instead of crushing the regions", len(dividers(lines)) == 2 and dividers(lines)[0] - lines[0].index("┃") >= 30 and any("pinned" in l for l in vera(lines)[:2]), dividers(lines))
+        r.keys("`T", settle=0.3)
+        r.keys("\x1b", settle=0.3)
+        r.keys("\x1b", settle=0.3)
     finally:
         r.close()
 
-    # ---- 26: the current-state equivalent — two spaces, one task, two idle claude panes
+    # ---- 26: the current-state equivalent — two spaces, one task, idle
+    # claude panes, a short conversation
     r0 = Rook(cols=160, rows=42, tag="base")
     try:
         r0.rook("new", "-q", "api"); r0.settle(0.4)
@@ -687,46 +714,57 @@ def main():
         r0.rook("run", str(first["api"]), "exec codex -c 'while :; do echo \"✗ revoked session rejected\"; sleep 1; done'")
         r0.settle(2.6)
         r0.rook("side", "-", stdin=rail_frame([RAIL[1]]) + "\n"); r0.settle(0.6)
+        r0.keys("what is running\r", settle=1.6)
+        r0.keys("\x1b", settle=0.4)
         r0.snap("26-one-task")
         lines = r0.lines()
-        R = right(lines, lines[1])
-        check("one task, two idle claude panes: one card, no phantom tasks, no duplicate space row", module(R, "in progress")[0] == "◐ Fix flaky auth" and len(module(R, "in progress")) == 3 and "needs you" not in "\n".join(R) and not any("at work" in l or "goal unknown" in l for l in R) and any(l.startswith("api") and "codex ◐ · claude" in l for l in module(R, "spaces")), R[:14])
+        N, I = nav(lines), insp(lines)
+        check("one task, two idle claude panes, a conversation: one row in progress, no phantom tasks, the detail beside it, vera dismissed", group(N, "in progress")[0].startswith("◐ Fix flaky auth") and len(group(N, "in progress")) == 1 and "needs you" not in "\n".join(N) and not any("at work" in l for l in N) and "Make the revoked-session test" in "\n".join(I) and r0.state()["root"]["turns"] == 2 and not r0.state()["root"]["vera"]["open"], (group(N, "in progress"), r0.state()["root"]))
+        check("the bar reports what it can: one active agent, the one task's usage as the session's, no attention", "agents ◐ 1 active" in lines[-1] and "session $0.31 · 41k tokens" in lines[-1] and "need" not in lines[-1], repr(lines[-1]))
     finally:
         r0.close()
 
-    # ---- 23: needs you — an approval, a failed task, a blocked task, prioritised
+    # ---- 23: needs you — an approval, a blocked task, a failed task
     r1 = Rook(cols=160, rows=40, tag="needs")
     try:
         r1.rook("new", "-q", "api"); r1.settle(0.4)
         r1.rook("side", "-", stdin=rail_frame([
-            {"id": "b1", "title": "Migrate the sessions table", "state": "waiting", "workspace": "api", "actor": "claude", "event": "needs a go-ahead before it drops the old index"},
-            {"id": "f1", "title": "Backfill the audit log", "state": "failed", "workspace": "api", "actor": "codex", "event": "exit 1 · disk full on the runner"},
+            {"id": "b1", "title": "Migrate the sessions table", "state": "waiting", "workspace": "api", "actor": "claude", "question": "Drop the old index before the backfill, or after?", "options": [{"label": "before", "run": "echo before"}, {"label": "after", "run": "echo after"}], "event": "needs a go-ahead before it drops the old index"},
+            {"id": "f1", "title": "Backfill the audit log", "state": "failed", "workspace": "api", "actor": "codex", "event": "exit 1 · disk full on the runner", "events": [{"ms": NOW_MS - 30000, "text": "runner out of disk at 93%"}], "actions": [{"label": "retry", "run": "echo retried f1", "kind": "retry"}, {"label": "redirect to the big runner", "run": "echo redirected", "kind": "redirect"}]},
             {"id": "w1", "title": "Write the release notes", "state": "working", "workspace": "main", "actor": "claude", "event": "reading the last twenty commits"},
-        ]) + "\n"); r1.settle(0.5)
-        r1.keys("deploy it\r", settle=1.5)
+        ], {"tokens": 12345678, "cost": 123.45}) + "\n"); r1.settle(0.5)
+        r1.keys("deploy it\r", settle=1.6)
+        r1.keys("\x1b", settle=0.3)
         r1.snap("23-needs-you")
         lines = r1.lines()
-        L, R = left(lines, lines[1]), right(lines, lines[1])
-        needs = module(R, "needs you")
-        check("needs you: the approvals first, then the blocked and the failed, each with its reason", needs[0].startswith("◌ start an agent") and any(l.startswith("! Migrate the sessions table") for l in needs) and any(l.startswith("✕ Backfill the audit log") for l in needs) and any("disk full on the runner" in l for l in needs), needs)
-        check("the header counts them", "now · ! 4 need you" in R[1], R[1])
-        check("a failed task is a card with the failed mark, a blocked one with attention; neither looks like an idle pane", any(l.startswith("✕") for l in needs) and any(l.startswith("!") for l in needs))
+        N = nav(lines)
+        needs = group(N, "needs you")
+        check("needs you: the approvals first, then the blocked and the failed", needs[0].startswith("◌ start an agent") and any(l.startswith("! Migrate the sessions table") for l in needs) and any(l.startswith("✕ Backfill the audit log") for l in needs), needs)
+        check("the bar: attention, failed, a high spend with its period", "! 4 need you" in lines[-1] and "✕ 1 failed" in lines[-1] and "session $123.45 · 12.3M tokens" in lines[-1], repr(lines[-1]))
+        for _ in range(6):
+            if selected_nav(r1.lines()) and selected_nav(r1.lines())[0].startswith("✕ Backfill"):
+                break
+            r1.keys("j", settle=0.2)
+        r1.snap("23-failed")
+        I = insp(r1.lines())
+        body = "\n".join(I)
+        check("failed detail: what went wrong, the last event, retry and redirect as controls, the space to open", "what went wrong" in body and "disk full on the runner" in body and "runner out of disk" in body and any("◐ retry" in l for l in I) and any("redirect to the big runner" in l for l in I) and any("open the space" in l for l in I), [l for l in I if l.strip()][:12])
     finally:
         r1.close()
 
     # ---- 27: the breakpoint, just above and just below
-    for cols, wide in ((85, True), (84, False)):
+    for cols, wide in ((81, True), (80, False)):
         r2 = Rook(cols=cols, rows=30, tag="bp%d" % cols)
         try:
             r2.rook("side", "-", stdin=rail_frame([RAIL[1]]) + "\n"); r2.settle(0.4)
             r2.snap("27-breakpoint-%d" % cols)
             st = r2.state()
             lines = r2.lines()
-            check("at %d columns the layout is %s" % (cols, "split" if wide else "one view"), st["root"]["wide"] == wide and (("│" in lines[5]) == wide), (st["root"]["wide"], lines[1]))
+            check("at %d columns the layout is %s" % (cols, "navigator and inspector" if wide else "the list"), st["root"]["wide"] == wide and ((len(dividers(lines)) == 1) == wide), (st["root"]["wide"], dividers(lines)))
         finally:
             r2.close()
 
-    # ---- 12: quiet — nothing running, one finished thing, some history
+    # ---- 12: quiet — nothing running, one finished thing
     r3 = Rook(cols=120, rows=30, tag="quiet")
     try:
         r3.keys(":go main\r", settle=0.4)
@@ -736,33 +774,30 @@ def main():
         r3.settle(0.5)
         r3.snap("12-quiet")
         lines = r3.lines()
-        L, R = left(lines, lines[1]), right(lines, lines[1])
-        body = "\n".join(R)
-        check("quiet home: no needs-you or in-progress module reserved, one recent result, the space with its age", "needs you" not in body and "in progress" not in body and "✓ Tidy the changelog · 3 entries" in body and any(l.startswith("main") and "bash" in l for l in module(R, "spaces")), R[:10])
-        check("the conversation side is honest and empty", "say what should happen" in "\n".join(L) and "1 space · all quiet" in lines[0])
-        check("nothing is invented to look alive", "◐" not in body and "!" not in body)
+        N, I = nav(lines), insp(lines)
+        check("quiet home: no needs-you or in-progress group, one recent row selected, its outcome inspected", "needs you" not in "\n".join(N) and "in progress" not in "\n".join(N) and group(N, "recent") == ["✓ Tidy the changelog"] and any("outcome" in l for l in I) and any("3 entries" in l for l in I), (group(N, "recent"), [l for l in I if l.strip()][:5]))
+        check("the bar at rest collapses its warnings: no attention, no failed, no agents, vera ready", "need" not in lines[-1] and "failed" not in lines[-1] and "agents" not in lines[-1] and "vera ready" in lines[-1], repr(lines[-1]))
+        check("nothing is invented to look alive", "◐" not in "\n".join(N) and "!" not in "\n".join(N))
     finally:
         r3.close()
 
-    # ---- 25: long content — long titles, a long message, many cards
-    r4 = Rook(cols=130, rows=26, tag="long")
+    # ---- 25: long content — long titles, many rows, a long inspector
+    r4 = Rook(cols=130, rows=18, tag="long")
     try:
-        items = [{"id": "l%d" % i, "title": "A task with a deliberately long goal that says exactly what it means to do number %d" % i, "state": "working", "workspace": "main", "actor": "claude", "event": "step %d of a long plan whose current step is also described at some length" % i} for i in range(6)]
-        r4.rook("side", "-", stdin=rail_frame(items) + "\n"); r4.settle(0.4)
-        r4.keys("a long question about what is going on and whether the long plan is long\r", settle=1.6)
+        items = [{"id": "l%d" % i, "title": "A task with a deliberately long goal that says exactly what it means to do number %d" % i, "state": "working", "workspace": "main", "actor": "claude", "event": "step %d of a long plan whose current step is also described at some length" % i, "events": [{"ms": NOW_MS - 1000 * k, "text": "event %d of task %d with a long description" % (k, i)} for k in range(12)], "files": ["dir/file%d.go" % k for k in range(12)]} for i in range(14)]
+        r4.rook("side", "-", stdin=rail_frame(items) + "\n"); r4.settle(0.5)
         r4.snap("25-long")
         lines = r4.lines()
-        L, R = left(lines, lines[1]), right(lines, lines[1])
-        body = "\n".join(L)
-        flat = re.sub(r"\s+", " ", " ".join(re.sub(r"\s+\d+[smhd]$", "", l.rstrip()) for l in L))
-        check("a long reply wraps inside the conversation, whole", "keeps going so that the thread has to wrap it" in flat and "the third is short." in flat and "whether the long plan is long" in flat and not any(len(l) > 130 for l in lines), flat[-160:])
-        check("long titles are cut, not wrapped into boxes; the dashboard says how many more", any("A task with a deliberately long" in l for l in R) and any("more" in l for l in R), [l for l in R if "more" in l])
-        r4.keys("\t", settle=0.3)
-        for _ in range(8):
-            r4.keys("\x1b[B", settle=0.1)
+        N, I = nav(lines), insp(lines)
+        check("long titles are cut, the navigator says how many more, the inspector wraps and says how many more", any("A task with a deliberately long" in l for l in N) and any("more" in l for l in N[-3:]) and any("more · j k" in l for l in I[-2:]), (N[-2:], I[-2:]))
+        r4.keys("G", settle=0.3)
+        r4.snap("25-long-end")
+        check("G is the last row, scrolled into view, its detail beside it", selected_nav(r4.lines()) and r4.state()["root"]["selected"].startswith("t:") or r4.state()["root"]["selected"].startswith("s:"), r4.state()["root"]["selected"])
+        r4.keys("g", settle=0.2)
+        r4.keys("l", settle=0.2)
+        r4.keys("\x1b[6~", settle=0.3)
         r4.snap("25-long-scrolled")
-        R = right(r4.lines(), r4.lines()[1])
-        check("the dashboard scrolls to keep the selected card in view, independently of the thread", any(l.strip().startswith("▸") for l in R), [l for l in R if "▸" in l])
+        check("page down scrolls the inspector on its own", insp(r4.lines())[1].strip() != "◐ A task with a deliberately long goal that says exactly what it means to do number 0", insp(r4.lines())[1])
     finally:
         r4.close()
 
@@ -771,9 +806,9 @@ def main():
     try:
         r5.snap("13-cold")
         st = r5.state()
-        body = "\n".join(r5.lines())
-        check("cold start lands at home with vera ready", st["scope"] == "root" and "✦ vera · ready" in body and "Ask vera…" in body and "is not on PATH" not in body)
-        check("cold start has one space, main, made quietly, and no phantom work", "1 space" in r5.lines()[0] and "nothing running, nothing needs you" in body)
+        lines = r5.lines()
+        I = insp(lines)
+        check("cold start lands at home: the one space inspected, honest, and what there is to do", st["scope"] == "root" and "all quiet" in "\n".join(nav(lines)) and "no task the rail knows runs here" in flat(I) and "to do something" in flat(I) and "ask vera" in flat(I) and "vera ready" in lines[-1], [l for l in I if l.strip()][:8])
     finally:
         r5.close()
 
@@ -781,20 +816,21 @@ def main():
     r6 = Rook(cols=100, rows=24, tag="offline", vera=False)
     try:
         r6.snap("14-offline")
-        body = "\n".join(r6.lines())
-        check("without vera the header and the composer say so, and the grammar stays", "✦ vera · ✕ offline — not on PATH" in body and "vera is not on PATH — / find · : command" in body)
-        r6.keys("hello there\r", settle=0.5)
+        lines = r6.lines()
+        check("without vera the bar says so and the navigator and the inspector are whole", "vera offline" in lines[-1] and any("spaces" in l for l in nav(lines)) and any("to do something" in l for l in insp(lines)), repr(lines[-1]))
+        r6.keys("say hello\r", settle=0.5)
         r6.snap("14-offline-asked")
-        body = "\n".join(r6.lines())
-        check("a request with nobody to send it to is a failed turn, and nothing was sent", "nothing was sent" in body and r6.state()["root"]["ask"] == "offline" and r6.state()["root"]["turns"] == 2)
+        V = vera(r6.lines())
+        check("typing summons her pane, which says she is not on PATH, and nothing was sent", r6.state()["root"]["vera"]["open"] and "✕ offline" in flat(V) and "not on PATH" in flat(V) and "nothing was sent" in flat(V) and r6.state()["root"]["ask"] == "offline", flat(V)[:200])
+        r6.keys("\x1b", settle=0.3)
         r6.keys("/ma", settle=0.4)
         check("find still works offline", "main" in "\n".join(r6.lines()[3:8]))
         r6.keys("\x1b", settle=0.3)
         r6.keys(":go main\r", settle=0.4)
         check("commands still work offline: :go enters the space", r6.state()["scope"] == "space")
         r6.keys("`o", settle=0.3)
-        r6.keys("\t", settle=0.3)
-        check("the dashboard still works offline", r6.state()["root"]["region"] == "dash")
+        r6.keys("l", settle=0.3)
+        check("the inspector still works offline", r6.state()["root"]["region"] == "insp")
     finally:
         r6.close()
 
@@ -831,11 +867,11 @@ def main():
         r9.keys("`o", settle=0.6)
         r9.snap("17-home-from-rook")
         lines = r9.lines()
-        check("home from it: the system's chip is the accent, and the space is a plain row", chip_bg(r9, lines[0], "rook") == ACCENT and any(l.strip().startswith("rook") for l in right(lines, lines[1])[3:]) and "esc" not in lines[0], repr(lines[0]))
+        check("home from it: the system's chip is the accent, and the space is a plain row", chip_bg(r9, lines[0], "rook") == ACCENT and any(l.strip().startswith("rook") for l in nav(lines)[3:]) and "esc" not in lines[0], repr(lines[0]))
     finally:
         r9.close()
 
-    # ---- 18: the tab component's states, the ladder, global attention inside a space
+    # ---- 18: the tab component's states, the ladder, the local bar
     r10 = Rook(cols=120, rows=24, tag="tabs", attach=["attach", "--space", "main"])
     try:
         first = r10.state()["focus"]["pane"]
@@ -855,7 +891,7 @@ def main():
         top, bar = r10.lines()[0], r10.lines()[-1]
         check("five states on one bar: long name, unread, working selected, attention, calm",
               "1 a long user-given tab" in top and "2 bash •" in top and "3 claude ◐" in top and "4 claude·2 !" in top and "5 bash   +" in top, repr(top))
-        check("inside a space the bar still counts the attention owed elsewhere", "!1" in bar and "•1" in bar, repr(bar[-30:]))
+        check("inside a space the bar is local, with the one global attention count", bar.startswith(" you ▸ claude") and "◐ 1" in bar and "! 1 needs you" in bar and "•1" in bar and "session" not in bar, repr(bar))
         r10.resize(84, 24)
         r10.snap("18-tabs-narrow")
         top = r10.lines()[0]
@@ -872,7 +908,7 @@ def main():
     try:
         r11.snap("19-ascii-home")
         body = "\n".join(r11.lines())
-        check("ascii: home draws with ascii glyphs", "> Ask vera" in body and "◐" not in body and "↵" not in body and "⇥" not in body and "✦" not in body, "")
+        check("ascii: home draws with ascii glyphs", "|" in r11.lines()[1] and "◐" not in body and "↵" not in body and "⇥" not in body and "✦" not in body and "▎" not in body, "")
         r11.keys(":go main\r", settle=0.4)
         first = r11.state()["focus"]["pane"]
         w2 = json.loads(r11.rook("window", str(first)))["pane"]
@@ -892,7 +928,7 @@ def main():
         r12.keys("`i", settle=0.5)
         r12.snap("20-inspector")
         body = "\n".join(r12.lines())
-        check("the inspector is a bounded elevated box over the output", "┤ inspector" in body and "you — nobody claims this pane" in body)
+        check("the pane inspector is a bounded elevated box over the output", "┤ inspector" in body and "you — nobody claims this pane" in body)
         r12.keys("x", settle=0.3)
         pid = r12.state()["focus"]["pane"]
         r12.rook("own", str(pid), "main"); r12.keys("z", settle=0.5)
@@ -915,9 +951,8 @@ def main():
         r13.keys("`o", settle=0.5)
         r13.snap("21-split-home")
         lines = r13.lines()
-        R = right(lines, lines[1])
-        active = module(R, "in progress")
-        check("home shows the agent rook found producing as one quiet card, without a goal it does not have", active[0] == "◐ claude at work" and "main · claude · producing" in active[1] and "no task was pushed for it" in " ".join(active[2:]) and "goal unknown" not in "\n".join(R), active)
+        N, I = nav(lines), insp(lines)
+        check("home lists the agent rook found producing as one quiet row, and the inspector says what it can and cannot know", group(N, "in progress")[0].startswith("◐ claude at work") and "rook can say only what it sees" in flat(I) and "its pane claude" in flat(I) and "goal unknown" not in flat(I), (group(N, "in progress"), [l for l in I if l.strip()][:5]))
     finally:
         r13.close()
 

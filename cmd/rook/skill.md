@@ -122,8 +122,9 @@ to drive, and never claim the pane the person is typing in.
 ```sh
 rook ls                        # workspace names
 rook new -q NAME [DIR]         # create one without moving the person
-rook switch NAME               # (a person lands at home; rook . or
-                               #  rook --space NAME land them in a space)
+rook switch NAME               # (a person lands at home — a work navigator
+                               #  and an inspector; rook . or rook --space
+                               #  NAME land them in a space)
 rook rename NAME               # name the current tab (a tab is named once;
                                # rook never renames it after that)
 ```

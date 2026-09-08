@@ -96,16 +96,29 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
     // input's first character makes of the draft, and where the
     // request stands. The draft itself is not published: it is the
     // person's, half typed.
-    out.print(gpa, ",\"scope\":\"{s}\",\"root\":{{\"view\":\"{s}\",\"mode\":\"{s}\",\"ask\":\"{s}\",\"region\":\"{s}\",\"wide\":{s},\"turns\":{d},\"draft\":{s}}}", .{
+    var kb: [72]u8 = undefined;
+    const sel_key: []const u8 = if (sv.alt.home.selectedRow()) |r| sv.alt.home.rowKey(r, &kb) else "";
+    out.print(gpa, ",\"scope\":\"{s}\",\"root\":{{\"view\":\"{s}\",\"mode\":\"{s}\",\"ask\":\"{s}\",\"region\":\"{s}\",\"wide\":{s},\"detail\":{s},\"turns\":{d},\"draft\":{s},\"selected\":", .{
         if (sv.at_root) "root" else "space",
         sv.alt.view.word(),
         sv.alt.mode().word(),
         @tagName(sv.alt.req.state),
         @tagName(sv.alt.home.focus),
         boolStr(sv.alt.home.wide),
+        boolStr(sv.alt.home.detail),
         sv.alt.home.thread.count(),
         boolStr(sv.alt.len > 0),
     }) catch return;
+    str(gpa, out, sel_key);
+    // vera's pane: summoned, pinned, holding the keys in a space, and
+    // what the next request is about
+    out.print(gpa, ",\"vera\":{{\"open\":{s},\"pinned\":{s},\"keys\":{s},\"about\":", .{
+        boolStr(sv.alt.home.vera_open),
+        boolStr(sv.alt.home.vera_pinned),
+        boolStr(sv.vera_keys or (sv.at_root and sv.alt.home.focus == .vera and sv.alt.home.veraShown())),
+    }) catch return;
+    str(gpa, out, sv.alt.home.aboutTask());
+    out.appendSlice(gpa, "}}") catch return;
     // The calm bar, so a second glass lays its rows out the same way.
     out.print(gpa, ",\"bar\":{s}", .{boolStr(sv.barOn())}) catch return;
 

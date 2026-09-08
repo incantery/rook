@@ -288,6 +288,24 @@ pub const Item = struct {
     actor: []const u8 = "",
     event: []const u8 = "",
     result: []const u8 = "",
+    /// The detail a producer may add for the inspector, every field
+    /// optional and shown only when given: a longer goal; when it
+    /// started; the plan as steps; a timeline of events; files,
+    /// commits, tests, artifacts; token and cost usage; a question
+    /// with the options a person may pick; the controls the producer
+    /// supports, each a command rook runs on ↵ — never implied.
+    goal: []const u8 = "",
+    started_ms: i64 = 0,
+    plan: []const Step = &.{},
+    events: []const Event = &.{},
+    files: []const []const u8 = &.{},
+    commits: []const []const u8 = &.{},
+    tests: []const u8 = "",
+    artifacts: []const Artifact = &.{},
+    usage: ?Usage = null,
+    question: []const u8 = "",
+    options: []const Control = &.{},
+    controls: []const Control = &.{},
 
     /// The workspace this row points at: the explicit `ws` when one
     /// was named, else the row's name. It is what a click on the row
@@ -426,8 +444,35 @@ pub fn borrowLabel(row: *Item, agents: []const Item, buf: []u8) bool {
     return true;
 }
 
+/// One step of a producer's plan.
+pub const Step = struct { text: []const u8, done: bool = false };
+/// One event on a task's timeline: when (epoch ms, 0 unknown), what.
+pub const Event = struct { ms: i64 = 0, text: []const u8 };
+pub const Artifact = struct { label: []const u8, url: []const u8 = "" };
+/// Tokens and cost, as a producer counts them. Cost in cents.
+pub const Usage = struct {
+    tokens: u64 = 0,
+    cents: u64 = 0,
+    pub fn add(self: *Usage, o: Usage) void {
+        self.tokens += o.tokens;
+        self.cents += o.cents;
+    }
+};
+/// A control the producer supports: what it is called, and the
+/// command rook runs when a person confirms it. `kind` says what it
+/// does, for the mark and the order: an answer, or a lifecycle move.
+pub const Control = struct {
+    label: []const u8,
+    run: []const u8,
+    kind: enum { answer, pause, @"resume", stop, retry, redirect, review, other } = .other,
+};
+
 pub const Panel = struct {
     title: []const u8,
+    /// Session usage the producer reports for the whole frame, when
+    /// it does: the calm bar's `session` module reads it. Null means
+    /// the producer said nothing and the module stays off.
+    session: ?Usage = null,
     /// Right-aligned note in the header row ("grouped").
     note: []const u8 = "",
     items: []const Item = &.{},
@@ -789,6 +834,120 @@ fn objObj(o: std.json.ObjectMap, key: []const u8) ?std.json.ObjectMap {
     };
 }
 
+fn objInt(o: std.json.ObjectMap, key: []const u8) ?i64 {
+    const v = o.get(key) orelse return null;
+    return switch (v) {
+        .integer => |i| i,
+        .float => |f| @intFromFloat(f),
+        else => null,
+    };
+}
+
+fn objFloat(o: std.json.ObjectMap, key: []const u8) ?f64 {
+    const v = o.get(key) orelse return null;
+    return switch (v) {
+        .integer => |i| @floatFromInt(i),
+        .float => |f| f,
+        else => null,
+    };
+}
+
+fn parseUsage(o: std.json.ObjectMap) Usage {
+    var u: Usage = .{};
+    if (objInt(o, "tokens")) |n| u.tokens = @intCast(@max(0, n));
+    if (objFloat(o, "cost")) |c| u.cents = @intFromFloat(@max(0, c) * 100 + 0.5);
+    if (objInt(o, "cents")) |c| u.cents = @intCast(@max(0, c));
+    return u;
+}
+
+fn parseStrings(a: std.mem.Allocator, o: std.json.ObjectMap, key: []const u8) ![]const []const u8 {
+    const arr = switch (o.get(key) orelse return &.{}) {
+        .array => |x| x,
+        else => return &.{},
+    };
+    var out: std.ArrayList([]const u8) = .empty;
+    for (arr.items) |v| {
+        switch (v) {
+            .string => |s| try out.append(a, s),
+            .object => |so| if (objStr(so, "path") orelse objStr(so, "text") orelse objStr(so, "title")) |s| try out.append(a, s),
+            else => {},
+        }
+    }
+    return out.items;
+}
+
+/// `["step", {"text":"step","done":true}]`
+fn parseSteps(a: std.mem.Allocator, o: std.json.ObjectMap) ![]const Step {
+    const arr = switch (o.get("plan") orelse return &.{}) {
+        .array => |x| x,
+        else => return &.{},
+    };
+    var out: std.ArrayList(Step) = .empty;
+    for (arr.items) |v| {
+        switch (v) {
+            .string => |s| try out.append(a, .{ .text = s }),
+            .object => |so| if (objStr(so, "text") orelse objStr(so, "step")) |s| try out.append(a, .{ .text = s, .done = objBool(so, "done") }),
+            else => {},
+        }
+    }
+    return out.items;
+}
+
+/// `[{"ms":…,"text":"…"}, "…"]`, oldest first as pushed
+fn parseEvents(a: std.mem.Allocator, o: std.json.ObjectMap) ![]const Event {
+    const arr = switch (o.get("events") orelse return &.{}) {
+        .array => |x| x,
+        else => return &.{},
+    };
+    var out: std.ArrayList(Event) = .empty;
+    for (arr.items) |v| {
+        switch (v) {
+            .string => |s| try out.append(a, .{ .text = s }),
+            .object => |so| if (objStr(so, "text")) |s| try out.append(a, .{ .ms = objInt(so, "ms") orelse 0, .text = s }),
+            else => {},
+        }
+    }
+    return out.items;
+}
+
+fn parseArtifacts(a: std.mem.Allocator, o: std.json.ObjectMap) ![]const Artifact {
+    const arr = switch (o.get("artifacts") orelse return &.{}) {
+        .array => |x| x,
+        else => return &.{},
+    };
+    var out: std.ArrayList(Artifact) = .empty;
+    for (arr.items) |v| {
+        switch (v) {
+            .string => |s| try out.append(a, .{ .label = s }),
+            .object => |so| if (objStr(so, "label") orelse objStr(so, "url")) |s| try out.append(a, .{ .label = s, .url = objStr(so, "url") orelse "" }),
+            else => {},
+        }
+    }
+    return out.items;
+}
+
+/// `[{"label":"approve","run":"vera task answer t1 yes","kind":"answer"}]`
+fn parseControls(a: std.mem.Allocator, o: std.json.ObjectMap, key: []const u8, default_kind: @TypeOf(@as(Control, undefined).kind)) ![]const Control {
+    const arr = switch (o.get(key) orelse return &.{}) {
+        .array => |x| x,
+        else => return &.{},
+    };
+    var out: std.ArrayList(Control) = .empty;
+    for (arr.items) |v| {
+        const so = switch (v) {
+            .object => |m| m,
+            else => continue,
+        };
+        const run = objStr(so, "run") orelse continue;
+        var c: Control = .{ .label = objStr(so, "label") orelse run, .run = run, .kind = default_kind };
+        if (objStr(so, "kind")) |k| {
+            c.kind = if (std.mem.eql(u8, k, "answer")) .answer else if (std.mem.eql(u8, k, "pause")) .pause else if (std.mem.eql(u8, k, "resume")) .@"resume" else if (std.mem.eql(u8, k, "stop")) .stop else if (std.mem.eql(u8, k, "retry")) .retry else if (std.mem.eql(u8, k, "redirect")) .redirect else if (std.mem.eql(u8, k, "review")) .review else .other;
+        }
+        try out.append(a, c);
+    }
+    return out.items;
+}
+
 fn objBool(o: std.json.ObjectMap, key: []const u8) bool {
     return switch (o.get(key) orelse return false) {
         .bool => |b| b,
@@ -829,6 +988,7 @@ fn parseFrame(a: std.mem.Allocator, bytes: []const u8) PushError!Parsed {
 
     var items: std.ArrayList(Item) = .empty;
     var cur: ?usize = null;
+    const session: ?Usage = if (objObj(body, "session")) |so| parseUsage(so) else null;
     for (arr.items) |v| {
         const o = switch (v) {
             .object => |m| m,
@@ -851,6 +1011,18 @@ fn parseFrame(a: std.mem.Allocator, bytes: []const u8) PushError!Parsed {
             .actor = objStr(o, "actor") orelse "",
             .event = objStr(o, "event") orelse "",
             .result = objStr(o, "result") orelse "",
+            .goal = objStr(o, "goal") orelse "",
+            .started_ms = objInt(o, "started") orelse 0,
+            .plan = try parseSteps(a, o),
+            .events = try parseEvents(a, o),
+            .files = try parseStrings(a, o, "files"),
+            .commits = try parseStrings(a, o, "commits"),
+            .tests = objStr(o, "tests") orelse "",
+            .artifacts = try parseArtifacts(a, o),
+            .usage = if (objObj(o, "usage")) |uo| parseUsage(uo) else null,
+            .question = objStr(o, "question") orelse "",
+            .options = try parseControls(a, o, "options", .answer),
+            .controls = try parseControls(a, o, "actions", .other),
         });
     }
 
@@ -862,6 +1034,7 @@ fn parseFrame(a: std.mem.Allocator, bytes: []const u8) PushError!Parsed {
             .items = items.items,
             .cur = cur,
             .hint = "no items",
+            .session = session,
         },
     };
 }

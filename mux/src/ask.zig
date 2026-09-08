@@ -42,6 +42,8 @@ extern "c" fn open(path: [*:0]const u8, flags: c_int, mode: c_int) c_int;
 extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
 extern "c" fn getdtablesize() c_int;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
 const WNOHANG: c_int = 1;
 const X_OK: c_int = 1;
@@ -67,11 +69,31 @@ pub const Job = struct {
     started_ms: i64 = 0,
 
     /// `sh -c '<cmd> "$0"' -- <text>`: the command as configured, the
-    /// text as one argument, no quoting of the text by rook.
-    pub fn spawn(cmd: []const u8, text: []const u8) !Job {
+    /// text as one argument, no quoting of the text by rook. What
+    /// the request is *about* — a task by its rail id, a space by
+    /// name — rides the environment as `ROOK_ABOUT_TASK` and
+    /// `ROOK_ABOUT_SPACE`: a structured reference, not words pasted
+    /// into the text, so the companion can look the thing up.
+    pub fn spawn(cmd: []const u8, text: []const u8, about_task: []const u8, about_space: []const u8) !Job {
         var line_buf: [1024]u8 = undefined;
         const line = std.fmt.bufPrintZ(&line_buf, "{s} \"$0\"", .{cmd}) catch return error.TooLong;
+        setAbout("ROOK_ABOUT_TASK", about_task);
+        setAbout("ROOK_ABOUT_SPACE", about_space);
+        defer {
+            _ = unsetenv("ROOK_ABOUT_TASK");
+            _ = unsetenv("ROOK_ABOUT_SPACE");
+        }
         return spawnShell(line, text);
+    }
+
+    fn setAbout(name: [*:0]const u8, value: []const u8) void {
+        if (value.len == 0) {
+            _ = unsetenv(name);
+            return;
+        }
+        var z: [128]u8 = undefined;
+        const v = std.fmt.bufPrintZ(&z, "{s}", .{value}) catch return;
+        _ = setenv(name, v, 1);
     }
 
     /// `sh -c '<line>'`: an action's command, verbatim.
@@ -383,9 +405,10 @@ pub const Request = struct {
         return self.note[0..self.note_len];
     }
 
-    /// Send `text` through `cmd`. A command that cannot be found is
-    /// `offline` at once; one that cannot be forked is `failed`.
-    pub fn send(self: *Request, cmd: []const u8, text: []const u8) void {
+    /// Send `text` through `cmd`, about a task and a space when it is
+    /// about one. A command that cannot be found is `offline` at
+    /// once; one that cannot be forked is `failed`.
+    pub fn send(self: *Request, cmd: []const u8, text: []const u8, about_task: []const u8, about_space: []const u8) void {
         self.cancel();
         self.* = .{};
         self.text_len = take(&self.text, text);
@@ -395,7 +418,7 @@ pub const Request = struct {
             self.ended_ms = self.started_ms;
             return;
         }
-        self.job = Job.spawn(cmd, self.textSlice()) catch {
+        self.job = Job.spawn(cmd, self.textSlice(), about_task, about_space) catch {
             self.state = .failed;
             self.note_len = take(&self.note, "could not start the command");
             self.ended_ms = self.started_ms;
@@ -536,7 +559,7 @@ test "availability is the shell's own answer" {
 
 test "a job runs to a reply and the request reads it" {
     var req: Request = .{};
-    req.send("/bin/echo reply:", "hello there");
+    req.send("/bin/echo reply:", "hello there", "", "");
     try std.testing.expectEqual(State.running, req.state);
     var fds: [2]ptypkg.Pollfd = undefined;
     var spins: usize = 0;
@@ -553,11 +576,11 @@ test "a job runs to a reply and the request reads it" {
     try std.testing.expect(req.ref == null);
     // a command that is not there is offline, at once
     var off: Request = .{};
-    off.send("no-such-program-rook-asks-for say", "x");
+    off.send("no-such-program-rook-asks-for say", "x", "", "");
     try std.testing.expectEqual(State.offline, off.state);
     // a nonzero exit is a failure, and what it said on stderr is kept
     var bad: Request = .{};
-    bad.send("/bin/sh -c 'echo nope >&2; exit 3' --", "x");
+    bad.send("/bin/sh -c 'echo nope >&2; exit 3' --", "x", "", "");
     spins = 0;
     while (bad.busy() and spins < 500) : (spins += 1) {
         const n = bad.fds(&fds);
@@ -568,4 +591,14 @@ test "a job runs to a reply and the request reads it" {
     try std.testing.expectEqualStrings("nope\n", bad.noteSlice());
     try std.testing.expect(bad.dismiss());
     try std.testing.expectEqual(State.none, bad.state);
+    // what it is about rides the environment, as a reference
+    var about: Request = .{};
+    about.send("/bin/sh -c 'echo task=$ROOK_ABOUT_TASK space=$ROOK_ABOUT_SPACE' --", "x", "t4", "api");
+    spins = 0;
+    while (about.busy() and spins < 500) : (spins += 1) {
+        const n = about.fds(&fds);
+        if (n > 0) _ = ptypkg.pollMany(&fds, @intCast(n), 20);
+        _ = about.pump();
+    }
+    try std.testing.expectEqualStrings("task=t4 space=api\n", about.replySlice());
 }

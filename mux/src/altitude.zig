@@ -335,9 +335,9 @@ pub const State = struct {
     }
 
     /// Esc closes the deepest layer first: a request still running,
-    /// a query (and with it the results, the completions), focus on
-    /// the thread or the dashboard (back to the composer), then a
-    /// subview. At home with nothing open it does nothing: a space is
+    /// a query (and with it the results, the completions), vera's
+    /// pane (its attachment, then the pane unless pinned), focus off
+    /// the navigator, then a subview. At home with nothing open it does nothing: a space is
     /// a destination, never the parent of the root.
     pub fn escape(self: *State) Escape {
         if (self.req.busy()) {
@@ -348,9 +348,21 @@ pub const State = struct {
             self.clear();
             return .cleared;
         }
-        if (self.view == .home and self.home.focus != .composer) {
-            self.home.focus = .composer;
-            self.home.thread_cur = null;
+        // vera's pane, then the inspector's focus, then the stack's
+        // detail: each back one layer toward the navigator
+        if (self.view == .home and self.home.focus == .vera) {
+            if (self.home.about_title_len > 0) {
+                self.home.clearAbout();
+                return .unfocused;
+            }
+            if (!self.home.vera_pinned) self.home.vera_open = false;
+            self.home.focus = .nav;
+            self.home.detail = false;
+            return .unfocused;
+        }
+        if (self.view == .home and (self.home.focus != .nav or self.home.detail)) {
+            self.home.focus = .nav;
+            self.home.detail = false;
             return .unfocused;
         }
         if (self.view != .home) {
@@ -625,6 +637,8 @@ pub const Paint = struct {
     /// the companion's name, and whether her command can be found
     ask_name: []const u8 = "vera",
     ask_on: bool = true,
+    /// the prefix key as a person types it, for the hints
+    prefix: []const u8 = "prefix ",
 };
 
 /// The tab component's mark, from the tab bar's vocabulary.
@@ -682,7 +696,7 @@ pub fn draw(f: *renderpkg.Frame, st: *State, region: layoutpkg.Rect, p: Paint) r
     // foot, the dashboard beside it. Finding and commanding take the
     // canvas over as one list under one field, whatever the view.
     if (st.painted == .home and st.mode() == .intent) {
-        return homepkg.draw(f, st, region, .{ .t = t, .ask_name = p.ask_name, .ask_on = p.ask_on, .now = @import("pane.zig").epochMs() });
+        return homepkg.draw(f, st, region, .{ .t = t, .ask_name = p.ask_name, .ask_on = p.ask_on, .now = @import("pane.zig").epochMs(), .prefix = p.prefix });
     }
     const x = region.x + 2;
     const w = region.w -| 4;
@@ -1082,11 +1096,21 @@ test "the cursor skips prose and headers, and esc peels one layer, never past ho
     try std.testing.expectEqual(Escape.home, st.escape());
     try std.testing.expectEqual(View.home, st.view);
     try std.testing.expectEqual(Escape.stay, st.escape());
-    // focus on the dashboard is a layer of its own, above the view
-    st.home.focus = .dash;
+    // focus on the inspector is a layer of its own, above the view;
+    // vera's pane is one more, and closes unless pinned
+    st.home.focus = .insp;
     try std.testing.expectEqual(Escape.unfocused, st.escape());
-    try std.testing.expectEqual(homepkg.Region.composer, st.home.focus);
+    try std.testing.expectEqual(homepkg.Region.nav, st.home.focus);
     try std.testing.expectEqual(Escape.stay, st.escape());
+    st.home.toggleVera();
+    try std.testing.expectEqual(Escape.unfocused, st.escape());
+    try std.testing.expect(!st.home.vera_open);
+    try std.testing.expectEqual(homepkg.Region.nav, st.home.focus);
+    st.home.vera_pinned = true;
+    st.home.toggleVera();
+    try std.testing.expectEqual(Escape.unfocused, st.escape());
+    try std.testing.expect(st.home.veraShown());
+    try std.testing.expectEqual(homepkg.Region.nav, st.home.focus);
 }
 
 test "a space is rich when it has something to say" {

@@ -398,6 +398,9 @@ pub const Server = struct {
     alt: altpkg.State = .{},
     /// Whether the ask command can be found, as of the last look.
     ask_on: bool = false,
+    /// Vera's pane holds the keyboard inside a space.
+    vera_keys: bool = false,
+    prefix_name_buf: [8]u8 = undefined,
     alt_placed: std.ArrayList(layoutpkg.Placed) = .empty,
     /// A second frame builder for what the server paints over the
     /// panes itself: the altitude view, the ownership gate, the
@@ -922,6 +925,8 @@ pub const Server = struct {
             const job_fds_at = fds.items.len;
             var job_fds: [2]ptypkg.Pollfd = undefined;
             for (job_fds[0..self.alt.req.fds(&job_fds)]) |jf| try fds.append(self.gpa, jf);
+            var run_fds: [2]ptypkg.Pollfd = undefined;
+            for (run_fds[0..self.alt.home.runner.fds(&run_fds)]) |jf| try fds.append(self.gpa, jf);
             var timeout: c_int = if (self.pending)
                 @intCast(@max(0, frame_gap_ms - (nowMs() - last_frame)))
             else
@@ -964,6 +969,12 @@ pub const Server = struct {
                     self.full = true;
                     self.pending = true;
                 }
+            }
+            if (self.alt.home.runner.busy() and self.alt.home.runner.pump()) {
+                self.absorbRunner();
+                _ = self.touch();
+                self.full = true;
+                self.pending = true;
             }
             // drain pane stdin queues that got room
             for (fds.items[pane_fds_at..job_fds_at]) |pfd| {
@@ -2137,6 +2148,13 @@ pub const Server = struct {
                 rest = rest[used..];
                 continue;
             }
+            // Vera's pane over a space holds the keyboard while it has it.
+            if (self.vera_keys) {
+                c.paste.reset();
+                const used = self.veraKey(rest);
+                rest = rest[used..];
+                continue;
+            }
             // The ownership gate holds the keyboard while it is up.
             if (self.gate) {
                 c.paste.reset();
@@ -2728,8 +2746,14 @@ pub const Server = struct {
             // or what needs you (`!` is the attention mark).
             'a' => self.goHomeAt(.running),
             '!' => self.goHomeAt(.needs),
-            // The root in a mode: tell the companion, find, command.
-            't' => self.goHomeTyping(""),
+            // Vera: her pane, from anywhere; pinned, she stays.
+            't' => self.toggleVera(),
+            'T' => {
+                self.alt.home.vera_pinned = !self.alt.home.vera_pinned;
+                if (self.alt.home.vera_pinned) self.alt.home.vera_open = true;
+                if (!self.at_root) self.vera_keys = self.alt.home.veraShown() and self.alt.home.focus == .vera;
+            },
+            // The root in a mode: find, command.
             '/' => self.goHomeTyping("/"),
             ':' => self.goHomeTyping(":"),
             // The legacy side panel, away and back, for a config that
@@ -2784,7 +2808,7 @@ pub const Server = struct {
     /// The prefix keys that mean something at the root.
     fn rootKey(key: u8) bool {
         return switch (key) {
-            'o', 's', 'a', '!', 't', '/', ':', 0x0f, 'd', 'A', 'u' => true,
+            'o', 's', 'a', '!', 't', 'T', '/', ':', 0x0f, 'd', 'A', 'u' => true,
             else => false,
         };
     }
@@ -3216,7 +3240,13 @@ pub const Server = struct {
             }
             placed = self.alt_placed.items;
             if (self.global_pins.items.len == 0) dock_x = null;
-            cur_over = altpkg.draw(&self.over, &self.alt, self.altRegion(), .{ .t = &self.ui, .ask_name = self.askName(), .ask_on = self.ask_on });
+            cur_over = altpkg.draw(&self.over, &self.alt, self.altRegion(), .{ .t = &self.ui, .ask_name = self.askName(), .ask_on = self.ask_on, .prefix = prefixName(self.prefix_key, &self.prefix_name_buf) });
+        }
+        // vera's pane inside a space: over the panes, the same pane
+        if (!self.at_root and self.alt.home.veraShown()) {
+            var pk: [8]u8 = undefined;
+            const c = homepkg.drawVeraOver(&self.over, &self.alt, self.altRegion(), .{ .t = &self.ui, .ask_name = self.askName(), .ask_on = self.ask_on, .now = panepkg.epochMs(), .prefix = prefixName(self.prefix_key, &pk) });
+            if (self.vera_keys) cur_over = c;
         }
         if (self.gate and !self.at_root) self.gateRow();
         if (self.inspect and !self.at_root) self.inspectorSheet();
@@ -3242,7 +3272,7 @@ pub const Server = struct {
         };
         // the root's cursor is the input's; the inspector and the
         // gate hide the pane's cursor, since the keys are not its
-        const cur: ?renderpkg.CursorOverride = if (self.at_root or self.gate or self.inspect)
+        const cur: ?renderpkg.CursorOverride = if (self.at_root or self.gate or self.inspect or self.vera_keys)
             (cur_over orelse renderpkg.CursorOverride{ .x = 0, .y = 0, .hidden = true })
         else
             cur_over;
@@ -3347,7 +3377,7 @@ pub const Server = struct {
         // While the mux itself holds the keyboard — the root, the
         // gate, the inspector — the glass encodes legacy bytes, so
         // the view reads plain keys whatever the pane under it asked.
-        const mux_keys = self.at_root or self.gate or self.inspect;
+        const mux_keys = self.at_root or self.gate or self.inspect or self.vera_keys;
         const fp = if (mux_keys) null else (self.popupPane() orelse self.focusedPane());
         const kf: u8 = if (fp) |p| p.kittyFlags() else 0;
         if (kf != self.glass_kitty) {
@@ -3660,13 +3690,16 @@ pub const Server = struct {
             // a subview is named where the tabs would be, as the tab
             // component, selected: orbit and ledger are places within
             // the root, and home is the root itself
-            if (self.alt.view != .home) {
-                vis += ui.tab(out, t, .{ .index = null, .label = self.alt.painted.word(), .selected = true }, .full);
-                vis += ui.ink(out, on, "  ");
+            vis += ui.tab(out, t, .{ .index = null, .label = self.alt.painted.word(), .selected = true }, .full);
+            vis += ui.ink(out, on, "  ");
+            // the context: what is selected, muted, never a count
+            if (self.alt.painted == .home and self.alt.len == 0) {
+                if (self.alt.home.selectedTask()) |tk| {
+                    vis += ui.ink(out, .{ .fg = t.muted, .bg = t.chrome }, chromepkg.clip(tk.title, avail -| vis -| corner_cols -| 1));
+                } else if (self.alt.home.selectedRow()) |r| {
+                    if (r.space) |si| vis += ui.ink(out, .{ .fg = t.muted, .bg = t.chrome }, chromepkg.clip(self.alt.spaces[si].name, avail -| vis -| corner_cols -| 1));
+                }
             }
-            var sum_buf: [96]u8 = undefined;
-            const summary = self.altSummary(&sum_buf);
-            vis += ui.ink(out, .{ .fg = t.secondary, .bg = t.chrome }, chromepkg.clip(summary, avail -| vis -| corner_cols -| 1));
         } else {
             vis += ui.scopeChip(out, t, sc, .space);
             vis += ui.separator(out, t, t.chrome);
@@ -3888,6 +3921,11 @@ pub const Server = struct {
     /// what; middle, the pending prefix; right, the counts — only the
     /// nonzero ones. No space name (the scope bar owns identity), no
     /// clock, and never a row that appears or disappears on its own.
+    /// The calm bar, composed from the config's modules (`status_home`,
+    /// `status_space`): the left ones in order, `-`, then the right
+    /// ones. A warning module at zero is left out; a module with no
+    /// data (usage nobody reported) is left out; the rest say their
+    /// period and their unit.
     fn barRow(self: *Server, buf: []u8, cols: u16) []const u8 {
         var list: std.ArrayList(u8) = .initBuffer(buf);
         const out: ui.Buf = .{ .list = &list };
@@ -3895,48 +3933,109 @@ pub const Server = struct {
         var vis: u16 = 0;
         vis += ui.ink(out, .{ .bg = t.chrome }, " ");
 
+        var right_buf: [768]u8 = undefined;
+        var right_list: std.ArrayList(u8) = .initBuffer(&right_buf);
+        const right: ui.Buf = .{ .list = &right_list };
+        var right_w: u16 = 0;
+        var on_right = false;
+        var left_n: usize = 0;
+        var right_n: usize = 0;
+        var it = std.mem.splitScalar(u8, if (self.at_root) self.conf.statusHome() else self.conf.statusSpace(), '\n');
+        while (it.next()) |name| {
+            if (name.len == 0) continue;
+            if (std.mem.eql(u8, name, "-")) {
+                on_right = true;
+                continue;
+            }
+            var mod_buf: [256]u8 = undefined;
+            var mod_list: std.ArrayList(u8) = .initBuffer(&mod_buf);
+            const mod: ui.Buf = .{ .list = &mod_list };
+            const w = self.statusModule(mod, name);
+            if (w == 0) continue;
+            if (on_right) {
+                if (right_n > 0) right_w += ui.moduleSep(right, t);
+                right.put(mod_list.items);
+                right_w += w;
+                right_n += 1;
+            } else {
+                if (left_n > 0) vis += ui.moduleSep(out, t);
+                out.put(mod_list.items);
+                vis += w;
+                left_n += 1;
+            }
+        }
+
+        // Pending-key feedback: the prefix is armed on some glass. A
+        // chip, and the chords a hand may be reaching for, when they
+        // fit — noticeable, never dominant.
+        var armed = false;
+        for (self.clients.items) |c| {
+            if (c.attached and c.prefix) armed = true;
+        }
+        if (armed) {
+            vis += ui.module(out, t, "   ", t.muted, false);
+            vis += ui.chip(out, t, "prefix", t.accent);
+            const hint: []const u8 = if (self.at_root)
+                "  t vera · T pin · s orbit · / find · : command · a in progress · ! needs you · d detach"
+            else
+                "  o rook · t vera · s orbit · c new · v - split · z zoom · u unread · i inspect";
+            if (vis + chromepkg.cols(hint) + 14 <= cols) vis += ui.module(out, t, hint, t.muted, false);
+        }
+
+        if (right_w > 0 and vis + right_w + 2 <= cols) {
+            var b: [64]u8 = undefined;
+            out.put((ui.Style{ .bg = t.chrome }).sgr(&b));
+            while (vis < cols - right_w - 1) : (vis += 1) out.put(" ");
+            out.put(right_list.items);
+            vis += right_w;
+        }
+        ui.padTo(out, t, vis, cols);
+        return list.items;
+    }
+
+    /// One module of the calm bar by name; the columns it took, 0
+    /// when it has nothing to say. Every count says what it counts;
+    /// spend says its period.
+    fn statusModule(self: *Server, out: ui.Buf, name: []const u8) u16 {
+        const t = &self.ui;
+        var vis: u16 = 0;
         var ab: [8]u8 = undefined;
         const arrow = std.fmt.bufPrint(&ab, " {s} ", .{ui.glyph(t, .marker)}) catch " > ";
-        if (self.at_root) {
+        if (std.mem.eql(u8, name, "view")) {
+            const st = &self.alt;
             vis += ui.module(out, t, "rook", t.primary, true);
             vis += ui.moduleSep(out, t);
-            const st = &self.alt;
             const what: []const u8 = if (st.len > 0) st.mode().word() else st.painted.word();
             vis += ui.module(out, t, what, t.muted, false);
-            if (st.len == 0 and st.painted == .home and st.home.focus != .composer) {
+            if (st.len == 0 and st.painted == .home) {
                 vis += ui.moduleSep(out, t);
-                vis += ui.module(out, t, if (st.home.focus == .dash) "dashboard" else "thread", t.muted, false);
+                vis += ui.module(out, t, switch (st.home.focus) {
+                    .nav => "navigator",
+                    .insp => "inspector",
+                    .vera => "vera",
+                }, t.muted, false);
             }
-            // the request, while one is in flight or just answered
-            switch (st.req.state) {
-                .none => {},
-                .running => {
-                    vis += ui.moduleSep(out, t);
-                    vis += ui.module(out, t, self.askName(), t.working, true);
-                    vis += ui.module(out, t, " ", t.muted, false);
-                    vis += ui.module(out, t, ui.markGlyph(t, .working), t.working, false);
-                    vis += ui.module(out, t, " on it", t.muted, false);
-                },
-                .replied => {
-                    vis += ui.moduleSep(out, t);
-                    vis += ui.module(out, t, self.askName(), t.secondary, false);
-                    vis += ui.module(out, t, " answered", t.muted, false);
-                },
-                .failed, .offline => {
-                    vis += ui.moduleSep(out, t);
-                    vis += ui.module(out, t, self.askName(), t.secondary, false);
-                    vis += ui.module(out, t, if (st.req.state == .offline) " offline" else " failed", t.muted, false);
-                },
+            return vis;
+        }
+        if (std.mem.eql(u8, name, "input")) {
+            if (self.at_root) return 0;
+            if (self.popupPane()) |pp| {
+                var nb: [64]u8 = undefined;
+                const fg = pp.fgName(&nb) orelse "popup";
+                vis += ui.module(out, t, "you", t.primary, true);
+                vis += ui.module(out, t, arrow, t.muted, false);
+                vis += ui.module(out, t, fg, t.secondary, false);
+                return vis;
             }
-        } else if (self.popupPane()) |pp| {
-            var nb: [64]u8 = undefined;
-            const fg = pp.fgName(&nb) orelse "popup";
-            vis += ui.module(out, t, "you", t.primary, true);
-            vis += ui.module(out, t, arrow, t.muted, false);
-            vis += ui.module(out, t, fg, t.secondary, false);
-        } else if (self.focusedPane()) |fp| {
+            const fp = self.focusedPane() orelse return 0;
             var nb: [64]u8 = undefined;
             const fg = fp.fgName(&nb) orelse "shell";
+            if (self.vera_keys) {
+                vis += ui.module(out, t, "you", t.primary, true);
+                vis += ui.module(out, t, arrow, t.muted, false);
+                vis += ui.module(out, t, self.askName(), t.accent, false);
+                return vis;
+            }
             switch (fp.own) {
                 .human => {
                     vis += ui.module(out, t, "you", t.primary, true);
@@ -3973,63 +4072,127 @@ pub const Server = struct {
                     vis += ui.module(out, t, " paused", t.muted, false);
                 },
             }
+            return vis;
         }
-
-        // Pending-key feedback: the prefix is armed on some glass. A
-        // chip, and the chords a hand may be reaching for, when they
-        // fit — noticeable, never dominant.
-        var armed = false;
-        for (self.clients.items) |c| {
-            if (c.attached and c.prefix) armed = true;
+        if (std.mem.eql(u8, name, "agents")) {
+            // active: a producer's working tasks, and agents rook sees
+            // producing where nobody claims; idle: a producer's idle
+            // tasks. No stale: nothing here can tell stale from slow.
+            const claims = if (self.side.agents.panel) |pnl| pnl.items else &.{};
+            var active: usize = self.countWorking();
+            var idle: usize = 0;
+            for (claims) |it| {
+                switch (it.state) {
+                    // a working task in a space rook does not hold: an
+                    // agent rook cannot see, counted on the producer's word
+                    .working => if (self.sessionNamed(it.workspace()) == null) {
+                        active += 1;
+                    },
+                    .idle => idle += 1,
+                    else => {},
+                }
+            }
+            if (active == 0 and idle == 0) return 0;
+            var b: [48]u8 = undefined;
+            vis += ui.module(out, t, "agents ", t.muted, false);
+            if (active > 0) {
+                vis += ui.module(out, t, ui.markGlyph(t, .working), t.working, false);
+                vis += ui.module(out, t, std.fmt.bufPrint(&b, " {d} active", .{active}) catch "", t.secondary, false);
+            }
+            if (idle > 0) {
+                if (active > 0) vis += ui.module(out, t, " · ", t.muted, false);
+                vis += ui.module(out, t, std.fmt.bufPrint(&b, "{d} idle", .{idle}) catch "", t.muted, false);
+            }
+            return vis;
         }
-        if (armed) {
-            vis += ui.module(out, t, "   ", t.muted, false);
-            vis += ui.chip(out, t, "prefix", t.accent);
-            const hint: []const u8 = if (self.at_root)
-                "  o home · s orbit · t ask · / find · : command · a running · ! needs you · d detach"
-            else
-                "  o rook · s orbit · t ask · c new · v - split · z zoom · u unread · i inspect";
-            if (vis + chromepkg.cols(hint) + 14 <= cols) vis += ui.module(out, t, hint, t.muted, false);
+        if (std.mem.eql(u8, name, "attention")) {
+            const n = self.countUnread() + self.countAsks() + self.countApprovals();
+            if (n == 0) return 0;
+            var b: [32]u8 = undefined;
+            vis += ui.module(out, t, ui.markGlyph(t, .attention), t.attention, true);
+            vis += ui.module(out, t, std.fmt.bufPrint(&b, " {d} need{s} you", .{ n, if (n == 1) "s" else "" }) catch "", t.attention, false);
+            return vis;
         }
-
-        // The right region: counts, only the nonzero ones, and
-        // genuinely empty when nothing signals.
-        var right_buf: [512]u8 = undefined; // every module carries its own SGR
-        var right_list: std.ArrayList(u8) = .initBuffer(&right_buf);
-        const right: ui.Buf = .{ .list = &right_list };
-        var right_w: u16 = 0;
-        const working = self.countWorking();
-        const attention = self.countUnread() + self.countAsks();
-        const unseen = self.countUnseen();
-        const gpins = self.global_pins.items.len;
-        if (working > 0) right_w += ui.countModule(right, t, .working, working);
-        if (attention > 0) {
-            if (right_w > 0) right_w += ui.moduleSep(right, t);
-            right_w += ui.countModule(right, t, .attention, attention);
+        if (std.mem.eql(u8, name, "blocked")) {
+            const claims = if (self.side.agents.panel) |pnl| pnl.items else &.{};
+            var failed: usize = 0;
+            for (claims) |it| {
+                if (it.state == .failed) failed += 1;
+            }
+            if (failed == 0) return 0;
+            var b: [32]u8 = undefined;
+            vis += ui.module(out, t, ui.markGlyph(t, .failed), t.err, false);
+            vis += ui.module(out, t, std.fmt.bufPrint(&b, " {d} failed", .{failed}) catch "", t.err, false);
+            return vis;
         }
-        if (unseen > 0) {
-            if (right_w > 0) right_w += ui.moduleSep(right, t);
-            right_w += ui.countModule(right, t, .unread, unseen);
-        }
-        if (gpins > 0) {
-            if (right_w > 0) right_w += ui.moduleSep(right, t);
-            var nb2: [16]u8 = undefined;
-            const n = std.fmt.bufPrint(&nb2, "{s}g {d}", .{ ui.glyph(t, .pin), gpins }) catch "?";
-            right_w += ui.module(right, t, n, t.muted, false);
-        }
-        if (right_w > 0 and vis + right_w + 2 <= cols) {
+        if (std.mem.eql(u8, name, "session")) {
+            // the session is this server's life; the producer's
+            // frame-level total when it gives one, else the sum of
+            // what its tasks report; nothing when nobody reported
+            const pnl = self.side.agents.panel orelse return 0;
+            var u: chromepkg.Usage = .{};
+            var any = false;
+            if (pnl.session) |su| {
+                u = su;
+                any = true;
+            } else {
+                for (pnl.items) |it| {
+                    if (it.usage) |iu| {
+                        u.add(iu);
+                        any = true;
+                    }
+                }
+            }
+            if (!any) return 0;
+            var scratch: [64]u8 = undefined;
+            var fba = std.heap.FixedBufferAllocator.init(&scratch);
+            const a = fba.allocator();
             var b: [64]u8 = undefined;
-            out.put((ui.Style{ .bg = t.chrome }).sgr(&b));
-            while (vis < cols - right_w - 1) : (vis += 1) out.put(" ");
-            out.put(right_list.items);
-            vis += right_w;
+            vis += ui.module(out, t, "session ", t.muted, false);
+            vis += ui.module(out, t, fmtCents(a, u.cents), t.secondary, false);
+            vis += ui.module(out, t, std.fmt.bufPrint(&b, " · {s} tokens", .{fmtTokens(a, u.tokens)}) catch "", t.muted, false);
+            return vis;
         }
-        ui.padTo(out, t, vis, cols);
-        return list.items;
+        if (std.mem.eql(u8, name, "vera")) {
+            const st = &self.alt;
+            const name_c = self.askName();
+            const status = homepkg.askStatus(st, .{ .t = t, .ask_name = name_c, .ask_on = self.ask_on });
+            const word: []const u8 = switch (st.req.state) {
+                .running => "thinking",
+                .offline => "offline",
+                .failed => "failed",
+                else => if (!self.ask_on) "offline" else if (status.mark == .attention) "waiting for you" else "ready",
+            };
+            vis += ui.module(out, t, name_c, if (status.mark == .none) t.secondary else ui.markInk(t, status.mark), status.mark != .none);
+            vis += ui.module(out, t, " ", t.muted, false);
+            vis += ui.module(out, t, word, if (status.mark == .none) t.muted else ui.markInk(t, status.mark), false);
+            return vis;
+        }
+        if (std.mem.eql(u8, name, "working")) {
+            const n = self.countWorking();
+            if (n == 0) return 0;
+            return ui.countModule(out, t, .working, n);
+        }
+        if (std.mem.eql(u8, name, "unread")) {
+            const n = self.countUnseen();
+            if (n == 0) return 0;
+            return ui.countModule(out, t, .unread, n);
+        }
+        if (std.mem.eql(u8, name, "pins")) {
+            const n = self.global_pins.items.len;
+            if (n == 0) return 0;
+            var b: [16]u8 = undefined;
+            return ui.module(out, t, std.fmt.bufPrint(&b, "{s}g {d}", .{ ui.glyph(t, .pin), n }) catch "?", t.muted, false);
+        }
+        return 0;
     }
 
-    /// Windows off the glass whose focused pane wrote after they were
-    /// last looked at — the softer unread, the `•` count.
+    /// Actions the companion proposed that nobody ran: they need you.
+    fn countApprovals(self: *Server) usize {
+        if (self.alt.req.ref) |*r| return r.pending();
+        return 0;
+    }
+
     fn countUnseen(self: *Server) usize {
         var n: usize = 0;
         for (self.sessions.items, 0..) |sn, si| {
@@ -4262,6 +4425,7 @@ pub const Server = struct {
     fn goHome(self: *Server) void {
         if (self.popup != null) return;
         self.at_root = true;
+        self.vera_keys = false;
         self.alt.view = .home;
         self.scrolling = false;
         self.selecting = false;
@@ -4278,7 +4442,8 @@ pub const Server = struct {
         self.goHome();
         self.alt.clear();
         self.alt.land = land;
-        self.alt.home.toDash();
+        self.alt.home.focus = .nav;
+        self.alt.home.detail = false;
     }
 
     /// Home, in a mode: the field holds the mode's leading character
@@ -4286,8 +4451,10 @@ pub const Server = struct {
     fn goHomeTyping(self: *Server, lead: []const u8) void {
         self.goHome();
         self.alt.clear();
-        self.alt.home.focus = .composer;
-        self.alt.home.thread_cur = null;
+        if (lead.len == 0) {
+            if (!self.alt.home.veraShown()) self.alt.home.vera_open = true;
+            self.alt.home.focus = .vera;
+        }
         for (lead) |ch| self.alt.push(ch);
     }
 
@@ -4329,11 +4496,12 @@ pub const Server = struct {
         return if (c.len > 0) c else "vera";
     }
 
-    /// Keys at the root. Printable typing always reaches the composer,
-    /// so the rows and the cards are walked with the arrows (⇥ ⇤,
-    /// C-n C-p), never with letters. Returns the bytes spent, so a run
-    /// of keystrokes is walked one key at a time and an escape
-    /// sequence is taken whole.
+    /// Keys at the root. The navigator and the inspector take j/k
+    /// and h/l as motion; every other printable letter is for vera
+    /// and summons her with the letter in the composer; the arrows,
+    /// ⇥ and C-n C-p walk whatever has focus. Returns the bytes
+    /// spent, so a run of keystrokes is walked one key at a time and
+    /// an escape sequence is taken whole.
     fn altKey(self: *Server, bytes: []const u8) usize {
         const st = &self.alt;
         const h = &st.home;
@@ -4341,53 +4509,50 @@ pub const Server = struct {
             self.full = true;
             self.pending = true;
         }
-        const cockpit = st.mode() == .intent and st.view == .home;
+        const home = st.mode() == .intent and st.view == .home;
         const b = bytes[0];
-        // The vim motion does not stop at home's door: Ctrl-h/j/k/l
-        // walks the cockpit's regions the way it walks
-        // panes inside a space — the thread above the composer, the
-        // dashboard right of both. At an edge the byte is the view's
-        // again, so Ctrl-H still deletes in the composer and a
-        // newline still sends.
-        if (cockpit) {
-            if (ctrlNavDir(b)) |dir| {
-                if (h.navFocus(dir)) {
-                    if (h.focus == .dash) {
-                        h.clampDash();
-                        self.syncFromDash();
-                    }
-                    return 1;
-                }
-            }
+        // Ctrl-h/l walk the regions the way they walk panes; at an
+        // edge the byte is the view's again (Ctrl-H in vera's
+        // composer is still a backspace).
+        if (home and (b == 0x08 or b == 0x0c)) {
+            if (h.navFocus(if (b == 0x08) 'h' else 'l')) return 1;
         }
         if (b == 0x1b) {
             if (bytes.len >= 3 and (bytes[1] == '[' or bytes[1] == 'O')) {
-                // CSI: take through the final byte
                 var i: usize = 2;
                 while (i < bytes.len and !(bytes[i] >= 0x40 and bytes[i] <= 0x7e)) i += 1;
                 const fin: u8 = if (i < bytes.len) bytes[i] else 0;
                 switch (fin) {
                     'A' => self.rootMove(-1),
                     'B' => self.rootMove(1),
-                    'Z' => if (cockpit) self.cycleFocus(-1) else st.move(-1), // shift-tab
-                    '5' => if (cockpit and h.focus != .dash) {
-                        h.thread_scroll += 4; // page up
+                    'C' => if (home) {
+                        _ = h.navFocus('l');
                     },
-                    '6' => if (cockpit and h.focus != .dash) {
-                        h.thread_scroll -|= 4; // page down
+                    'D' => if (home) {
+                        _ = h.navFocus('h');
+                    },
+                    'Z' => if (home) self.cycleFocus(-1) else st.move(-1),
+                    '5' => if (home and h.focus == .vera) {
+                        h.thread_scroll += 4;
+                    } else if (home and h.focus == .insp) {
+                        h.insp.scroll -|= 8;
+                    },
+                    '6' => if (home and h.focus == .vera) {
+                        h.thread_scroll -|= 4;
+                    } else if (home and h.focus == .insp) {
+                        h.insp.scroll += 8;
                     },
                     else => {},
                 }
                 return @min(i + 1, bytes.len);
             }
-            // a lone Esc: the deepest layer first, and never past home
             _ = st.escape();
             return 1;
         }
         switch (b) {
             '\r', '\n' => self.altAct(),
-            0x7f, 0x08 => if (h.focus == .composer or !cockpit) st.pop(),
-            '\t' => if (cockpit) self.cycleFocus(1) else st.move(1),
+            0x7f, 0x08 => if (h.focus == .vera or !home) st.pop(),
+            '\t' => if (home) self.cycleFocus(1) else st.move(1),
             0x0e => self.rootMove(1), // C-n
             0x10 => self.rootMove(-1), // C-p
             0x15 => st.clear(), // C-u
@@ -4396,15 +4561,58 @@ pub const Server = struct {
                 if (b < 0x20) return 1;
                 const len = std.unicode.utf8ByteSequenceLength(b) catch 1;
                 const end = @min(len, bytes.len);
-                // typing is for the composer, wherever focus was
-                if (cockpit and h.focus != .composer) {
-                    h.focus = .composer;
-                    h.thread_cur = null;
+                // motion in the navigator and the inspector: j k h l,
+                // o to open the workspace, g G to the ends; anything
+                // else is for vera
+                if (home and h.focus != .vera and st.len == 0 and len == 1) {
+                    switch (b) {
+                        'j' => {
+                            self.rootMove(1);
+                            return 1;
+                        },
+                        'k' => {
+                            self.rootMove(-1);
+                            return 1;
+                        },
+                        'h' => {
+                            _ = h.navFocus('h');
+                            return 1;
+                        },
+                        'l' => {
+                            _ = h.navFocus('l');
+                            return 1;
+                        },
+                        'o' => {
+                            self.openSelected();
+                            return 1;
+                        },
+                        'g' => {
+                            if (h.focus == .nav) {
+                                h.nav_cur = 0;
+                                h.clampNav();
+                                h.nav_touched = true;
+                                h.noteSelection();
+                            } else h.insp.scroll = 0;
+                            return 1;
+                        },
+                        'G' => {
+                            if (h.focus == .nav) {
+                                h.nav_cur = h.rows_n -| 1;
+                                h.clampNav();
+                                h.nav_touched = true;
+                                h.noteSelection();
+                            }
+                            return 1;
+                        },
+                        else => {},
+                    }
+                }
+                // typing is for vera: summoned, with the letter
+                if (home and h.focus != .vera and (st.len > 0 or (b != '/' and b != ':'))) {
+                    if (!h.veraShown()) h.vera_open = true;
+                    h.focus = .vera;
                 }
                 for (bytes[0..end]) |ch| st.push(ch);
-                // typing a query rebuilds the rows and the cursor
-                // starts at the top of the results; typing a request
-                // leaves the cursor where it was
                 if (st.mode() != .intent) st.cur = 0;
                 return end;
             },
@@ -4412,9 +4620,10 @@ pub const Server = struct {
         return 1;
     }
 
-    /// ↑ ↓ at the root: the rows while finding or commanding; at home,
-    /// whichever region has focus — the thread's turns, the
-    /// dashboard's cards, and from the composer, up into the thread.
+    /// ↑ ↓ (j k, C-p C-n): the rows while finding or commanding; at
+    /// home, whatever has focus — the navigator's rows, the
+    /// inspector's controls (or its scroll, when it has none), vera's
+    /// thread.
     fn rootMove(self: *Server, d: i32) void {
         const st = &self.alt;
         const h = &st.home;
@@ -4423,106 +4632,48 @@ pub const Server = struct {
             return;
         }
         switch (h.focus) {
-            .composer => if (d < 0 and st.len == 0 and h.thread.count() > 0) {
-                h.focus = .thread;
-                h.thread_cur = h.thread.count() - 1;
+            .nav => h.moveNav(d),
+            .insp => if (h.insp.acts_n > 0) h.insp.moveAct(d) else {
+                if (d > 0) h.insp.scroll += 1 else h.insp.scroll -|= 1;
             },
-            .thread => {
-                const n = h.thread.count();
-                if (d > 0 and (h.thread_cur == null or h.thread_cur.? + 1 >= n)) {
-                    h.focus = .composer;
-                    h.thread_cur = null;
-                } else {
-                    h.moveThread(d);
-                }
-            },
-            .dash => {
-                h.moveDash(d);
-                self.syncFromDash();
+            .vera => if (d < 0) {
+                h.thread_scroll += 1;
+            } else {
+                h.thread_scroll -|= 1;
             },
         }
     }
 
-    /// ⇥: composer, dashboard, thread, and around. On narrow glass
-    /// the view follows: the dashboard is `now`.
+    /// ⇥: navigator, inspector, vera (when she is up), and around.
     fn cycleFocus(self: *Server, d: i32) void {
         const h = &self.alt.home;
-        const order = [_]homepkg.Region{ .composer, .dash, .thread };
+        const order = [_]homepkg.Region{ .nav, .insp, .vera };
         var i: usize = 0;
         for (order, 0..) |r, k| {
             if (r == h.focus) i = k;
         }
-        i = @intCast(@mod(@as(i32, @intCast(i)) + d, @as(i32, order.len)));
-        if (order[i] == .dash) {
-            h.toDash();
-        } else {
-            h.focus = order[i];
-        }
-        switch (h.focus) {
-            .thread => if (h.thread.count() > 0) {
-                if (h.thread_cur == null) h.thread_cur = h.thread.count() - 1;
-            } else if (d > 0) {
-                // nothing to walk: on to the next region
-                h.focus = .composer;
-            } else {
-                h.toDash();
-            },
-            .dash => {
-                h.clampDash();
-                self.syncFromDash();
-            },
-            .composer => h.thread_cur = null,
-        }
+        const n: i32 = if (h.veraShown()) 3 else 2;
+        i = @intCast(@mod(@as(i32, @intCast(i)) + d, n));
+        h.focus = order[i];
+        h.detail = h.focus != .nav;
     }
 
-    /// ↵ at the root: a request, when one is typed; else the
-    /// selected row, and only it.
+    /// ↵ at the root: whatever has focus acts — the navigator opens
+    /// the inspector, the inspector runs its selected control, vera
+    /// sends the draft.
     fn altAct(self: *Server) void {
         const st = &self.alt;
         const h = &st.home;
         if (st.mode() == .intent and st.view == .home) {
             switch (h.focus) {
-                .composer => if (st.len > 0) {
-                    // The one door to interpretation: the text goes, as
-                    // typed, to the companion's command. Nothing else
-                    // changes until she answers, and what she proposes
-                    // is shown before it runs.
-                    var text_buf: [askpkg.max_text]u8 = undefined;
-                    const n = @min(st.len, text_buf.len);
-                    @memcpy(text_buf[0..n], st.text[0..n]);
-                    _ = h.thread.push(.you, text_buf[0..n], "", "", panepkg.epochMs());
-                    h.thread_scroll = 0;
-                    st.req.send(self.conf.askSlice(), text_buf[0..n]);
-                    self.ask_on = st.req.state != .offline;
-                    if (st.req.state == .offline) {
-                        var b: [160]u8 = undefined;
-                        _ = h.thread.push(.err, std.fmt.bufPrint(&b, "{s} is not on PATH — nothing was sent · / find and : command still work", .{self.askName()}) catch "not on PATH", "", "", panepkg.epochMs());
-                    } else if (st.req.state == .failed) {
-                        _ = h.thread.push(.err, "could not start the command", "", "", panepkg.epochMs());
-                    }
-                    st.clear();
-                    _ = self.touch();
-                },
-                .thread => {
-                    // a turn about a task or a space finds its card
-                    if (!self.syncFromThread()) {
-                        const tc = h.thread_cur orelse return;
-                        const turn = h.thread.get(tc);
-                        if (self.sessionNamed(turn.spaceSlice())) |si| {
-                            self.enterSpace();
-                            self.switchSession(si);
-                        }
-                    }
-                },
-                .dash => self.cardAct(),
+                .nav => _ = h.navFocus('l'),
+                .insp => self.inspAct(),
+                .vera => if (st.len > 0) self.sendAsk(),
             }
             self.full = true;
             self.pending = true;
             return;
         }
-        // The rows are rebuilt first: keys can arrive in one batch
-        // with no frame between them, and ↵ must act on what the
-        // typed text means now, not on the rows the last frame drew.
         self.altBuild();
         const row = st.selected() orelse return;
         switch (row.kind) {
@@ -4535,8 +4686,6 @@ pub const Server = struct {
                 self.jumpToAgent(row.arg);
             },
             .work => {
-                // the exact surface: the pane when rook knows one,
-                // else the space's agent, else the space
                 self.enterSpace();
                 if (row.pane != 0 and self.pane(row.pane) != null) {
                     self.focusPane(row.pane);
@@ -4568,17 +4717,60 @@ pub const Server = struct {
         self.pending = true;
     }
 
-    /// ↵ on a card: an approval runs its action; anything else opens
-    /// its exact surface — the pane that signalled, the agent's pane,
-    /// the space.
-    fn cardAct(self: *Server) void {
+    /// The draft goes to the companion, as typed, about whatever is
+    /// attached. The one door to interpretation: nothing else changes
+    /// until she answers, and what she proposes is shown before it
+    /// runs.
+    fn sendAsk(self: *Server) void {
         const st = &self.alt;
         const h = &st.home;
-        const c = h.selectedCard() orelse return;
-        if (c.task) |ti| {
+        var text_buf: [askpkg.max_text]u8 = undefined;
+        const n = @min(st.len, text_buf.len);
+        @memcpy(text_buf[0..n], st.text[0..n]);
+        _ = h.thread.push(.you, text_buf[0..n], h.aboutTask(), h.aboutSpace(), panepkg.epochMs());
+        h.thread_scroll = 0;
+        st.req.send(self.conf.askSlice(), text_buf[0..n], h.aboutTask(), h.aboutSpace());
+        self.ask_on = st.req.state != .offline;
+        if (st.req.state == .offline) {
+            var b: [160]u8 = undefined;
+            _ = h.thread.push(.err, std.fmt.bufPrint(&b, "{s} is not on PATH — nothing was sent · the navigator, / and : still work", .{self.askName()}) catch "not on PATH", "", "", panepkg.epochMs());
+        } else if (st.req.state == .failed) {
+            _ = h.thread.push(.err, "could not start the command", "", "", panepkg.epochMs());
+        }
+        st.clear();
+        _ = self.touch();
+    }
+
+    /// ↵ in the inspector: the selected control.
+    fn inspAct(self: *Server) void {
+        const st = &self.alt;
+        const h = &st.home;
+        const a = h.insp.selected() orelse return;
+        const tk = h.selectedTask();
+        switch (a.kind) {
+            .approval => st.req.confirm(a.action),
+            .answer, .control => {
+                const task: []const u8 = if (tk) |k| k.id else "";
+                if (!h.runner.start(a.label, a.run, task)) {
+                    _ = h.thread.push(.err, "one thing at a time: something is still running", task, "", panepkg.epochMs());
+                }
+            },
+            .open, .enter, .go_see => self.openSelected(),
+            .ask => self.askAbout(),
+        }
+        _ = self.touch();
+    }
+
+    /// `o`: the exact destination of what is selected — the pane
+    /// that signalled, the agent's pane, the space.
+    fn openSelected(self: *Server) void {
+        const st = &self.alt;
+        const h = &st.home;
+        const r = h.selectedRow() orelse return;
+        if (r.task) |ti| {
             const tk = h.tasks[ti];
             switch (tk.kind) {
-                .approval => st.req.confirm(tk.action),
+                .approval => return,
                 .signal, .found => {
                     self.enterSpace();
                     self.focusPane(tk.pane);
@@ -4596,11 +4788,94 @@ pub const Server = struct {
             _ = self.touch();
             return;
         }
-        if (c.space) |si| {
+        if (r.space) |si| {
             self.enterSpace();
             self.switchSession(st.spaces[si].ws);
             _ = self.touch();
         }
+    }
+
+    /// "Ask vera about this": her pane, with the selected thing
+    /// attached as a reference the request carries.
+    fn askAbout(self: *Server) void {
+        const h = &self.alt.home;
+        const r = h.selectedRow() orelse return;
+        if (r.task) |ti| {
+            const tk = h.tasks[ti];
+            h.setAbout(tk.id, tk.full, tk.title);
+        } else if (r.space) |si| {
+            const sp = self.alt.spaces[si];
+            h.setAbout("", sp.full, sp.name);
+        }
+        if (!h.veraShown()) h.vera_open = true;
+        h.focus = .vera;
+    }
+
+    /// prefix-t: vera, or not. From a space the pane opens over the
+    /// panes and takes the keys; the panes keep their geometry.
+    fn toggleVera(self: *Server) void {
+        const h = &self.alt.home;
+        h.toggleVera();
+        if (!self.at_root) self.vera_keys = h.veraShown() and h.focus == .vera;
+        self.ask_on = askpkg.available(self.conf.askSlice());
+        _ = self.touch();
+        self.full = true;
+        self.pending = true;
+    }
+
+    /// Keys into vera's pane inside a space: the composer's, and Esc.
+    fn veraKey(self: *Server, bytes: []const u8) usize {
+        const st = &self.alt;
+        const h = &st.home;
+        defer {
+            self.full = true;
+            self.pending = true;
+        }
+        const b = bytes[0];
+        if (b == 0x1b) {
+            if (bytes.len >= 3 and (bytes[1] == '[' or bytes[1] == 'O')) {
+                var i: usize = 2;
+                while (i < bytes.len and !(bytes[i] >= 0x40 and bytes[i] <= 0x7e)) i += 1;
+                const fin: u8 = if (i < bytes.len) bytes[i] else 0;
+                switch (fin) {
+                    'A' => h.thread_scroll += 1,
+                    'B' => h.thread_scroll -|= 1,
+                    else => {},
+                }
+                return @min(i + 1, bytes.len);
+            }
+            // Esc: a running request, the draft, the attachment, then
+            // the pane (pinned: only the keys)
+            if (st.req.busy()) {
+                st.req.cancel();
+            } else if (st.len > 0) {
+                st.clear();
+            } else if (h.about_title_len > 0) {
+                h.clearAbout();
+            } else if (h.vera_pinned) {
+                self.vera_keys = false;
+                h.focus = .nav;
+            } else {
+                h.vera_open = false;
+                h.focus = .nav;
+                self.vera_keys = false;
+            }
+            return 1;
+        }
+        switch (b) {
+            '\r', '\n' => if (st.len > 0) self.sendAsk(),
+            0x7f, 0x08 => st.pop(),
+            0x15 => st.clear(),
+            0x03 => _ = st.escape(),
+            else => {
+                if (b < 0x20) return 1;
+                const len = std.unicode.utf8ByteSequenceLength(b) catch 1;
+                const end = @min(len, bytes.len);
+                for (bytes[0..end]) |ch| st.push(ch);
+                return end;
+            },
+        }
+        return 1;
     }
 
     fn altCommand(self: *Server, cmd: altpkg.Command, arg: []const u8) void {
@@ -4640,13 +4915,14 @@ pub const Server = struct {
             .now => {
                 self.alt.view = .home;
                 self.alt.clear();
-                self.alt.home.toDash();
-                self.alt.home.clampDash();
+                self.alt.home.focus = .nav;
+                self.alt.home.detail = false;
             },
             .vera => {
                 self.alt.view = .home;
                 self.alt.clear();
-                self.alt.home.focus = .composer;
+                if (!self.alt.home.veraShown()) self.alt.home.vera_open = true;
+                self.alt.home.focus = .vera;
             },
             .none => {},
         }
@@ -4961,13 +5237,12 @@ pub const Server = struct {
         st.clampCursor();
     }
 
-    /// The cockpit's projection: the spaces, then every task as one
-    /// entity — a producer's row, an agent rook sees producing where
-    /// nobody claims, a pane that signalled, an action waiting on a
-    /// hand — sorted into its module, then the cards. A task the rail
-    /// knows that changed state since last time earns one note in
-    /// the thread, so the conversation and the dashboard move
-    /// together off the same fact.
+    /// Home's projection: the spaces, then every task as one entity
+    /// — a producer's row, an agent rook sees producing where nobody
+    /// claims, a pane that signalled, an action waiting on a hand —
+    /// sorted into its group, then the navigator's rows, then the
+    /// inspector for what is selected. A task the rail knows that
+    /// changed state since last time earns one note in the thread.
     fn homeBuild(self: *Server, a: std.mem.Allocator, now: i64) void {
         const st = &self.alt;
         const h = &st.home;
@@ -5037,7 +5312,6 @@ pub const Server = struct {
                 "finished its progress bar"
             else
                 "signalled";
-            const where = if (tab.len > 0) (std.fmt.allocPrint(a, "in {s}, nobody was looking", .{tab}) catch tab) else "nobody was looking";
             _ = h.addTask(.{
                 .kind = .signal,
                 .module = .needs,
@@ -5045,7 +5319,9 @@ pub const Server = struct {
                 .space = chromepkg.shortSpace(at.workspace),
                 .full = at.workspace,
                 .actor = if (p.owner_len > 0) p.ownerName() else prog,
-                .event = where,
+                .program = prog,
+                .tab = tab,
+                .event = if (p.notif_body_len > 0 and p.notif_ms >= p.unread_ms) (a.dupe(u8, p.notif_body[0..p.notif_body_len]) catch "") else "",
                 .unread = true,
                 .age_ms = now - p.unread_ms,
                 .pane = p.id,
@@ -5053,8 +5329,8 @@ pub const Server = struct {
                 .win = win,
             });
         }
-        // the producer's tasks, each in its module by state
-        for (claims) |it| {
+        // the producer's tasks, each in its group by state
+        for (claims) |*it| {
             const ws_name = it.workspace();
             const held = self.sessionNamed(ws_name);
             const module: homepkg.Module = switch (it.state) {
@@ -5063,6 +5339,7 @@ pub const Server = struct {
                 else => .active,
             };
             const detail = if (it.event.len > 0) it.event else it.sub;
+            const agent_pane: u32 = if (held) |si| (self.agentPaneIn(self.sessions.items[si]) orelse 0) else 0;
             _ = h.addTask(.{
                 .kind = .producer,
                 .module = module,
@@ -5075,19 +5352,19 @@ pub const Server = struct {
                 .event = if (std.mem.startsWith(u8, detail, it.state.word())) std.mem.trimStart(u8, detail[it.state.word().len..], " ·") else detail,
                 .result = it.result,
                 .unread = it.unread,
-                .pane = if (held) |si| (self.agentPaneIn(self.sessions.items[si]) orelse 0) else 0,
+                .age_ms = if (it.started_ms > 0) now - it.started_ms else 0,
+                .pane = agent_pane,
                 .ws = held,
+                .item = it,
             });
-            // a change of state since last seen: one note, shared with
-            // the card by the task's id
             if (h.remember(it.id, it.state)) |was| {
                 // a task first seen already done is history, not news
-                if (was != .none or (h.seeded and it.state != .done)) self.noteTransition(a, it, was, now);
+                if (was != .none or (h.seeded and it.state != .done)) self.noteTransition(a, it.*, was, now);
             }
         }
         // agents rook can see producing where no producer claims: one
-        // quiet card each, titled by what rook can see. Idle ones are
-        // not work; they show as marks on their space's tabs.
+        // quiet row each, titled by what rook can see. Idle ones are
+        // not work; they show as marks on their space's row.
         for (self.sessions.items, 0..) |sn, si| {
             if (chromepkg.claimedIn(claims, sn.label())) continue;
             for (self.panes.items) |p| {
@@ -5111,7 +5388,8 @@ pub const Server = struct {
                     .space = chromepkg.shortSpace(sn.label()),
                     .full = sn.label(),
                     .actor = prog,
-                    .event = if (tab.len > 0) (std.fmt.allocPrint(a, "in {s} · no task was pushed for it", .{tab}) catch "") else "no task was pushed for it",
+                    .program = prog,
+                    .tab = tab,
                     .age_ms = now - lo,
                     .pane = p.id,
                     .ws = si,
@@ -5119,8 +5397,8 @@ pub const Server = struct {
             }
         }
 
-        // the cards, module by module; an empty module is left out,
-        // and an empty dashboard says so once
+        // the rows, group by group; an empty group is left out, and
+        // an empty navigator says so once
         var any_work = false;
         inline for (.{ homepkg.Module.needs, homepkg.Module.active, homepkg.Module.recent }) |m| {
             var n: usize = 0;
@@ -5129,30 +5407,324 @@ pub const Server = struct {
             }
             if (n > 0) {
                 any_work = true;
-                h.addCard(.{ .module = m, .header = true });
+                h.addRow(.{ .module = m, .header = true });
                 for (h.tasks[0..h.tasks_n], 0..) |tk, ti| {
-                    if (tk.module == m) h.addCard(.{ .module = m, .task = ti });
+                    if (tk.module == m) h.addRow(.{ .module = m, .task = ti });
                 }
             }
         }
-        if (!any_work) h.addCard(.{ .module = .active });
-        h.addCard(.{ .module = .spaces, .header = true });
-        for (0..st.spaces_n) |si| h.addCard(.{ .module = .spaces, .space = si });
+        if (!any_work) h.addRow(.{ .module = .active });
+        h.addRow(.{ .module = .spaces, .header = true });
+        for (0..st.spaces_n) |si| h.addRow(.{ .module = .spaces, .space = si });
 
         switch (st.land) {
             .none => {},
             .needs => {
-                h.toDash();
-                if (!h.landDash(.needs)) _ = h.landDash(.active);
+                if (!h.landNav(.needs)) _ = h.landNav(.active);
             },
             .running => {
-                h.toDash();
-                if (!h.landDash(.active)) _ = h.landDash(.needs);
+                if (!h.landNav(.active)) _ = h.landNav(.needs);
             },
         }
         st.land = .none;
         h.restoreSelection();
-        self.syncFromDash();
+        self.inspBuild(a, now);
+    }
+
+    /// The inspector for what is selected: sections only where the
+    /// data is, controls only where the producer said, and rook's
+    /// own two — open the workspace, ask vera about this.
+    fn inspBuild(self: *Server, a: std.mem.Allocator, now: i64) void {
+        const st = &self.alt;
+        const h = &st.home;
+        const ins = &h.insp;
+        ins.reset();
+        var kb: [72]u8 = undefined;
+        const row = h.selectedRow() orelse {
+            ins.subject("");
+            self.inspQuiet(a);
+            return;
+        };
+        ins.subject(h.rowKey(row, &kb));
+        if (row.task) |ti| {
+            self.inspTask(a, h.tasks[ti], now);
+        } else if (row.space) |si| {
+            self.inspSpace(a, si, now);
+        }
+    }
+
+    /// Nothing selected: what there is, and what there is to do.
+    fn inspQuiet(self: *Server, a: std.mem.Allocator) void {
+        const ins = &self.alt.home.insp;
+        var pk: [8]u8 = undefined;
+        const pfx = prefixName(self.prefix_key, &pk);
+        ins.line(.{ .kind = .title, .text = "rook", .mark = .none });
+        ins.line(.{ .kind = .meta, .text = std.fmt.allocPrint(a, "{d} space{s} · nothing running · nothing needs you", .{ self.sessions.items.len, plural(self.sessions.items.len) }) catch "" });
+        ins.line(.{ .kind = .blank });
+        ins.line(.{ .kind = .quiet, .text = "a task a producer pushes shows here by its goal; an agent rook sees producing shows by its pane" });
+        ins.line(.{ .kind = .blank });
+        ins.line(.{ .kind = .section, .text = "to do something" });
+        ins.line(.{ .kind = .kv, .extra = std.fmt.allocPrint(a, "{s}t", .{pfx}) catch "t", .text = "ask vera" });
+        ins.line(.{ .kind = .kv, .extra = ":new", .text = "a new space, by name" });
+        ins.line(.{ .kind = .kv, .extra = "/", .text = "find a space, a task, a tab, a pane" });
+    }
+
+    fn inspTask(self: *Server, a: std.mem.Allocator, tk: homepkg.Task, now: i64) void {
+        const st = &self.alt;
+        const h = &st.home;
+        const ins = &h.insp;
+        var ab: [16]u8 = undefined;
+        const mark = tk.mark();
+        ins.line(.{ .kind = .title, .text = tk.title, .mark = mark });
+        // who, where, what state, since when
+        var meta: std.ArrayList(u8) = .empty;
+        meta.appendSlice(a, tk.stateWord()) catch {};
+        if (tk.space.len > 0) meta.print(a, " · in {s}", .{tk.space}) catch {};
+        if (tk.tab.len > 0) meta.print(a, " › {s}", .{tk.tab}) catch {};
+        if (tk.actor.len > 0 and tk.kind != .found) meta.print(a, " · {s}", .{tk.actor}) catch {};
+        if (tk.kind == .found) meta.print(a, " · {s}", .{tk.program}) catch {};
+        if (tk.kind == .producer and tk.age_ms > 0) meta.print(a, " · {s} since it started", .{altpkg.age(&ab, tk.age_ms)}) catch {};
+        if (tk.kind == .found and tk.age_ms >= 0) meta.print(a, " · wrote {s} ago", .{altpkg.age(&ab, tk.age_ms)}) catch {};
+        if (tk.kind == .signal) meta.print(a, " · {s} ago, nobody was looking", .{altpkg.age(&ab, tk.age_ms)}) catch {};
+        ins.line(.{ .kind = .meta, .text = meta.items });
+        ins.line(.{ .kind = .blank });
+
+        switch (tk.kind) {
+            .approval => {
+                ins.line(.{ .kind = .section, .text = "what vera proposed" });
+                ins.line(.{ .kind = .text, .text = tk.title });
+                ins.line(.{ .kind = .kv, .extra = "runs", .text = tk.event });
+                if (st.req.ref) |*r| {
+                    if (r.intent_len > 0) {
+                        ins.line(.{ .kind = .blank });
+                        ins.line(.{ .kind = .section, .text = "because you asked for" });
+                        ins.line(.{ .kind = .text, .text = r.intentSlice() });
+                    }
+                    if (r.plan_n > 0) {
+                        ins.line(.{ .kind = .blank });
+                        ins.line(.{ .kind = .section, .text = "her plan" });
+                        var i: usize = 0;
+                        while (i < r.plan_n) : (i += 1) ins.line(.{ .kind = .step_todo, .text = r.planLine(i) });
+                    }
+                }
+                ins.line(.{ .kind = .blank });
+                ins.line(.{ .kind = .section, .text = "controls" });
+                ins.act(.{ .label = "run it", .kind = .approval, .action = tk.action, .run = tk.event });
+                ins.act(.{ .label = "ask vera about this", .kind = .ask });
+                return;
+            },
+            .signal => {
+                ins.line(.{ .kind = .section, .text = "what happened" });
+                ins.line(.{ .kind = .text, .text = std.fmt.allocPrint(a, "{s} {s} in {s}{s}{s}", .{ tk.program, tk.title, tk.space, if (tk.tab.len > 0) " › " else "", tk.tab }) catch tk.title });
+                if (tk.event.len > 0) ins.line(.{ .kind = .text, .text = tk.event });
+                self.inspOutput(a, tk.pane, 6);
+                ins.line(.{ .kind = .blank });
+                ins.line(.{ .kind = .section, .text = "controls" });
+                ins.act(.{ .label = "go see it", .kind = .go_see });
+                ins.act(.{ .label = "ask vera about this", .kind = .ask });
+                return;
+            },
+            .found => {
+                ins.line(.{ .kind = .quiet, .text = "no producer pushed a task for this agent, so rook can say only what it sees: the program, where it runs, and that it is producing" });
+                self.inspOutput(a, tk.pane, 8);
+                ins.line(.{ .kind = .blank });
+                ins.line(.{ .kind = .section, .text = "controls" });
+                ins.act(.{ .label = "open its pane", .kind = .open });
+                ins.act(.{ .label = "ask vera about this", .kind = .ask });
+                return;
+            },
+            .producer => {},
+        }
+
+        const it = tk.item orelse return;
+        if (it.goal.len > 0) {
+            ins.line(.{ .kind = .text, .text = it.goal });
+            ins.line(.{ .kind = .blank });
+        }
+        if (tk.state == .done) {
+            ins.line(.{ .kind = .section, .text = "outcome" });
+            ins.line(.{ .kind = .text, .text = if (tk.result.len > 0) tk.result else "finished; the producer gave no summary" });
+            ins.line(.{ .kind = .blank });
+        } else if (tk.state == .failed) {
+            ins.line(.{ .kind = .section, .text = "what went wrong" });
+            ins.line(.{ .kind = .text, .text = if (tk.event.len > 0) tk.event else "the producer said it failed, and no more" });
+            ins.line(.{ .kind = .blank });
+        } else if (tk.state == .blocked) {
+            ins.line(.{ .kind = .section, .text = "waiting on you" });
+            ins.line(.{ .kind = .text, .text = if (it.question.len > 0) it.question else if (tk.event.len > 0) tk.event else "the producer said it is waiting, and no more" });
+            ins.line(.{ .kind = .blank });
+        } else if (tk.event.len > 0) {
+            ins.line(.{ .kind = .section, .text = "now" });
+            ins.line(.{ .kind = .text, .text = tk.event });
+            ins.line(.{ .kind = .blank });
+        }
+        if (it.question.len > 0 and tk.state != .blocked) {
+            ins.line(.{ .kind = .section, .text = "question" });
+            ins.line(.{ .kind = .text, .text = it.question });
+            ins.line(.{ .kind = .blank });
+        }
+        if (it.plan.len > 0) {
+            var done: usize = 0;
+            for (it.plan) |sp| {
+                if (sp.done) done += 1;
+            }
+            ins.line(.{ .kind = .section, .text = "plan", .extra = std.fmt.allocPrint(a, "{d} of {d}", .{ done, it.plan.len }) catch "" });
+            for (it.plan) |sp| ins.line(.{ .kind = if (sp.done) .step_done else .step_todo, .text = sp.text });
+            ins.line(.{ .kind = .blank });
+        }
+        if (it.events.len > 0) {
+            ins.line(.{ .kind = .section, .text = "timeline" });
+            const from = it.events.len -| 8;
+            for (it.events[from..]) |ev| {
+                var eb: [16]u8 = undefined;
+                const age: []const u8 = if (ev.ms > 0) (a.dupe(u8, altpkg.age(&eb, now - ev.ms)) catch "") else "";
+                ins.line(.{ .kind = .event, .text = ev.text, .extra = age });
+            }
+            ins.line(.{ .kind = .blank });
+        }
+        if (it.files.len > 0) {
+            ins.line(.{ .kind = .section, .text = "files", .extra = std.fmt.allocPrint(a, "{d}", .{it.files.len}) catch "" });
+            for (it.files[0..@min(it.files.len, 8)]) |fpath| ins.line(.{ .kind = .output, .text = fpath });
+            if (it.files.len > 8) ins.line(.{ .kind = .quiet, .text = std.fmt.allocPrint(a, "and {d} more", .{it.files.len - 8}) catch "" });
+            ins.line(.{ .kind = .blank });
+        }
+        if (it.commits.len > 0) {
+            ins.line(.{ .kind = .section, .text = "commits" });
+            for (it.commits[0..@min(it.commits.len, 6)]) |c| ins.line(.{ .kind = .output, .text = c });
+            ins.line(.{ .kind = .blank });
+        }
+        if (it.tests.len > 0) ins.line(.{ .kind = .kv, .extra = "tests", .text = it.tests });
+        if (it.artifacts.len > 0) {
+            ins.line(.{ .kind = .section, .text = "artifacts" });
+            for (it.artifacts) |ar| {
+                if (ar.url.len > 0) {
+                    ins.line(.{ .kind = .kv, .extra = ar.label, .text = ar.url });
+                } else {
+                    ins.line(.{ .kind = .output, .text = ar.label });
+                }
+            }
+            ins.line(.{ .kind = .blank });
+        }
+        if (it.usage) |u| {
+            ins.line(.{ .kind = .kv, .extra = "usage", .text = std.fmt.allocPrint(a, "{s} tokens · {s}", .{ fmtTokens(a, u.tokens), fmtCents(a, u.cents) }) catch "" });
+        }
+        const n_turns = h.thread.countAbout(tk.id);
+        if (n_turns > 0) {
+            ins.line(.{ .kind = .kv, .extra = "vera", .text = std.fmt.allocPrint(a, "{d} turn{s} about this in her pane", .{ n_turns, plural(n_turns) }) catch "" });
+        }
+        if (tk.pane != 0 and tk.state != .done) self.inspOutput(a, tk.pane, 4);
+        ins.line(.{ .kind = .blank });
+        ins.line(.{ .kind = .section, .text = "controls" });
+        if (st.req.ref) |*r| {
+            if (r.task_len > 0 and std.mem.eql(u8, r.taskSlice(), tk.id)) {
+                for (r.actions[0..r.actions_n], 0..) |*act, i| {
+                    if (act.ran or act.running) continue;
+                    ins.act(.{ .label = act.labelSlice(), .kind = .approval, .action = i, .run = act.runSlice() });
+                }
+            }
+        }
+        for (it.options) |o| ins.act(.{ .label = o.label, .kind = .answer, .run = o.run, .ctrl = o.kind });
+        for (it.controls) |c| ins.act(.{ .label = c.label, .kind = .control, .run = c.run, .ctrl = c.kind });
+        if (tk.ws != null) ins.act(.{ .label = if (tk.pane != 0) "open its pane" else "open the space", .kind = .open });
+        ins.act(.{ .label = "ask vera about this", .kind = .ask });
+        if (it.options.len == 0 and it.controls.len == 0 and tk.state != .done) {
+            ins.line(.{ .kind = .quiet, .text = "the producer offered no controls for this task; what it supports, it says on the rail" });
+        }
+    }
+
+    /// The last lines a pane wrote, from retained cells — output,
+    /// shown, never read for state.
+    fn inspOutput(self: *Server, a: std.mem.Allocator, pane_id: u32, max: usize) void {
+        const ins = &self.alt.home.insp;
+        const p = self.pane(pane_id) orelse return;
+        p.snapshot() catch return;
+        const view = self.frame.plainText(p);
+        self.full = true;
+        var lines: [8][]const u8 = undefined;
+        var n: usize = 0;
+        var it = std.mem.splitBackwardsScalar(u8, view, '\n');
+        while (it.next()) |line| {
+            const t = std.mem.trim(u8, line, " \t\r");
+            if (t.len == 0) continue;
+            if (n == @min(max, lines.len)) break;
+            lines[n] = a.dupe(u8, t[0..@min(t.len, 160)]) catch "";
+            n += 1;
+        }
+        if (n == 0) return;
+        ins.line(.{ .kind = .blank });
+        var nb: [64]u8 = undefined;
+        const prog = p.fgName(&nb) orelse "shell";
+        ins.line(.{ .kind = .section, .text = "its pane", .extra = a.dupe(u8, prog) catch "" });
+        var i = n;
+        while (i > 0) {
+            i -= 1;
+            ins.line(.{ .kind = .output, .text = lines[i] });
+        }
+    }
+
+    fn inspSpace(self: *Server, a: std.mem.Allocator, si: usize, now: i64) void {
+        const st = &self.alt;
+        const h = &st.home;
+        const ins = &h.insp;
+        const sp = st.spaces[si];
+        const sn = self.sessions.items[sp.ws];
+        ins.line(.{ .kind = .title, .text = sp.name, .mark = if (sp.unread > 0) .attention else if (sp.working) .working else .none });
+        var ab: [16]u8 = undefined;
+        ins.line(.{ .kind = .meta, .text = std.fmt.allocPrint(a, "a space · {d} tab{s}{s}{s}", .{ sp.tabs.len, plural(sp.tabs.len), if (sp.quiet_ms > 0) " · quiet " else "", if (sp.quiet_ms > 0) altpkg.age(&ab, sp.quiet_ms) else "" }) catch "" });
+        ins.line(.{ .kind = .blank });
+        var any = false;
+        inline for (.{ homepkg.Module.needs, homepkg.Module.active, homepkg.Module.recent }) |m| {
+            var first = true;
+            for (h.tasks[0..h.tasks_n]) |tk| {
+                if (tk.module != m or !std.mem.eql(u8, tk.full, sp.full)) continue;
+                if (first) {
+                    ins.line(.{ .kind = .section, .text = m.word() });
+                    first = false;
+                    any = true;
+                }
+                const mg = ui.markGlyph(&self.ui, tk.mark());
+                ins.line(.{ .kind = .text, .text = std.fmt.allocPrint(a, "{s} {s}{s}{s}", .{ mg, tk.title, if (tk.actor.len > 0) " · " else "", tk.actor }) catch tk.title });
+            }
+            if (!first) ins.line(.{ .kind = .blank });
+        }
+        if (!any) {
+            ins.line(.{ .kind = .quiet, .text = "no task the rail knows runs here" });
+            ins.line(.{ .kind = .blank });
+        }
+        var agents: usize = 0;
+        for (self.panes.items) |p| {
+            if (!p.is_agent or !self.paneIn(sn, p.id)) continue;
+            if (agents == 0) ins.line(.{ .kind = .section, .text = "agents" });
+            agents += 1;
+            var nb: [64]u8 = undefined;
+            const prog = a.dupe(u8, p.fgName(&nb) orelse "agent") catch "agent";
+            const lo = p.last_output_ms.load(.acquire);
+            const producing = lo != 0 and now - lo < chromepkg.working_ms;
+            var eb: [16]u8 = undefined;
+            const word: []const u8 = if (producing) "producing" else (std.fmt.allocPrint(a, "idle · {s} since output", .{altpkg.age(&eb, now - lo)}) catch "idle");
+            ins.line(.{ .kind = .text, .text = std.fmt.allocPrint(a, "{s} {s}{s}{s} · {s}", .{ ui.markGlyph(&self.ui, if (producing) .working else .waiting), prog, if (p.owner_len > 0) " claimed by " else "", if (p.owner_len > 0) p.ownerName() else "", word }) catch prog });
+        }
+        if (agents > 0) ins.line(.{ .kind = .blank });
+        ins.line(.{ .kind = .section, .text = "tabs" });
+        for (sp.tabs) |tb| {
+            var lb: [64]u8 = undefined;
+            const label = altpkg.tabLabel(&lb, tb.name, tb.actor);
+            const mg = ui.markGlyph(&self.ui, altpkg.markOf(tb.mark));
+            ins.line(.{ .kind = .output, .text = std.fmt.allocPrint(a, "{s}{s}{s}{s}", .{ label, if (mg.len > 0) " " else "", mg, if (tb.current) " · current" else "" }) catch label });
+        }
+        ins.line(.{ .kind = .blank });
+        ins.line(.{ .kind = .section, .text = "controls" });
+        ins.act(.{ .label = "enter the space", .kind = .enter });
+        ins.act(.{ .label = "ask vera about this", .kind = .ask });
+        if (h.tasks_n == 0) {
+            var pk: [8]u8 = undefined;
+            const pfx = prefixName(self.prefix_key, &pk);
+            ins.line(.{ .kind = .blank });
+            ins.line(.{ .kind = .section, .text = "to do something" });
+            ins.line(.{ .kind = .kv, .extra = std.fmt.allocPrint(a, "{s}t", .{pfx}) catch "t", .text = "ask vera" });
+            ins.line(.{ .kind = .kv, .extra = ":new", .text = "a new space, by name" });
+            ins.line(.{ .kind = .kv, .extra = "/", .text = "find a space, a task, a tab, a pane" });
+        }
     }
 
     /// A task the rail knows moved: say so in the thread, once, in
@@ -5187,45 +5759,6 @@ pub const Server = struct {
         }
     }
 
-    /// The dashboard's selection finds the turn about the same task.
-    fn syncFromDash(self: *Server) void {
-        const h = &self.alt.home;
-        h.linked = null;
-        const c = h.selectedCard() orelse return;
-        const ti = c.task orelse return;
-        h.linked = h.thread.about(h.tasks[ti].id);
-    }
-
-    /// The thread's selection finds the card about the same task, or
-    /// the space it names, and moves focus there.
-    fn syncFromThread(self: *Server) bool {
-        const h = &self.alt.home;
-        const tc = h.thread_cur orelse return false;
-        const turn = h.thread.get(tc);
-        if (h.cardFor(turn.taskSlice(), "")) |ci| {
-            h.dash_cur = ci;
-            h.dash_touched = true;
-            h.noteSelection();
-            h.toDash();
-            self.syncFromDash();
-            return true;
-        }
-        if (turn.space_len > 0) {
-            for (h.cards[0..h.cards_n], 0..) |c, ci| {
-                const si = c.space orelse continue;
-                if (std.mem.eql(u8, self.alt.spaces[si].full, turn.spaceSlice()) or std.mem.eql(u8, self.alt.spaces[si].name, turn.spaceSlice())) {
-                    h.dash_cur = ci;
-                    h.dash_touched = true;
-                    h.noteSelection();
-                    h.toDash();
-                    self.syncFromDash();
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
     /// The request moved: the thread gets the turn.
     fn absorbRequest(self: *Server, ev: askpkg.Request.Event) void {
         const st = &self.alt;
@@ -5250,7 +5783,7 @@ pub const Server = struct {
                     turn.req_serial = h.req_serial;
                 } else {
                     const reply = std.mem.trim(u8, st.req.replySlice(), " \t\r\n");
-                    _ = h.thread.push(.vera, if (reply.len > 0) reply else "answered with nothing", "", "", now);
+                    _ = h.thread.push(.vera, if (reply.len > 0) reply else "answered with nothing", h.aboutTask(), h.aboutSpace(), now);
                 },
                 .failed => {
                     var b: [200]u8 = undefined;
@@ -5270,6 +5803,24 @@ pub const Server = struct {
                 }
             },
         }
+        h.thread_scroll = 0;
+    }
+
+    /// An item's control finished: its receipt is a turn about the
+    /// task, and the rail's next push says what changed.
+    fn absorbRunner(self: *Server) void {
+        const h = &self.alt.home;
+        const j = &(h.runner.job orelse return);
+        var b: [320]u8 = undefined;
+        const out = askpkg.firstLine(j.stdout());
+        const err = askpkg.firstLine(j.stderr());
+        const now = panepkg.epochMs();
+        if (j.code == 0) {
+            _ = h.thread.push(.receipt, std.fmt.bufPrint(&b, "ran {s}{s}{s}", .{ h.runner.labelSlice(), if (out.len > 0) " · " else "", out }) catch h.runner.labelSlice(), h.runner.taskSlice(), "", now);
+        } else {
+            _ = h.thread.push(.err, std.fmt.bufPrint(&b, "{s} failed ({d}){s}{s}", .{ h.runner.labelSlice(), j.code, if (err.len > 0) " · " else "", if (err.len > 0) err else out }) catch h.runner.labelSlice(), h.runner.taskSlice(), "", now);
+        }
+        h.runner.job = null;
         h.thread_scroll = 0;
     }
 
@@ -5512,6 +6063,18 @@ fn markOf(m: chromepkg.TabMark) ui.Mark {
         .unread => .unread,
         .attention => .attention,
     };
+}
+
+/// `812k`, `1.2M`, `93` — tokens at a glance.
+fn fmtTokens(a: std.mem.Allocator, n: u64) []const u8 {
+    if (n >= 1_000_000) return std.fmt.allocPrint(a, "{d}.{d}M", .{ n / 1_000_000, (n % 1_000_000) / 100_000 }) catch "";
+    if (n >= 1_000) return std.fmt.allocPrint(a, "{d}k", .{n / 1_000}) catch "";
+    return std.fmt.allocPrint(a, "{d}", .{n}) catch "";
+}
+
+/// `$4.18`, from cents.
+fn fmtCents(a: std.mem.Allocator, cents: u64) []const u8 {
+    return std.fmt.allocPrint(a, "${d}.{d:0>2}", .{ cents / 100, cents % 100 }) catch "";
 }
 
 /// The prefix key as a person types it: the character itself, or

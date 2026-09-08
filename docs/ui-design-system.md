@@ -147,43 +147,40 @@ border.
 
 ## The root
 
-The canvas is `chrome`, split into the conversation and the
-dashboard by one column of `border_subtle` when the glass affords
-both; one view with a switcher (two dense tabs, the hidden view's
-attention count on its tab) when it does not.
+The canvas is `chrome`: the navigator (a third) and the inspector
+(the rest), split by one column of `border_subtle`; vera's pane on
+`raised` over the inspector's side with one `border_subtle` edge, or
+a third column on `chrome` when pinned and afforded; on narrow glass
+one at a time.
 
-Region headers: one line, the region's name in `primary` bold when
-it has focus and `secondary` otherwise, its status after ` · ` in the
-status's ink (`working` while she thinks, `attention` while she waits
-on you, `err` offline), and for the dashboard the attention count in
-the attention ink.
+Navigator groups: a `muted` word and a count, `needs you` in the
+attention ink, bold, a blank row above all but the first. Rows: the
+mark in its ink, the title in `primary` (bold when selected or
+needing you), the space or the age at the edge in `muted`. The
+selected row is a `selection` band with the accent marker — `muted`
+when focus is elsewhere, so selection and focus never read alike. A
+needs-you row wears the attention edge (`▎`). A space row is the
+name, its mark, its tab count in `muted`, its age.
 
-Conversation roles, in a four-cell margin: `you` in `primary` bold;
-`✦` in the accent for her; `✓` in `muted` for a receipt and in
-`success` for an outcome; `✕` in `err`; `·` in `muted` for rook's
-note. Prose is unboxed — yours in `primary`, hers in `secondary`,
-receipts and notes in `muted`. Her reflection is a block on `raised`
-across the body: the intent in `primary`, the plan numbered in
-`secondary`, a question with the attention mark, the actions with
-their marks. The selected turn wears the accent marker and bold on
-its first line; the age sits at the right edge in `muted`. The
-composer is `raised` with the accent prompt when it has focus and
-`chrome` with a `muted` prompt otherwise; its hint line under it is
-`muted`.
+Inspector: the title with its mark, bold; the meta line in
+`secondary`; section words in `muted` with a count after; prose in
+`primary`, wrapped; a done step `✓` in `success` with `muted` text,
+a pending step `◌` in `muted` with `primary` text; a timeline row's
+age in `muted` then its text in `secondary`; a key-value's key in
+`muted` at a fixed column; output lines behind a `│` in `muted`, the
+text in `secondary`; quiet lines in `muted`. Controls: a glyph for
+the kind (`◌` an answer or an approval, `›` open, `!` go see, `✦`
+ask vera, `✕` stop in `err`), the label in `primary`, the command
+after `$` in `muted`; the selected control a `selection` band with
+the accent marker and `↵` at the edge. `⋯ n more · j k` at the foot
+when it overflows.
 
-Dashboard modules: a `muted` word and a count, two rows (a blank
-above), `needs you` in the attention ink, bold. Cards: the mark in
-its ink and the title in `primary` (bold when selected, or when it
-needs you); the space and the actor in `secondary` with `muted`
-dots; the state word in the mark's ink; the current step in
-`secondary` (`primary` on a needs-you card). A needs-you card wears
-the attention edge (`▎`, `|` in ASCII) down its left. The selected
-card is a `selection` band across its rows with the accent marker
-and what ↵ does at its right edge in the accent. Recent is one flat
-line; a space row is the name in `primary`, its tabs as `secondary`
-labels with their marks, its age at the edge. No card has a border
-of its own; the edge and the band are the only enclosures, and
-content sets a card's height.
+Vera's pane: the header (`✦` in the accent while focused, the name
+bold, her status in its ink, `pinned` at the edge), `about <chip>`
+when a reference is attached, the thread as before (roles in the
+margin, her reflection as a block one step up from the pane's
+ground), the composer at the foot — the field one step up when
+focused, the prompt in the accent — and its hint line.
 
 Figures (orbit) wear `border`, the selected one `border_focused`;
 the space's name in the top edge is its chip; the tabs inside are
@@ -191,6 +188,19 @@ the tab component without indices. Ledger draws the same rows with
 the same inks. Finding and commanding draw one `raised` field with
 the accent prompt at the top of the canvas and rows under it, the
 selected one banded.
+
+## The calm bar's modules
+
+Composed by name (`status_home`, `status_space`). `view`: `rook`
+bold, the view, the focused region, in `muted`. `input`: `you ▸
+tool`, or the actor's claim. `agents`: `agents` in `muted`, `◐ n
+active` in the working ink, `n idle` in `muted`. `attention`: `! n
+need you` in the attention ink, bold glyph, off at zero. `blocked`:
+`✕ n failed` in `err`, off at zero. `session`: `session` in `muted`,
+the spend in `secondary`, the tokens in `muted`, off when nobody
+reported. `vera`: her name in her status's ink, bold when it is not
+`ready`. Counts (`working`, `unread`, `pins`) as before. Warnings
+strengthen by ink and weight, never by motion.
 
 ## Overlays
 

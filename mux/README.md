@@ -47,8 +47,9 @@ and `sidebar_mode = "open"` is how a config asks for it back. Then:
     x          kill pane                  d        detach
     o          home: out to rook, from anywhere    u   the oldest unread pane
     s          orbit: the spaces as figures, a subview of home
-    a  !       home, the cursor on what is running / what needs you
-    t  /  :    home, ready to ask vera / find / command
+    t  T       vera's pane, from anywhere; pinned, she stays
+    a  !       home, the navigator on what is in progress / what needs you
+    /  :       home, finding / a command
     C-o        return jump: the space before the last hop
     i          inspector: the focused pane's actor, input owner, program
     A          the legacy side panel away, and back
@@ -241,38 +242,43 @@ exits 0 in silence: it is written to be a hook.
 Plain `rook` lands at home: the same frame, the whole width between
 the bars rook's own canvas, split in two. The scope slot holds the
 system's chip — `rook` in the accent block, which a space's name
-never wears, so a space named `rook` is still just a space — and
-after it, where the tabs were, `3 spaces · 2 agents working · 1 needs
-you`; no corner, because nothing is above home. Left, the
-conversation: `✦ vera · ready` (or `thinking`, `waiting for you`,
-`offline — not on PATH`), the thread oldest to newest — `you` and
-what you said, `✦` and her words, her reflection as a tinted block
-with the plan and the actions' live state, `✓` receipts and
-outcomes, `✕` failures, `·` rook's one-line notes when a task
-begins or needs you — and the composer at the foot. Right, the
-dashboard: `now`, then `needs you`, `in progress`, `recent`, `spaces`,
-each only when it has something, as cards: the mark and the goal,
-the space and the actor and the state, the current step. A task is
-one card; its agent, pane and space are on it, never beside it; an
-idle agent is not work. `⇥` moves focus composer → dashboard →
-thread; `↑ ↓` walk cards or turns; `↵` runs an approval, opens a
-card's pane, enters a space; typing always goes to the composer.
-Esc closes one layer: a running request, the draft, focus, a
-subview; at home it does nothing. Under 85 columns one view shows
-at a time, `vera` or `now`, with a switcher and the attention count
-on the hidden one. Nothing is resized to get here or back.
+never wears, so a space named `rook` is still just a space — then
+the view as a tab and, muted, what is selected; no counts, no
+corner. Left, the work navigator: `needs you`, `in progress`,
+`recent`, `spaces`, each only when it has rows — one row per task,
+by goal, with its mark and its space or age; a task's agent, pane
+and space are on it, never beside it; an idle agent is not work.
+Right, the inspector for the selected row: the goal, `now` (or
+`waiting on you` with the question, or `what went wrong`, or the
+`outcome`), the plan with `n of m`, the timeline, files, commits,
+tests, artifacts, usage, the last lines its pane wrote, and
+`controls` — the producer's options and actions (each a command
+rook runs on ↵, never implied), vera's pending proposals about it,
+`open its pane`, `ask vera about this`. `j k` walk, `l` inspects,
+`h` is the list, `o` opens the exact pane or space, `g G` the ends,
+Ctrl-h/l and ⇥ walk the regions. Under 81 columns the two are a
+stack. Nothing is resized to get here or back.
 
-Bare text is a request to the companion: `vera say -c rook <text>`,
-run with pipes, its stdout her turn. When she answers in one JSON
-object (`ask.zig`: intent, plan, space, task, question, actions) the
-thread shows the block, and each proposed action is a card under
-`needs you` with the command it would run — ↵ on the card runs it,
-by hand; the receipt is a turn, and whatever the action pushed to
-the rail is a card. Without her on PATH the header and the composer
-say so, and `/`, `:` and the dashboard still work. `/` finds spaces,
-work items, tabs and panes as one ranked list; `:` completes a
-command (`go`, `new`, `rename`, `close`, `home`, `orbit`, `ledger`,
-`now`, `vera`).
+Vera is a pane rook owns, one key away: `prefix-t` summons her over
+the inspector's side (or, in a space, over the panes, holding the
+keys, resizing nothing) and again dismisses her; `prefix-T` pins
+her, a third column when the glass affords three. Her thread, her
+scroll and your draft survive. Typing a letter from the navigator
+summons her with the letter; `/` and `:` are find and command
+without her. `ask vera about this` attaches the selected task as a
+reference the request carries (`ROOK_ABOUT_TASK`, `ROOK_ABOUT_SPACE`
+in its environment). Bare text runs `vera say -c rook <text>`; a
+reply that is one JSON object (`ask.zig`: intent, plan, space, task,
+question, actions) is a block in her pane and its actions are rows
+under `needs you`. Without her on PATH the bar says `vera offline`
+and everything but her works.
+
+The calm bar is composed from `[mux] status_home` at home (`view -
+agents attention blocked session vera`) and `status_space` in a
+space (`input - working attention unread pins`): `agents ◐ 2 active
+· 1 idle`, `! 2 need you`, `✕ 1 failed`, `session $4.18 · 812k
+tokens` (the producer's usage since this server started; off until
+someone reports it), `vera ready|thinking|waiting for you|offline`.
 
 prefix-s is orbit, a subview of home: the scope bar reads `rook │
 orbit` with `esc rook` in the corner, and every space is a figure

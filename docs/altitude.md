@@ -51,9 +51,11 @@ The state, in one place (`altitude.zig`, `State`):
 | cursor | `State.cur` | the selected row; kept too |
 | request | `State.req` (`ask.zig`) | `none`, `running`, `replied`, `failed`, `offline`; the reply, the reflection, the receipts |
 | landing | `State.land` | where `prefix-a` / `prefix-!` put the cursor at the next build |
-| focus | `home.State.focus` | `composer`, `thread`, `dash`; the narrow view follows it |
-| thread | `home.State.thread` | this session's turns, a ring; `thread_cur`, `thread_scroll`, `linked` |
-| dashboard | `home.State.cards` over `tasks` | rebuilt each frame; `dash_cur`, `dash_scroll` survive |
+| focus | `home.State.focus` | `nav`, `insp`, `vera`; `detail` on the narrow stack |
+| thread | `home.State.thread` | this session's turns, a ring; `thread_scroll` |
+| navigator | `home.State.rows` over `tasks` | rebuilt each frame; `nav_cur` by identity (`nav_key`), `nav_scroll` |
+| inspector | `home.State.insp` | lines and controls, rebuilt each frame; `cur` and `scroll` kept per subject |
+| vera's pane | `vera_open`, `vera_pinned`, `about_*` | summoned, kept, and what the next request is about |
 | return jump | `Server.last_sess` | the space before the last hop, for `prefix-C-o` |
 
 Startup destination is decided once, on the wire: `attach` carries
@@ -93,8 +95,9 @@ the glass, and where it shows.
 | **agent found** | `Pane.is_agent` — a tool the config lists under `agents` | the 2 s scan | a `claude` running unclaimed | the ◐ mark; the working count; a `running` row at home when no producer claims its space, `goal unknown` |
 | **work item** | a producer's `agents` row (`chrome.Item`): goal, state, space, and optionally actor, event, result | until the next push | "Fix flaky auth · working · api · codex" | `needs you` (waiting, failed), `running` (working, idle), `recent` (done) at home; a space's event line |
 | **request** | `ask.Request` — the text sent to the companion's command, and what came back | until the next request | `you  deploy the api` | a turn in the thread; the header (`✦ vera · thinking`); the bar |
-| **turn** | `home.Turn` — one entry of the thread: a role, its words, its age, and the task or space it is about | this session (a ring of 40) | `✓ Deploy api to staging finished · staging is on 1.4.2` | the conversation |
-| **card** | `home.Card` over a `home.Task` — the projection of one task into a module | rebuilt every frame from the rail and the pane table | `◐ Fix flaky auth / api · codex · working` | the dashboard |
+| **turn** | `home.Turn` — one entry of the thread: a role, its words, its age, and the task or space it is about | this session (a ring of 40) | `✓ Deploy api to staging finished · staging is on 1.4.2` | vera's pane |
+| **task** | `home.Task` over a rail `Item` — the projection of one task into a group, with the item's typed detail (goal, plan, events, files, commits, tests, artifacts, usage, question, options, actions) | rebuilt every frame from the rail and the pane table | `◐ Fix flaky auth` | a navigator row; the inspector |
+| **control** | `home.Act` — a producer's option or action (a command), vera's pending proposal, or rook's own move | with the inspector | `◌ us-east first  $ vera task answer t1 …` | the inspector's `controls` |
 | **reflection** | `ask.Reflection` — a reply that is one JSON object: intent, plan, space, question, actions | with its request | `in api · 1. run the tests…` | under the request; actions as `proposed` rows |
 | **provider / model** | not held — a producer's vocabulary | — | Sonnet | the inspector says it is not rook's to know |
 | **legacy sidebar** | `foundSpaces()` + pushed rows, `sidebar_mode = "open"` | — | | not default chrome; `prefix-A` toggles it for a config that asked; still on `surfaces[]` |
@@ -117,95 +120,111 @@ The system's chip is the accent fill and appears only at the root.
 The identities differ too — the space is a `Session` with the label
 `rook`; the root is the server — so nothing looks one up by the word.
 
-## Home: the cockpit
+## Home: the navigator and the inspector
 
-The canvas at the root is two regions between the scope bar and the
-calm bar, split at 62% when both keep a useful width (`home.zig`,
-`layout` — one boundary, in cells): the conversation on the left, the
-dashboard on the right, one quiet divider between them. The left
-answers *what do I want, and what have vera and I decided?* The right
-answers *what is happening right now?* They are one interface: a
-card and a turn about the same task share the task's id, and
-selecting either finds the other.
+The canvas at the root is the **work navigator** on the left (a
+third) and the **inspector** on the right (the rest), split at one
+quiet divider (`home.zig`, `layout` — one boundary, in cells:
+`nav_pct`, `min_nav`, `min_insp`, `min_vera`). The left answers
+*what needs me, what is running, what finished, where?* as a stable
+index; the right answers *what is this, and what can I do about it?*
+in the detail the data affords. Vera is one key away, never a
+column by default.
 
-**The conversation.** A header — `✦ vera · ready`, or `thinking`,
-`waiting for you`, `asked you something`, `could not answer`,
-`offline — not on PATH` — then the thread, oldest to newest,
-bottom-anchored, then the composer at the foot with its hint under
-it. A turn is a role in the margin and its words: `you` and what you
-typed; `✦` and her words, in secondary ink; her reflection as a
-tinted block — the intent, the plan numbered, a question with the
-attention mark, and the actions with their live state (`◌` waiting,
-`◐` running, `✓ ran · what it printed`, `✕ failed`); `✓` and a
-receipt when an action ran; `✓` and the outcome when a task the rail
-knows finished; `✕` when something failed; `·` and one line when a
-task began or came to need you. Every turn wears its age at the
-edge. The composer is a raised field when it has focus (`› Ask
-vera…`), flat otherwise; empty, `↵ sends · / find · : command · ⇥
-dashboard`; while she is thinking, `vera thinking · esc cancels`.
-An empty thread says once what the side is for.
+**The navigator.** Groups in this order, each only when it has
+rows, with a count: `needs you` (vera's proposed actions; a pane
+that rang, notified or finished a bar while nobody looked; a task a
+producer says is waiting or failed), `in progress` (a producer's
+tasks by goal; then an agent rook can see producing where no
+producer claims, `claude at work` — never an idle one), `recent`
+(what finished), `spaces` (one row each: the name, its marks, its
+tab count, its age). A row is the mark, the title, and at the edge
+the space or the age — what selection needs and no more. The
+selected row wears the band and the accent marker (muted when focus
+is elsewhere); a needs-you row the attention edge. An empty
+navigator says `all quiet · nothing needs you` once. The
+selection is an identity, not an index: a task that moves between
+groups stays selected; a row inserted above it does not move it;
+until a hand has chosen, the cursor rests on the first row.
 
-**The dashboard.** `now`, with the attention count beside it, then
-the modules that have anything, in this order: `needs you` (the
-companion's proposed actions, each a card with the command it would
-run; a pane that rang, notified or finished a bar while nobody
-looked; a task a producer says is waiting or failed), `in progress`
-(a producer's tasks by goal; then an agent rook can see producing in
-a space no producer claims — one quiet card, `claude at work`, with
-`no task was pushed for it`, and never an idle one), `recent` (what
-finished, one flat line with the result), `spaces` (one row each:
-the name, the tabs with their actors and marks, how long quiet — the
-task's title is never repeated there). A card is the mark and the
-title, then the space, the actor and the state, then the current
-step wrapped to two lines. A needs-you card wears the attention edge
-down its left; the selected card a band and what ↵ does at its edge
-(`↵ runs`, `↵ open`, `↵ go see`, `↵ enter`). An empty module is left
-out; an empty dashboard says `nothing running, nothing needs you`
-once, above the spaces.
+**The inspector.** For the selected thing, sections only where the
+data is (`inspBuild`): the title with its mark; `state · in space ›
+tab · actor · age`; the goal; `now` (the current step), or `waiting
+on you` with the question, or `what went wrong`, or `outcome`; the
+plan with `n of m`; the timeline with ages; files, commits, tests,
+artifacts; usage; how many turns vera's thread holds about it; the
+last lines its pane wrote, as output; then `controls`. Controls are
+the producer's (`options` for a question, `actions` for lifecycle
+moves — each a command rook runs on ↵, never implied), then vera's
+pending proposals for that task, then rook's own two: `open its
+pane` / `open the space` / `go see it`, and `ask vera about this`.
+A space's detail is its work by group, its agents (producing, or
+idle with the age), its tabs, and `enter the space`. Nothing
+selected: a compact quiet summary and what there is to do.
 
-**Focus.** Three regions — the composer, the thread, the dashboard
-— and the transient modes. Printable typing always reaches the
-composer, wherever focus was. `⇥` cycles composer → dashboard →
-thread; `⇤` the other way. `↑` from an empty composer walks into the
-thread, on the latest turn; `↓` past the latest turn is the composer
-again. In the dashboard `↑ ↓` (C-p C-n) move over the cards and the
-turn about the selected card lights up in the thread; `↵` acts —
-an approval runs, a task opens its agent's pane, a signal opens the
-pane that rang, a space is entered. In the thread `↵` on a turn about
-a task moves focus to its card; on a turn about a space, enters it.
-The regions have a geometry, so they take the same vim motion the
-panes inside a space take: the thread sits above the composer, the
-dashboard is right of both, and `C-h` `C-j` `C-k` `C-l` walk it —
-`C-l` to the dashboard, `C-h` back to the region it came from (the
-thread with its turn still selected, the composer with its draft
-intact), `C-k` up into the thread, `C-j` down to the composer. At an
-edge the key is the view's again: `C-h` in the composer is still a
-backspace, and there is nothing below the composer or beside the
-dashboard.
-`prefix-a` is home with the dashboard on the first card in progress,
-`prefix-!` on the first that needs you; `:now` and `:vera` are the
-same by name. Esc unwinds: a running request, a typed draft, focus
-back to the composer, a subview, then nothing. Selection is never
-activity or attention, and nothing that happens moves focus.
+**Vera's pane.** `prefix-t` summons her from home or from any
+space, over the inspector's side (or over the panes, in a space,
+resizing nothing); `prefix-t` again dismisses her; `prefix-T` pins
+her, and a pinned pane takes a third column when all three regions
+fit (`min_nav + min_insp + min_vera + 2`), else overlays with
+`pinned` in its header. The thread, the scroll and the draft
+survive toggling and workspace changes. `ask vera about this`
+opens her with the selected task attached — the header says `about
+<title>` and the request carries `ROOK_ABOUT_TASK` and
+`ROOK_ABOUT_SPACE` in its environment, a reference, not words. Her
+replies and rook's notes update the same tasks the navigator lists.
+Typing a letter from the navigator or the inspector summons her
+with the letter in the composer; `/` and `:` are find and command,
+as ever, without her.
 
-**Narrow glass.** Under 85 columns of canvas (`min_left + min_right
-+ 1`) the cockpit shows one view at a time, `vera` or `now`, with a
-switcher on its first row and the attention count on `now` while it
-is hidden. The view follows focus — `⇥` to the dashboard is `now`,
-`⇥` on is `vera` — and the draft, the selection and both scrolls
-survive the switch. Orbit stays what it was; it never stands in for
-the dashboard.
+**Who owns a letter.** In the navigator and the inspector, `h j k
+l o g G` are motion and never reach vera; every other printable
+letter summons her with itself in the composer, so a message that
+begins with one of those seven starts from her pane (`prefix-t`, or
+⇥ to her) — the rule is seven letters, said once here, and her
+pane's hint names the two keys. Inside her pane every letter is
+hers. `/` and `:` are find and command from anywhere at home.
 
-**What survives.** The thread, the draft, the focus, the selected
-card, both scroll positions and the narrow view live on the root's
-state, not on any space, so a visit to a space and back — or to
-orbit and back — is the cockpit as you left it. Across a server
-restart they do not, yet.
+**Keys.** In the navigator: `j k` (↑ ↓, C-n C-p) move; `l`, ↵ or
+→ focus the inspector; `g G` the ends; `o` opens the exact
+workspace. In the inspector: `j k` walk the controls (or scroll
+when there are none), PageUp/Down scroll, ↵ runs the selected
+control, `h` (←) is the navigator, `o` opens the workspace. Ctrl-h/l
+walk navigator, inspector, vera the way they walk panes; ⇥ cycles
+them. In vera's pane: typing is the draft, ↵ sends, ↑ ↓ scroll the
+thread, Esc clears the attachment, then the draft, then closes the
+pane (pinned: gives the keys back). Esc elsewhere: a running
+request, a draft, focus back to the navigator, a subview, then
+nothing. `prefix-a` and `prefix-!` land the navigator on the first
+row in progress or needing you; `:now` and `:vera` name the regions.
+
+**Narrow glass.** Under `min_nav + min_insp + 1` columns of canvas
+the navigator and the inspector are a stack: the list, `l` to the
+detail (full width, `h ‹ list` at its top), `h` back; vera is a
+full-width view when up; the selection and the scrolls survive.
+
+**The bars.** The scope bar at the root is identity, the view and
+the selection: `[rook] │ home  Fix flaky auth`, or `orbit`. The calm
+bar is composed from `[mux] status_home` / `status_space`, modules
+by name left of `-` and right of it: `view`, `input`, `agents`
+(`◐ n active · n idle` — no stale: nothing here can tell stale from
+slow), `attention` (`! n need you`, off at zero), `blocked` (`✕ n
+failed`, off at zero), `session` (`session $4.18 · 812k tokens`: the
+producer's frame-level total when it sends one, else the sum of its
+tasks' `usage`, off when nobody reported; the period is this server's
+life), `vera` (`ready`, `thinking`, `waiting for you`, `offline`),
+`working`, `unread`, `pins`. Home shows `view - agents attention
+blocked session vera`; a space shows `input - working attention
+unread pins`, so the one global count a space keeps is attention.
+
+**What survives.** The selection, the group scroll, the inspector's
+scroll and control per subject, the thread, the draft, vera's open
+and pinned state and her attachment live on the root's state, so a
+visit to a space and back — or to orbit and back — is home as you
+left it. Across a server restart they do not, yet.
 
 Finding (`/serv`) and commanding (`:`) take the canvas over as one
-ranked list under one field, whatever the view; Esc is the cockpit
-again. `:` completes `go`/`switch`, `new`, `rename`/`tab rename`,
-`close`, `home`, `orbit`, `ledger`, `now`, `vera`.
+ranked list under one field; Esc is home again.
 
 ## Orbit and ledger
 
@@ -335,6 +354,16 @@ Deliberately not in this pass:
 - **A reflection from the real vera.** `vera say` answers in words;
   the shape above is the contract for when she answers in it, and
   answering a question means asking again with the answer in it.
+- **Controls from the real vera.** verad's rail push carries title,
+  state, workspace, subtitle; the inspector's detail (goal, plan,
+  events, files, commits, tests, artifacts, usage, question, options,
+  actions, session usage) is typed and parsed, and shown when
+  pushed. `vera task answer|interrupt|relaunch|stop|resume` exist as
+  commands, so the rail can name them as `actions` when it chooses.
+- **Agents as rows of their own.** An agent is on its task and in its
+  space's detail; it is not a navigator row, so it cannot duplicate
+  the task. `stale` is not said anywhere: no signal here tells stale
+  from slow.
 - **Durable conversation history.** The thread is this session's,
   in memory. Vera's own transcript (`vera say -c rook` keeps the
   conversation) is not read back; when there is a typed way to, the
