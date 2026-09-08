@@ -173,6 +173,15 @@ turn about the selected card lights up in the thread; `↵` acts —
 an approval runs, a task opens its agent's pane, a signal opens the
 pane that rang, a space is entered. In the thread `↵` on a turn about
 a task moves focus to its card; on a turn about a space, enters it.
+The regions have a geometry, so they take the same vim motion the
+panes inside a space take: the thread sits above the composer, the
+dashboard is right of both, and `C-h` `C-j` `C-k` `C-l` walk it —
+`C-l` to the dashboard, `C-h` back to the region it came from (the
+thread with its turn still selected, the composer with its draft
+intact), `C-k` up into the thread, `C-j` down to the composer. At an
+edge the key is the view's again: `C-h` in the composer is still a
+backspace, and there is nothing below the composer or beside the
+dashboard.
 `prefix-a` is home with the dashboard on the first card in progress,
 `prefix-!` on the first that needs you; `:now` and `:vera` are the
 same by name. Esc unwinds: a running request, a typed draft, focus

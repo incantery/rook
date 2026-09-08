@@ -28,7 +28,10 @@
 //! time with a switcher — `vera`, `now` — and the attention count on
 //! the hidden one. Focus is one of three regions — composer, thread,
 //! dashboard — plus the transient modes the input's first character
-//! opens; printable typing always reaches the composer.
+//! opens; printable typing always reaches the composer. The regions
+//! are laid out, so they take the vim motion the panes take: Ctrl-h/
+//! j/k/l walks them (`navFocus`), and at an edge the key is the
+//! view's again.
 const std = @import("std");
 const chromepkg = @import("chrome.zig");
 const layoutpkg = @import("layout.zig");
@@ -275,6 +278,9 @@ pub const State = struct {
     dash_scroll: usize = 0,
     /// the selected turn while the thread has focus
     thread_cur: ?usize = null,
+    /// the left region a motion into the dashboard came from, so the
+    /// motion back lands where the hand left — composer, or thread
+    left_from: Region = .composer,
     /// the turn about the selected card, highlighted while the
     /// dashboard has focus
     linked: ?usize = null,
@@ -457,6 +463,61 @@ pub const State = struct {
             if (t.module == .needs) n += 1;
         }
         return n;
+    }
+
+    /// Focus the dashboard, remembering the left region it was
+    /// reached from — the motion back lands there.
+    pub fn toDash(self: *State) void {
+        if (self.focus != .dash) self.left_from = self.focus;
+        self.focus = .dash;
+    }
+
+    /// The regions have a geometry, so they take vim's motions. The
+    /// thread sits above the composer on the left; the dashboard is
+    /// right of both:
+    ///
+    ///     ┌──────────┬──────┐
+    ///     │  thread  │      │
+    ///     ├──────────┤ dash │
+    ///     │ composer │      │
+    ///     └──────────┴──────┘
+    ///
+    /// Ctrl-h/j/k/l walk it — the same four keys that walk the panes
+    /// inside a space, so the motion does not stop at home's door.
+    /// Returns true when focus moved; at an edge nothing happens and
+    /// the key is the view's again (Ctrl-H still deletes in the
+    /// composer, as backspace).
+    pub fn navFocus(self: *State, dir: u8) bool {
+        switch (dir) {
+            'l' => {
+                if (self.focus == .dash) return false;
+                self.toDash();
+                return true;
+            },
+            'h' => {
+                if (self.focus != .dash) return false;
+                self.focus = if (self.left_from == .thread and self.thread.count() > 0) .thread else .composer;
+                if (self.focus == .thread) {
+                    if (self.thread_cur == null) self.thread_cur = self.thread.count() - 1;
+                } else {
+                    self.thread_cur = null;
+                }
+                return true;
+            },
+            'k' => {
+                if (self.focus != .composer or self.thread.count() == 0) return false;
+                self.focus = .thread;
+                if (self.thread_cur == null) self.thread_cur = self.thread.count() - 1;
+                return true;
+            },
+            'j' => {
+                if (self.focus != .thread) return false;
+                self.focus = .composer;
+                self.thread_cur = null;
+                return true;
+            },
+            else => return false,
+        }
     }
 
     pub fn moveThread(self: *State, d: i32) void {
@@ -1310,4 +1371,56 @@ test "the dashboard cursor walks cards and skips headers" {
     h.addCard(.{ .module = .needs, .task = 0 });
     h.restoreSelection();
     try std.testing.expectEqual(@as(usize, 2), h.dash_cur);
+}
+
+test "ctrl-h/j/k/l walk the regions, and stop at the edges" {
+    var h: State = .{};
+    _ = h.thread.push(.you, "deploy the api", "", "", 1);
+    _ = h.thread.push(.vera, "from main?", "", "", 2);
+
+    // the composer: nothing left of it, nothing below it
+    try std.testing.expect(!h.navFocus('h'));
+    try std.testing.expect(!h.navFocus('j'));
+    try std.testing.expectEqual(Region.composer, h.focus);
+
+    // up into the thread, on its latest turn; down again, and the
+    // selection lets go
+    try std.testing.expect(h.navFocus('k'));
+    try std.testing.expectEqual(Region.thread, h.focus);
+    try std.testing.expectEqual(@as(usize, 1), h.thread_cur.?);
+    try std.testing.expect(!h.navFocus('k'));
+    try std.testing.expect(h.navFocus('j'));
+    try std.testing.expectEqual(Region.composer, h.focus);
+    try std.testing.expect(h.thread_cur == null);
+
+    // right to the dashboard from the composer, and back to it
+    try std.testing.expect(h.navFocus('l'));
+    try std.testing.expectEqual(Region.dash, h.focus);
+    try std.testing.expect(!h.navFocus('l'));
+    try std.testing.expect(!h.navFocus('k'));
+    try std.testing.expect(!h.navFocus('j'));
+    try std.testing.expect(h.navFocus('h'));
+    try std.testing.expectEqual(Region.composer, h.focus);
+
+    // the motion back lands where the hand left: from the thread,
+    // the thread — with its turn still selected
+    _ = h.navFocus('k');
+    h.moveThread(-1);
+    try std.testing.expectEqual(@as(usize, 0), h.thread_cur.?);
+    try std.testing.expect(h.navFocus('l'));
+    try std.testing.expectEqual(Region.dash, h.focus);
+    try std.testing.expect(h.navFocus('h'));
+    try std.testing.expectEqual(Region.thread, h.focus);
+    try std.testing.expectEqual(@as(usize, 0), h.thread_cur.?);
+
+    // an empty thread is not a region: k stays put, and the motion
+    // back out of the dashboard finds the composer
+    var e: State = .{};
+    try std.testing.expect(!e.navFocus('k'));
+    try std.testing.expectEqual(Region.composer, e.focus);
+    e.focus = .thread; // as ⇥ would have left it, had there been turns
+    try std.testing.expect(e.navFocus('l'));
+    try std.testing.expect(e.navFocus('h'));
+    try std.testing.expectEqual(Region.composer, e.focus);
+    try std.testing.expect(!e.navFocus('x'));
 }

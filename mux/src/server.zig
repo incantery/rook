@@ -4278,7 +4278,7 @@ pub const Server = struct {
         self.goHome();
         self.alt.clear();
         self.alt.land = land;
-        self.alt.home.focus = .dash;
+        self.alt.home.toDash();
     }
 
     /// Home, in a mode: the field holds the mode's leading character
@@ -4343,6 +4343,23 @@ pub const Server = struct {
         }
         const cockpit = st.mode() == .intent and st.view == .home;
         const b = bytes[0];
+        // The vim motion does not stop at home's door: Ctrl-h/j/k/l
+        // walks the cockpit's regions the way it walks
+        // panes inside a space — the thread above the composer, the
+        // dashboard right of both. At an edge the byte is the view's
+        // again, so Ctrl-H still deletes in the composer and a
+        // newline still sends.
+        if (cockpit) {
+            if (ctrlNavDir(b)) |dir| {
+                if (h.navFocus(dir)) {
+                    if (h.focus == .dash) {
+                        h.clampDash();
+                        self.syncFromDash();
+                    }
+                    return 1;
+                }
+            }
+        }
         if (b == 0x1b) {
             if (bytes.len >= 3 and (bytes[1] == '[' or bytes[1] == 'O')) {
                 // CSI: take through the final byte
@@ -4436,13 +4453,19 @@ pub const Server = struct {
             if (r == h.focus) i = k;
         }
         i = @intCast(@mod(@as(i32, @intCast(i)) + d, @as(i32, order.len)));
-        h.focus = order[i];
+        if (order[i] == .dash) {
+            h.toDash();
+        } else {
+            h.focus = order[i];
+        }
         switch (h.focus) {
             .thread => if (h.thread.count() > 0) {
                 if (h.thread_cur == null) h.thread_cur = h.thread.count() - 1;
-            } else {
+            } else if (d > 0) {
                 // nothing to walk: on to the next region
-                h.focus = if (d > 0) .composer else .dash;
+                h.focus = .composer;
+            } else {
+                h.toDash();
             },
             .dash => {
                 h.clampDash();
@@ -4617,7 +4640,7 @@ pub const Server = struct {
             .now => {
                 self.alt.view = .home;
                 self.alt.clear();
-                self.alt.home.focus = .dash;
+                self.alt.home.toDash();
                 self.alt.home.clampDash();
             },
             .vera => {
@@ -5119,11 +5142,11 @@ pub const Server = struct {
         switch (st.land) {
             .none => {},
             .needs => {
-                h.focus = .dash;
+                h.toDash();
                 if (!h.landDash(.needs)) _ = h.landDash(.active);
             },
             .running => {
-                h.focus = .dash;
+                h.toDash();
                 if (!h.landDash(.active)) _ = h.landDash(.needs);
             },
         }
@@ -5183,7 +5206,7 @@ pub const Server = struct {
             h.dash_cur = ci;
             h.dash_touched = true;
             h.noteSelection();
-            h.focus = .dash;
+            h.toDash();
             self.syncFromDash();
             return true;
         }
@@ -5194,7 +5217,7 @@ pub const Server = struct {
                     h.dash_cur = ci;
                     h.dash_touched = true;
                     h.noteSelection();
-                    h.focus = .dash;
+                    h.toDash();
                     self.syncFromDash();
                     return true;
                 }

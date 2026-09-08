@@ -557,6 +557,22 @@ def main():
         check("typing from the dashboard goes to the composer, never into a shortcut", r.state()["root"]["region"] == "composer" and "half a thoughtx" in "\n".join(left(r.lines(), r.lines()[1])[-4:]), left(r.lines(), r.lines()[1])[-3])
         r.keys("\x7f", settle=0.2)
 
+        # 22b: the vim motion walks the regions — the thread above the
+        # composer, the dashboard right of both, the draft untouched
+        r.keys("\x0c", settle=0.3)  # C-l
+        check("ctrl-l from the composer is the dashboard, and the draft stays", r.state()["root"]["region"] == "dash" and r.state()["root"]["draft"], str(r.state()["root"]))
+        r.keys("\x08", settle=0.3)  # C-h
+        check("ctrl-h comes back to the composer it left", r.state()["root"]["region"] == "composer" and "half a thought" in "\n".join(left(r.lines(), r.lines()[1])[-4:]), left(r.lines(), r.lines()[1])[-3])
+        r.keys("\x0b", settle=0.3)  # C-k
+        check("ctrl-k walks up into the thread, on the latest turn", r.state()["root"]["region"] == "thread" and any(l.strip().startswith("▸") for l in left(r.lines(), r.lines()[1])), left(r.lines(), r.lines()[1]))
+        r.keys("\x0c", settle=0.3)
+        r.keys("\x08", settle=0.3)
+        check("ctrl-h lands where the hand left: the thread, not the composer", r.state()["root"]["region"] == "thread")
+        r.keys("\x0a", settle=0.3)  # C-j
+        check("ctrl-j from the thread is the composer again", r.state()["root"]["region"] == "composer")
+        r.keys("\x08", settle=0.3)
+        check("at the composer's edge ctrl-h is backspace again", "half a though" in "\n".join(left(r.lines(), r.lines()[1])[-4:]) and "half a thought" not in "\n".join(left(r.lines(), r.lines()[1])[-4:]), left(r.lines(), r.lines()[1])[-3])
+
         # 04: find
         r.keys("\x15", settle=0.2)
         r.keys("/serv", settle=0.4)
