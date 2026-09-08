@@ -37,6 +37,9 @@
 //!   ask = "vera say -c rook"       # what bare text at rook's home runs,
 //!                                  # the text as its one argument
 //!                                  # (`ask = ""` = no intent door)
+//!   chat = "vera chat"             # the companion's own terminal, run in
+//!                                  # vera's panel as a real pane
+//!                                  # (`chat = ""` = rook's own surface)
 const std = @import("std");
 const chrome = @import("chrome.zig");
 
@@ -143,6 +146,13 @@ pub const Mux = struct {
     ask: [256]u8 = @splat(0),
     ask_len: usize = 0,
     ask_set: bool = false,
+    /// The companion's own terminal: the command rook runs, in a pty,
+    /// inside vera's panel. Set empty to keep rook's own one-shot
+    /// surface; unset means the companion's own `chat` while the
+    /// companion is vera.
+    chat: [256]u8 = @splat(0),
+    chat_len: usize = 0,
+    chat_set: bool = false,
 
     pub fn ownersSlice(self: *const Mux) []const u8 {
         return self.owners[0..self.owners_len];
@@ -175,6 +185,17 @@ pub const Mux = struct {
     pub fn askSlice(self: *const Mux) []const u8 {
         if (self.ask_set) return self.ask[0..self.ask_len];
         if (std.mem.eql(u8, self.companionSlice(), "vera")) return default_ask;
+        return "";
+    }
+
+    /// The chat command: the companion's own terminal, hosted in
+    /// vera's panel. Configured outright, else `vera chat` while the
+    /// companion is vera — the same rule the ask follows, for the
+    /// same reason: rook knows her verbs and no other program's.
+    /// Empty means the panel keeps rook's own surface.
+    pub fn chatSlice(self: *const Mux) []const u8 {
+        if (self.chat_set) return self.chat[0..self.chat_len];
+        if (std.mem.eql(u8, self.companionSlice(), "vera")) return default_chat;
         return "";
     }
 
@@ -212,6 +233,11 @@ pub const default_companion = "vera";
 /// How bare text reaches vera: her one-shot exchange, in a
 /// conversation of rook's own so the next request continues it.
 pub const default_ask = "vera say -c rook";
+
+/// The companion's own terminal, which rook hosts rather than
+/// imitates: mote's screen, streaming, in a pane rook sizes and
+/// keeps the keys around.
+pub const default_chat = "vera chat";
 
 /// The calm bar at home: the view, then ambient health — agents,
 /// what needs you, what failed, the session's spend, the companion.
@@ -269,6 +295,10 @@ pub fn parseMux(toml: []const u8, out: *Mux) void {
                 out.ask_len = @min(v.len, out.ask.len);
                 @memcpy(out.ask[0..out.ask_len], v[0..out.ask_len]);
                 out.ask_set = true;
+            } else if (std.mem.eql(u8, key, "chat")) {
+                out.chat_len = @min(v.len, out.chat.len);
+                @memcpy(out.chat[0..out.chat_len], v[0..out.chat_len]);
+                out.chat_set = true;
             }
             continue;
         }
@@ -412,6 +442,26 @@ test "the ask command follows the companion unless said outright" {
     var off: Mux = .{};
     parseMux("[companion]\nask = \"\"\n", &off);
     try eq("", off.askSlice());
+}
+
+test "the chat command follows the companion the way the ask does" {
+    const eq = std.testing.expectEqualStrings;
+    var d: Mux = .{};
+    try eq("vera chat", d.chatSlice());
+    var other: Mux = .{};
+    parseMux("[companion]\nprogram = \"aider\"\n", &other);
+    try eq("", other.chatSlice()); // rook knows no terminal of aider's
+    var said: Mux = .{};
+    parseMux("[companion]\nprogram = \"aider\"\nchat = \"aider\"\n", &said);
+    try eq("aider", said.chatSlice());
+    // set empty is the opt-out: the panel keeps rook's own surface
+    var off: Mux = .{};
+    parseMux("[companion]\nchat = \"\"\n", &off);
+    try eq("", off.chatSlice());
+    // and the two doors are independent
+    var one: Mux = .{};
+    parseMux("[companion]\nchat = \"\"\n", &one);
+    try eq("vera say -c rook", one.askSlice());
 }
 
 test "the companion slot, named or summoned" {

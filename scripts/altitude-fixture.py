@@ -85,6 +85,7 @@ agents = ["claude", "codex"]
 %s
 [companion]
 program = "vera"
+%s
 '''
 
 # The fake companion: `vera say -c rook <text>` answers — a reflection
@@ -104,7 +105,55 @@ if [ "$1" = "say" ]; then
   esac
   exit 0
 fi
+if [ "$1" = "chat" ]; then
+  exec "$ROOK_FIXTURE_LIB/vera" "$ROOK_FIXTURE_LIB/vera-chat"
+fi
 exec "$ROOK_FIXTURE_LIB/vera" "$@"
+"""
+
+# Her own terminal, standing in for mote's: a real program on a real
+# pty that says what size it was given, what keys reached it, and what
+# is in its box — the three things rook is responsible for and mote is
+# not. It redraws on SIGWINCH, so a frame after a resize is proof the
+# pty was resized and not merely painted smaller. Run as the bash copy
+# named `vera`, so rook's companion scan sees her the way it sees the
+# real one.
+FAKE_CHAT = r"""
+box=""
+keys=""
+draw() {
+  sz=$(stty size)
+  rows=${sz%% *}
+  cols=${sz##* }
+  printf '\033[2J\033[Hvera chat %sx%s\r\n' "$cols" "$rows"
+  printf 'you  what is running\r\n'
+  printf 'vera two things: the auth fix, and the deploy plan\r\n'
+  printf 'keys%s\r\n' "$keys"
+  printf '\033[%s;1H> %s' "$rows" "$box"
+}
+note() {
+  keys="$keys $1"
+  while [ ${#keys} -gt 20 ]; do keys="${keys#?}"; done
+  draw
+}
+trap draw WINCH
+stty raw -echo
+draw
+while :; do
+  IFS= read -r -n1 c
+  st=$?
+  # a trapped SIGWINCH interrupts the read; that is the redraw, not an end
+  if [ $st -gt 128 ]; then continue; fi
+  if [ $st -ne 0 ]; then break; fi
+  case "$c" in
+    "") note 0a ;;
+    $'\r') box=""; note 0d ;;
+    $'\b') note 08 ;;
+    $'\177') box="${box%?}"; note 7f ;;
+    [[:print:]]) box="$box$c"; note pr ;;
+    *) note ct ;;
+  esac
+done
 """
 
 # The rail as the fixture pushes it, and as the fake vera's confirmed
@@ -149,12 +198,16 @@ def check(name, ok, extra=""):
 class Rook:
     """A sandboxed engine behind a pyte glass."""
 
-    def __init__(self, cols=120, rows=32, extra_conf="", tag="fixture", vera=True, attach=None):
+    def __init__(self, cols=120, rows=32, extra_conf="", tag="fixture", vera=True, attach=None, chat=False):
         self.root = tempfile.mkdtemp(prefix="/tmp/rk-%s-" % tag)
         self.cols, self.rows = cols, rows
         os.makedirs(self.root + "/.config/rook")
         with open(self.root + "/.config/rook/rook.toml", "w") as f:
-            f.write(CONFIG % extra_conf)
+            # `chat = ""` is the opt-out: the panel draws rook's own
+            # surface instead of hosting her terminal. The frames that
+            # judge that surface ask for it; the chat frames ask for
+            # the default.
+            f.write(CONFIG % (extra_conf, "" if chat else 'chat = ""'))
         os.makedirs(self.root + "/bin")
         os.makedirs(self.root + "/lib")
         # real processes with the names the fixture needs: an agent
@@ -163,6 +216,9 @@ class Rook:
         for name in ("claude", "codex"):
             shutil.copy("/bin/bash", self.root + "/bin/" + name)  # /bin/sh re-execs bash and loses the name
         shutil.copy("/bin/bash", self.root + "/lib/vera")
+        with open(self.root + "/lib/vera-chat", "w") as f:
+            f.write(FAKE_CHAT)
+        os.chmod(self.root + "/lib/vera-chat", 0o755)
         if vera:
             with open(self.root + "/bin/vera", "w") as f:
                 f.write(FAKE_VERA)
@@ -955,6 +1011,97 @@ def main():
         check("home lists the agent rook found producing as one quiet row, and the inspector says what it can and cannot know", group(N, "in progress")[0].startswith("◐ claude at work") and "rook can say only what it sees" in flat(I) and "its pane claude" in flat(I) and "goal unknown" not in flat(I), (group(N, "in progress"), [l for l in I if l.strip()][:5]))
     finally:
         r13.close()
+
+    # ---- 28: the companion's own terminal, hosted in her panel
+    #
+    # The default arrangement now: rook draws one header row and hands
+    # the rest to `[companion] chat`. What is checked here is only what
+    # is rook's — the geometry the program was given, who has the
+    # keyboard, which of the four motions rook spends and which fall
+    # through — because everything inside those rows is mote's and
+    # rook has no business having an opinion about it.
+    r14 = Rook(cols=140, rows=32, tag="chat", chat=True)
+    try:
+        build_fixture(r14)
+        r14.home()
+        r14.keys("`t", settle=1.6)
+        r14.snap("28-chat")
+        lines = r14.lines()
+        V = vera(lines)
+        st = r14.state()
+        pid = st["root"]["vera"]["pane"]
+        pane = [p for p in st["panes"] if p["id"] == pid]
+        check("prefix-t hosts her terminal in the panel: rook's header, then the program",
+              st["root"]["vera"]["open"] and any("✦ vera" in l for l in V[:2]) and any("vera chat" in l for l in V), V[:4])
+        check("the state feed names the pane it runs in, and the companion reads as open and in front of you",
+              pid is not None and len(pane) == 1 and pane[0]["rect"] is None
+              and st["companion"]["open"] and st["companion"]["visible"] and st["companion"]["focused"]
+              and any(c["pane"] == pid and c["place"] == "vera" and c["window"] is None and c["workspace"] == ""
+                      for c in st["companion"]["panes"]),
+              (pid, st["companion"]))
+        said = [l for l in V if l.strip().startswith("vera chat ")]
+        check("the program was given exactly the rows rook drew it into, and says so itself",
+              said and said[0].split()[2] == "%dx%d" % (pane[0]["cols"], pane[0]["rows"]), (said[:1], pane[0]["cols"], pane[0]["rows"]))
+
+        # keys: the box is the program's, and rook keeps no draft
+        r14.keys("hi", settle=0.4)
+        r14.snap("28-chat-typing")
+        V = vera(r14.lines())
+        check("typing goes into the program's box, and rook holds no draft of its own",
+              any(l.strip().startswith("> hi") for l in V) and not r14.state()["root"]["draft"], [l for l in V if l.strip()][-3:])
+
+        # Ctrl-j is mote's newline and has nowhere to walk: it falls through
+        r14.keys("\x0a", settle=0.4)
+        V = vera(r14.lines())
+        check("Ctrl-j has no region below it, so the byte is the program's — its newline",
+              any("0a" in l for l in V if l.strip().startswith("keys")), [l for l in V if l.strip().startswith("keys")])
+
+        # Ctrl-h has a region to the left: rook spends it
+        r14.keys("\x08", settle=0.4)
+        check("Ctrl-h walks out of her panel into the inspector, and does not reach the program",
+              r14.state()["root"]["region"] == "insp" and not any("08" in l for l in vera(r14.lines()) if l.strip().startswith("keys")),
+              (r14.state()["root"]["region"], [l for l in vera(r14.lines()) if l.strip().startswith("keys")]))
+
+        # dismissed and summoned again: the same program, still holding it
+        r14.keys("`t`t", settle=0.8)
+        V = vera(r14.lines())
+        check("dismissed and summoned again it is the same program, with what was typed still in the box",
+              any(l.strip().startswith("> hi") for l in V) and r14.state()["root"]["vera"]["pane"] == pid,
+              [l for l in V if l.strip()][-3:])
+
+        # pinned on a glass wide enough for three columns, and the pty
+        # follows the panel: a resize the program hears is proof rook
+        # sized the pty and did not merely paint it smaller.
+        was = (pane[0]["cols"], pane[0]["rows"])
+        r14.keys("`T", settle=0.6)
+        r14.resize(200, 40)
+        r14.snap("28-chat-pinned")
+        lines = r14.lines()
+        V = vera(lines)
+        pinned = [p for p in r14.state()["panes"] if p["id"] == pid][0]
+        said = [l for l in V if l.strip().startswith("vera chat ")]
+        check("pinned and widened, the pty follows the panel — the program says the new size itself",
+              r14.state()["root"]["vera"]["pinned"] and len(dividers(lines)) == 2
+              and (pinned["cols"], pinned["rows"]) != was
+              and said and said[0].split()[2] == "%dx%d" % (pinned["cols"], pinned["rows"]),
+              (said[:1], was, (pinned["cols"], pinned["rows"])))
+
+        # from a space: the same pane, over the panes, holding the keys.
+        # Ctrl-h first: while she has the keyboard, `:go` would be typed
+        # into her box — which is the point of the whole change.
+        r14.keys("\x08", settle=0.3)
+        r14.enter("api")
+        r14.keys("`t", settle=0.8)
+        r14.snap("28-chat-space")
+        V = vera(r14.lines())
+        st = r14.state()
+        check("in a space it is the same terminal over the panes, holding the keys",
+              st["root"]["vera"]["keys"] and any("vera chat" in l for l in V)
+              and st["root"]["vera"]["pane"] == pid, V[:3])
+        r14.keys("\x08", settle=0.5)
+        check("and Ctrl-h gives the keys back to the panes", not r14.state()["root"]["vera"]["keys"])
+    finally:
+        r14.close()
 
     print("frames in", OUT)
     if fails:

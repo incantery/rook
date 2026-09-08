@@ -35,6 +35,7 @@ const layoutpkg = @import("layout.zig");
 const renderpkg = @import("render.zig");
 const askpkg = @import("ask.zig");
 const homepkg = @import("home.zig");
+const panepkg = @import("pane.zig");
 const ui = @import("ui.zig");
 
 pub const Rgb = chromepkg.Rgb;
@@ -639,6 +640,9 @@ pub const Paint = struct {
     ask_on: bool = true,
     /// the prefix key as a person types it, for the hints
     prefix: []const u8 = "prefix ",
+    /// The companion's own terminal, when rook hosts one in her
+    /// panel. Passed straight through to home.
+    chat: ?*panepkg.Pane = null,
 };
 
 /// The tab component's mark, from the tab bar's vocabulary.
@@ -696,7 +700,7 @@ pub fn draw(f: *renderpkg.Frame, st: *State, region: layoutpkg.Rect, p: Paint) r
     // foot, the dashboard beside it. Finding and commanding take the
     // canvas over as one list under one field, whatever the view.
     if (st.painted == .home and st.mode() == .intent) {
-        return homepkg.draw(f, st, region, .{ .t = t, .ask_name = p.ask_name, .ask_on = p.ask_on, .now = @import("pane.zig").epochMs(), .prefix = p.prefix });
+        return homepkg.draw(f, st, region, .{ .t = t, .ask_name = p.ask_name, .ask_on = p.ask_on, .now = panepkg.epochMs(), .prefix = p.prefix, .chat = p.chat });
     }
     const x = region.x + 2;
     const w = region.w -| 4;

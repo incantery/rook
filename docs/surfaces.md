@@ -648,9 +648,13 @@ Everything under `companion` answers one of two questions:
 - **where** — `workspace`, `window` (1-based, `null` when the pane is
   not in a window at all), and `place`: `window`, `pin` (docked to the
   rail; `workspace` is empty for a global pin, which belongs to every
-  workspace) or `popup`. `visible` is on the glass now, `focused` is
-  holding the keyboard now. The three top-level flags are the rollups —
-  is any of her open, on the glass, in front of you.
+  workspace), `popup`, or `vera` — her own terminal, hosted in her
+  panel (`[companion] chat`). That one belongs to no window and to no
+  space: `workspace` is empty at home and the space you are in
+  otherwise, `visible` is whether her panel is up, and `focused` is
+  whether she is holding the keyboard. `visible` is on the glass now,
+  `focused` is holding the keyboard now. The three top-level flags are
+  the rollups — is any of her open, on the glass, in front of you.
 
 More than one pane is unusual and not an error; rook reports what it
 sees rather than what it wishes, up to eight.

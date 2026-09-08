@@ -98,6 +98,65 @@ pub fn veraOverlay(region: Rect) Rect {
     return .{ .x = region.x + region.w - vw, .y = region.y, .w = vw, .h = region.h };
 }
 
+// ---- the hosted chat ----
+//
+// The companion's own terminal is mote's screen, and rook hosts it
+// rather than imitating it: a real pty in a pane, streaming markdown,
+// tool cards, a multiline box with its own history — none of which a
+// 400-byte turn ring and a one-line composer could ever be. Rook keeps
+// what is rook's: where the panel is, how wide, who has the keyboard,
+// and the four keys that walk out of it.
+
+/// The rows rook keeps for itself above a hosted chat: its header,
+/// and the `about` line when something is attached.
+pub fn veraChrome(about: bool) u16 {
+    return if (about) 2 else 1;
+}
+
+/// Where a hosted chat's terminal lives inside vera's panel. One
+/// boundary, like `layout`: the painter draws the pane exactly here
+/// and the server sizes the pty to exactly this, so the program is
+/// never told a width it was not given — the resize a hosted TUI
+/// cannot recover from is the one where the two disagree.
+pub fn veraBody(r: Rect, about: bool) Rect {
+    const top = veraChrome(about);
+    return .{ .x = r.x + 1, .y = r.y + top, .w = r.w -| 2, .h = r.h -| top };
+}
+
+/// Below this a terminal cannot hold a conversation. The panel says
+/// so in its own words rather than handing mote a window it would
+/// have to truncate everything into.
+pub const min_chat_cols: u16 = 24;
+pub const min_chat_rows: u16 = 6;
+
+pub fn chatFits(body: Rect) bool {
+    return body.w >= min_chat_cols and body.h >= min_chat_rows;
+}
+
+/// Vera's panel: the rect she is painted into, and whether she is
+/// over something (her own ground) or a column of her own. Null when
+/// she is not on the glass. The one answer to "where is she", so the
+/// painter and the server's pty never disagree about it.
+pub const Panel = struct { r: Rect, over: bool };
+
+/// At home: a third column when pinned and afforded, an overlay over
+/// the inspector's side when not, and the whole region on a glass too
+/// narrow to split — where she is only drawn when she has the focus.
+pub fn veraPanel(region: Rect, pinned: bool, shown: bool, focus_vera: bool) ?Panel {
+    if (!shown) return null;
+    const lay = layout(region, pinned);
+    if (!lay.wide) return if (focus_vera) .{ .r = region, .over = false } else null;
+    if (lay.vera) |vr| return .{ .r = vr, .over = false };
+    const vr = veraOverlay(.{ .x = lay.insp.?.x, .y = region.y, .w = region.w - lay.nav.w - 1, .h = region.h });
+    return .{ .r = .{ .x = vr.x + 1, .y = vr.y, .w = vr.w -| 1, .h = vr.h }, .over = true };
+}
+
+/// Inside a space: the same pane, over the panes, on the right.
+pub fn veraPanelOver(region: Rect) Panel {
+    const vr = veraOverlay(region);
+    return .{ .r = .{ .x = vr.x + 1, .y = vr.y, .w = vr.w -| 1, .h = vr.h }, .over = true };
+}
+
 // ---- the conversation ----
 
 pub const Role = enum {
@@ -820,6 +879,11 @@ pub const Paint = struct {
     now: i64 = 0,
     /// the prefix key, as a person types it, for the hints
     prefix: []const u8 = "prefix ",
+    /// The companion's own terminal, when rook is hosting one: her
+    /// screen is mote's and rook draws only the chrome around it.
+    /// Null means the panel keeps rook's own surface — no chat
+    /// command configured, nothing on PATH, or the program quit.
+    chat: ?*panepkg.Pane = null,
 };
 
 /// The companion's status word for the header and the bar.
@@ -842,23 +906,23 @@ pub fn draw(f: *renderpkg.Frame, st: *altpkg.State, region: Rect, p: Paint) rend
     h.wide = lay.wide;
     var cursor: renderpkg.CursorOverride = .{ .x = region.x, .y = region.y, .hidden = true };
 
+    const panel = veraPanel(region, h.vera_pinned, h.veraShown(), h.focus == .vera);
     if (lay.wide) {
         drawNav(f, st, lay.nav, p, false);
         divider(f, t, lay.nav.x + lay.nav.w, region.y, region.h);
         drawInsp(f, st, lay.insp.?, p, false);
-        if (lay.vera) |vr| {
-            divider(f, t, vr.x - 1, region.y, region.h);
-            cursor = drawVera(f, st, vr, p, false);
-        } else if (h.veraShown()) {
-            // over the inspector's side, its own ground, one edge
-            const vr = veraOverlay(.{ .x = lay.insp.?.x, .y = region.y, .w = region.w - lay.nav.w - 1, .h = region.h });
-            fill(f, vr, t.raised);
-            divider(f, t, vr.x, region.y, region.h);
-            cursor = drawVera(f, st, .{ .x = vr.x + 1, .y = vr.y, .w = vr.w - 1, .h = vr.h }, p, true);
+        if (panel) |pl| {
+            if (pl.over) {
+                fill(f, .{ .x = pl.r.x - 1, .y = pl.r.y, .w = pl.r.w + 1, .h = pl.r.h }, t.raised);
+                divider(f, t, pl.r.x - 1, region.y, region.h);
+            } else {
+                divider(f, t, pl.r.x - 1, region.y, region.h);
+            }
+            cursor = drawVera(f, st, pl.r, p, pl.over);
         }
     } else {
-        if (h.veraShown() and h.focus == .vera) {
-            cursor = drawVera(f, st, region, p, false);
+        if (panel) |pl| {
+            cursor = drawVera(f, st, pl.r, p, pl.over);
         } else if (h.detail) {
             drawInsp(f, st, region, p, true);
         } else {
@@ -873,10 +937,10 @@ pub fn draw(f: *renderpkg.Frame, st: *altpkg.State, region: Rect, p: Paint) rend
 /// the right. Returns where the cursor is.
 pub fn drawVeraOver(f: *renderpkg.Frame, st: *altpkg.State, region: Rect, p: Paint) renderpkg.CursorOverride {
     const t = p.t;
-    const vr = veraOverlay(region);
-    fill(f, vr, t.raised);
-    divider(f, t, vr.x, region.y, region.h);
-    const c = drawVera(f, st, .{ .x = vr.x + 1, .y = vr.y, .w = vr.w - 1, .h = vr.h }, p, true);
+    const pl = veraPanelOver(region);
+    fill(f, .{ .x = pl.r.x - 1, .y = pl.r.y, .w = pl.r.w + 1, .h = pl.r.h }, t.raised);
+    divider(f, t, pl.r.x - 1, region.y, region.h);
+    const c = drawVera(f, st, pl.r, p, pl.over);
     f.put(csi ++ "0m");
     return c;
 }
@@ -1245,6 +1309,85 @@ fn drawInsp(f: *renderpkg.Frame, st: *altpkg.State, r: Rect, p: Paint, narrow: b
 // ---- vera's pane ----
 
 fn drawVera(f: *renderpkg.Frame, st: *altpkg.State, r: Rect, p: Paint, over: bool) renderpkg.CursorOverride {
+    if (p.chat) |pane| return drawHostedChat(f, st, r, p, over, pane);
+    return drawOwnSurface(f, st, r, p, over);
+}
+
+/// The panel with the companion's own terminal in it. Rook paints one
+/// header row (two, with something attached) and hands every other
+/// row to the program: what is inside them — streaming, markdown,
+/// tool cards, a box that grows with what you type — is mote's, and
+/// rook does not second-guess a cell of it.
+fn drawHostedChat(f: *renderpkg.Frame, st: *altpkg.State, r: Rect, p: Paint, over: bool, pane: *panepkg.Pane) renderpkg.CursorOverride {
+    const t = p.t;
+    const h = &st.home;
+    const ground: Rgb = if (over) t.raised else t.chrome;
+    const x = r.x + 1;
+    const w = r.w -| 2;
+    const focused = h.focus == .vera;
+
+    f.cup(x, r.y);
+    style(f, .{ .bg = ground });
+    pad(f, w);
+    f.cup(x, r.y);
+    ink(f, if (focused) t.accent else t.secondary, ground);
+    f.put(ui.glyph(t, .companion));
+    f.put(" ");
+    style(f, .{ .fg = if (focused) t.primary else t.secondary, .bg = ground, .bold = true });
+    const used: u16 = 2 + altpkg.putW(f, p.ask_name, 16);
+    // The right of the header is the way out — the one thing the
+    // program inside cannot tell you, because it does not know it is
+    // in a panel. Everything else on this row would be a second
+    // opinion about a status mote already shows.
+    var hb: [96]u8 = undefined;
+    const hint: []const u8 = if (focused)
+        (std.fmt.bufPrint(&hb, "{s}{s}h leaves · {s}t hides", .{ if (h.vera_pinned) "pinned · " else "", if (t.glyphs == .ascii) "C-" else "^", p.prefix }) catch "")
+    else
+        (std.fmt.bufPrint(&hb, "{s}{s}t focus", .{ if (h.vera_pinned) "pinned · " else "", p.prefix }) catch "");
+    const hw = chromepkg.cols(hint);
+    if (hint.len > 0 and used + hw + 2 <= w) {
+        f.cup(x + w -| hw, r.y);
+        ink(f, t.muted, ground);
+        _ = altpkg.putW(f, hint, hw);
+    }
+    const about = h.about_title_len > 0;
+    if (about) {
+        f.cup(x, r.y + 1);
+        style(f, .{ .bg = ground });
+        pad(f, w);
+        f.cup(x, r.y + 1);
+        ink(f, t.muted, ground);
+        f.put("about ");
+        _ = ui.scopeChip(f, t, h.aboutTitle(), .space);
+        ink(f, t.muted, ground);
+        f.put("  esc clears");
+    }
+
+    const body = veraBody(r, about);
+    if (!chatFits(body)) {
+        fill(f, body, ground);
+        if (body.h > 0) {
+            var wrapped: [4][]const u8 = undefined;
+            const k = wrap("not enough room for the chat — widen the pane, or unpin it", body.w, &wrapped);
+            for (wrapped[0..@min(k, body.h)], 0..) |ln, i| {
+                f.cup(body.x, body.y + @as(u16, @intCast(i)));
+                ink(f, t.muted, ground);
+                _ = altpkg.putW(f, ln, body.w);
+            }
+        }
+        return .{ .x = r.x, .y = r.y, .hidden = true };
+    }
+    f.drawPaneIn(pane, body);
+    // The cursor is the program's, moved into the panel: mote owns
+    // the box, so it owns where the caret sits in it.
+    const cur = pane.rs.cursor;
+    if (!focused or !cur.visible) return .{ .x = r.x, .y = r.y, .hidden = true };
+    const v = cur.viewport orelse return .{ .x = r.x, .y = r.y, .hidden = true };
+    if (v.x >= body.w or v.y >= body.h) return .{ .x = r.x, .y = r.y, .hidden = true };
+    return .{ .x = body.x + v.x, .y = body.y + v.y, .bar = cur.visual_style == .bar };
+}
+
+fn drawOwnSurface(f: *renderpkg.Frame, st: *altpkg.State, r: Rect, p: Paint, over: bool) renderpkg.CursorOverride {
     const t = p.t;
     const h = &st.home;
     const ground: Rgb = if (over) t.raised else t.chrome;
@@ -1508,6 +1651,64 @@ test "the layout is navigator and inspector, vera a third column only when all t
     const ov = veraOverlay(.{ .x = 55, .y = 1, .w = 105, .h = 40 });
     try std.testing.expect(ov.x >= 55);
     try std.testing.expect(ov.w >= min_vera);
+}
+
+test "vera's panel has one answer, and the hosted chat is sized from it" {
+    const region: Rect = .{ .x = 0, .y = 1, .w = 160, .h = 40 };
+    // not up: no panel, and nothing to size
+    try std.testing.expect(veraPanel(region, false, false, false) == null);
+    // up and unpinned on a wide glass: over the inspector's side, its
+    // own ground, never over the navigator
+    const over = veraPanel(region, false, true, true).?;
+    try std.testing.expect(over.over);
+    const lay = layout(region, false);
+    try std.testing.expect(over.r.x > lay.nav.x + lay.nav.w);
+    try std.testing.expectEqual(region.x + region.w, over.r.x + over.r.w);
+    // pinned with room: the third column layout already returns
+    const pinned = veraPanel(region, true, true, false).?;
+    try std.testing.expect(!pinned.over);
+    try std.testing.expectEqual(layout(region, true).vera.?.x, pinned.r.x);
+    // narrow: the whole region, but only when she has the focus
+    const narrow: Rect = .{ .x = 0, .y = 1, .w = 60, .h = 30 };
+    try std.testing.expectEqual(narrow.w, veraPanel(narrow, false, true, true).?.r.w);
+    try std.testing.expect(veraPanel(narrow, false, true, false) == null);
+    // in a space she is the same overlay, and always up
+    const space = veraPanelOver(region);
+    try std.testing.expect(space.over);
+    try std.testing.expectEqual(region.x + region.w, space.r.x + space.r.w);
+    // every arrangement leaves the hosted terminal inside the region
+    for ([_]Panel{ over, pinned, space }) |pl| {
+        const body = veraBody(pl.r, false);
+        try std.testing.expect(body.x >= region.x);
+        try std.testing.expect(body.x + body.w <= region.x + region.w);
+        try std.testing.expect(body.y + body.h <= region.y + region.h);
+        try std.testing.expect(chatFits(body));
+    }
+}
+
+test "the hosted chat gets every row rook does not keep, and the two agree" {
+    const r: Rect = .{ .x = 10, .y = 1, .w = 50, .h = 30 };
+    // one header row, and the pane starts under it
+    const plain = veraBody(r, false);
+    try std.testing.expectEqual(@as(u16, 11), plain.x);
+    try std.testing.expectEqual(@as(u16, 2), plain.y);
+    try std.testing.expectEqual(@as(u16, 48), plain.w);
+    try std.testing.expectEqual(@as(u16, 29), plain.h);
+    // the panel's last row is the pane's last row: nothing is kept back
+    try std.testing.expectEqual(r.y + r.h, plain.y + plain.h);
+    // something attached costs exactly one more row
+    const attached = veraBody(r, true);
+    try std.testing.expectEqual(plain.y + 1, attached.y);
+    try std.testing.expectEqual(plain.h - 1, attached.h);
+    try std.testing.expectEqual(r.y + r.h, attached.y + attached.h);
+    // and the floors hold rather than underflow
+    const tiny = veraBody(.{ .x = 0, .y = 0, .w = 1, .h = 1 }, true);
+    try std.testing.expectEqual(@as(u16, 0), tiny.w);
+    try std.testing.expectEqual(@as(u16, 0), tiny.h);
+    try std.testing.expect(!chatFits(tiny));
+    try std.testing.expect(chatFits(plain));
+    try std.testing.expect(!chatFits(.{ .x = 0, .y = 0, .w = min_chat_cols - 1, .h = 40 }));
+    try std.testing.expect(!chatFits(.{ .x = 0, .y = 0, .w = 80, .h = min_chat_rows - 1 }));
 }
 
 test "wrap breaks on spaces and keeps paragraphs" {

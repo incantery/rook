@@ -206,6 +206,16 @@ pub const Frame = struct {
         return self.buf.items;
     }
 
+    /// Paint a pane's grid into an arbitrary rect of this frame.
+    /// The overlay is a frame too, and a hosted terminal — vera's
+    /// chat in her panel — is a pane the server draws inside its own
+    /// chrome rather than through the window layout. Always a full
+    /// repaint: the overlay is rebuilt from nothing every frame it is
+    /// needed, so row-dirty means nothing here.
+    pub fn drawPaneIn(self: *Frame, pane: *panepkg.Pane, rect: layoutpkg.Rect) void {
+        self.drawPane(pane, rect, true);
+    }
+
     fn drawPane(self: *Frame, pane: *panepkg.Pane, rect: layoutpkg.Rect, full: bool) void {
         const rs = &pane.rs;
         const colors = &rs.colors;

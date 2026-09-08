@@ -62,12 +62,16 @@ func TestLoadRejectsMalformedTOML(t *testing.T) {
 // it has not heard of must not refuse those.
 func TestEngineKeysAreNotErrors(t *testing.T) {
 	c, err := Load(write(t, "[mux]\nagents = [\"claude\"]\nsidebar_width = 30\n"+
-		"[companion]\ncommand = \"vera chat\"\nname = \"vera\"\nprogram = \"vera\"\nkey = \"l\"\n"))
+		"[companion]\ncommand = \"vera chat\"\nname = \"vera\"\nprogram = \"vera\"\nkey = \"l\"\n"+
+		"ask = \"vera say -c rook\"\nchat = \"vera chat\"\n"))
 	if err != nil {
 		t.Fatalf("a file the engine also reads refused to load: %v", err)
 	}
 	if c.Companion.Program != "vera" || c.Companion.Command != "vera chat" {
 		t.Errorf("companion: %+v", c.Companion)
+	}
+	if c.Companion.Ask != "vera say -c rook" || c.Companion.Chat != "vera chat" {
+		t.Errorf("the engine's own companion keys: %+v", c.Companion)
 	}
 	// A typo is still a typo.
 	if _, err := Load(write(t, "[companion]\ncommandd = \"vera\"\n")); err == nil {

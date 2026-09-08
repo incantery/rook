@@ -56,6 +56,7 @@ The state, in one place (`altitude.zig`, `State`):
 | navigator | `home.State.rows` over `tasks` | rebuilt each frame; `nav_cur` by identity (`nav_key`), `nav_scroll` |
 | inspector | `home.State.insp` | lines and controls, rebuilt each frame; `cur` and `scroll` kept per subject |
 | vera's pane | `vera_open`, `vera_pinned`, `about_*` | summoned, kept, and what the next request is about |
+| her terminal | `Server.vera_pane` | the pty running `[companion] chat`, sized to `home.veraBody`; null when the panel is rook's own surface |
 | return jump | `Server.last_sess` | the space before the last hop, for `prefix-C-o` |
 
 Startup destination is decided once, on the wire: `attach` carries
@@ -177,6 +178,32 @@ Typing a letter from the navigator or the inspector summons her
 with the letter in the composer; `/` and `:` are find and command,
 as ever, without her.
 
+**What is inside the panel.** Her own terminal, when there is one.
+`[companion] chat` — `vera chat` by default, `chat = ""` to turn it
+off — runs in a real pty, started the first time she is summoned
+and kept alive after: a program that is still running has not lost
+the thread, the scroll or the draft, so rook does not have to keep
+them. Rook draws one header row (two, with something attached) and
+`home.veraBody` is the rest; the painter draws the pane into that
+rect and the server sizes the pty to the same one, because the
+resize a hosted TUI cannot recover from is the one where the two
+disagree. Under `min_chat_cols × min_chat_rows` the panel says so
+rather than handing the program a window it would truncate
+everything into.
+
+Where the two surfaces differ: the hosted terminal owns its box, so
+there is no rook draft, no `↵ sends`, no reflection block, and no
+door for a structured attachment into a program already running —
+`ask vera about this` types the task's *id* into the box instead,
+with the chip above it saying what the id names. The bar says only
+what rook can see of a program it does not read: `vera open`, or
+`vera working` while it is writing. It is rook's pane, not a
+space's: never the window focus, never counted as an agent at work,
+never a row at home, and `place: "vera"` in the state feed (which
+is how the companion slot still answers *is she open in rook*).
+Without a chat command, or without it on PATH, the panel is rook's
+own surface below — a composer, a thread, and `[companion] ask`.
+
 **Who owns a letter.** In the navigator and the inspector, `h j k
 l o g G` are motion and never reach vera; every other printable
 letter summons her with itself in the composer, so a message that
@@ -191,9 +218,16 @@ workspace. In the inspector: `j k` walk the controls (or scroll
 when there are none), PageUp/Down scroll, ↵ runs the selected
 control, `h` (←) is the navigator, `o` opens the workspace. Ctrl-h/l
 walk navigator, inspector, vera the way they walk panes; ⇥ cycles
-them. In vera's pane: typing is the draft, ↵ sends, ↑ ↓ scroll the
-thread, Esc clears the attachment, then the draft, then closes the
-pane (pinned: gives the keys back). Esc elsewhere: a running
+them. In vera's pane, hosting her own terminal: every byte is the
+program's — Esc, the arrows it opens, Ctrl-j for a newline, its own
+history and its own paste — except the prefix, and a Ctrl-h/j/k/l
+that has a region to walk to. Only Ctrl-h has one (`prefix-t`
+hides her; in a space Ctrl-h gives the keys back to the panes), so
+the other three fall through, which is the same bargain a pane on
+the edge of a space makes. In rook's own surface: typing is the
+draft, ↵ sends, ↑ ↓ scroll the thread, Esc clears the attachment,
+then the draft, then closes the pane (pinned: gives the keys back).
+Esc elsewhere: a running
 request, a draft, focus back to the navigator, a subview, then
 nothing. `prefix-a` and `prefix-!` land the navigator on the first
 row in progress or needing you; `:now` and `:vera` name the regions.

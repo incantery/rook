@@ -36,7 +36,10 @@ focused pane's keyboard, and the signals), `zoom_view = "ledger"`
 makes prefix-s draw rows only, never figures, and `startup =
 "last-space"` makes plain `rook` land in a space instead of at home.
 `[companion] ask` is what bare text at home runs (`vera say -c rook`
-while the companion is vera). The side panel is **off by default** —
+while the companion is vera) and `[companion] chat` is her own
+terminal, which rook runs in her panel rather than imitating (`vera
+chat` while the companion is vera; `chat = ""` keeps rook's own
+surface). The side panel is **off by default** —
 the frame is the tab bar, the work at full width, and the calm bar —
 and `sidebar_mode = "open"` is how a config asks for it back. Then:
 
@@ -265,20 +268,43 @@ keys, resizing nothing) and again dismisses her; `prefix-T` pins
 her, a third column when the glass affords three. Her thread, her
 scroll and your draft survive. Typing a letter from the navigator
 summons her with the letter; `/` and `:` are find and command
-without her. `ask vera about this` attaches the selected task as a
-reference the request carries (`ROOK_ABOUT_TASK`, `ROOK_ABOUT_SPACE`
-in its environment). Bare text runs `vera say -c rook <text>`; a
-reply that is one JSON object (`ask.zig`: intent, plan, space, task,
+without her.
+
+**Inside the panel is her own terminal.** `[companion] chat` — `vera
+chat` by default — runs in a real pty rook starts the first time she
+is summoned and keeps alive after, sized to the panel and to nothing
+else. What is on those rows is hers (mote's screen: streaming
+markdown, tool cards, a multiline box); rook draws one header row
+above them and keeps four things: where the panel is, how wide, who
+has the keyboard, and the way out. While she has the focus every
+byte is the program's — Esc, the arrows, Ctrl-j for a newline, its
+own paste — except the prefix and a Ctrl-h/j/k/l that has a region
+to go to, which is the bargain every pane in a space already makes.
+`prefix-t` hides her; `Ctrl-h` walks out of her. She never takes the
+window focus, is never counted as an agent at work, and reads as
+`place: "vera"` in the state feed.
+
+`chat = ""` (or no chat command on PATH) keeps rook's own surface
+instead: one composer, one thread, and `[companion] ask` behind it.
+`ask vera about this` then attaches the selected task as a reference
+the request carries (`ROOK_ABOUT_TASK`, `ROOK_ABOUT_SPACE` in its
+environment); bare text runs `vera say -c rook <text>`, and a reply
+that is one JSON object (`ask.zig`: intent, plan, space, task,
 question, actions) is a block in her pane and its actions are rows
-under `needs you`. Without her on PATH the bar says `vera offline`
-and everything but her works.
+under `needs you`. With her own terminal up there is no such door
+into a program already running, so `ask vera about this` types the
+task's id into her box — a reference she can look up, and text a
+hand can delete. Without her on PATH the bar says `vera offline` and
+everything but her works.
 
 The calm bar is composed from `[mux] status_home` at home (`view -
 agents attention blocked session vera`) and `status_space` in a
 space (`input - working attention unread pins`): `agents ◐ 2 active
 · 1 idle`, `! 2 need you`, `✕ 1 failed`, `session $4.18 · 812k
 tokens` (the producer's usage since this server started; off until
-someone reports it), `vera ready|thinking|waiting for you|offline`.
+someone reports it), `vera ready|thinking|waiting for you|offline` — or, while rook is
+hosting her own terminal, `vera open|working`, which is all rook
+knows and all it claims.
 
 prefix-s is orbit, a subview of home: the scope bar reads `rook │
 orbit` with `esc rook` in the corner, and every space is a figure
