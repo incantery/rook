@@ -273,7 +273,7 @@ ranked list under one field; Esc is home again.
 
 ## Orbit and ledger
 
-Orbit (`prefix-s`, `:orbit`) is the spatial subview: the scope bar
+Orbit (`:orbit`) is the spatial subview: the scope bar
 reads `[rook] │ orbit` with `esc rook` in the corner, and the canvas
 holds every space as a figure — the name in the top edge as its chip,
 the event line beside it, the tabs inside as the tab component, and
@@ -333,7 +333,7 @@ selection are always safe.
 ## Keys
 
     prefix-o     home, from anywhere (idempotent at the root)
-    prefix-s     orbit (ledger, with zoom_view = "ledger")
+    prefix-s     the workspace picker (fzf), from a space or from home
     prefix-a     home, cursor on the first running item
     prefix-!     home, cursor on the first thing that needs you
     prefix-t     home, the field empty for a request
@@ -343,9 +343,10 @@ selection are always safe.
     prefix-A     the legacy side panel, for a config that asked for it
 
 At the root the space is not on the glass, so the keys that act on
-one (`c`, `v`, `z`, …) are not taken there. `prefix-s` used to float
-the fzf picker; that is still `rook pick`, and `prefix-a` used to
-cycle the side panel, which `prefix-A` still toggles.
+one (`c`, `v`, `z`, …) are not taken there. `prefix-s` floats the fzf
+picker (`rook pick`) from home as well, and picking a space enters
+it; orbit, which held that key for a while, is `:orbit`. `prefix-a`
+used to cycle the side panel, which `prefix-A` still toggles.
 
 ## The fixture
 

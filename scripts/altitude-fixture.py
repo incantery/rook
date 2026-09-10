@@ -35,7 +35,8 @@ Frames captured (text, and PNGs when pillow is installed):
   05-command        `:` with completions
   06-drill          ↵ on a card lands in its exact pane
   07-return         prefix-o brings the cockpit back as it was
-  08-orbit          prefix-s: orbit as a subview, esc back to the cockpit
+  08-pick           prefix-s at home floats the picker over the cockpit
+  08-orbit          :orbit as a subview, esc back to the cockpit
   09-space          inside a space: chip, tabs, the corner, the bar's counts
   10-narrow         one view at a time: vera, now, the switcher, the badge
   11-wide           a large glass
@@ -228,9 +229,12 @@ class Rook:
             with open(self.root + "/bin/vera", "w") as f:
                 f.write(FAKE_VERA)
             os.chmod(self.root + "/bin/vera", 0o755)
-        # `rook` for the fake vera's actions: the engine, verbatim
+        # `rook` for the fake vera's actions: the engine, verbatim —
+        # except `pick`, the fzf picker prefix-s floats, which lives
+        # in the Go front door; here a placeholder that stays up until
+        # Enter, so the popup can be seen and dismissed.
         with open(self.root + "/bin/rook", "w") as f:
-            f.write('#!/bin/sh\nexec "%s" "$@"\n' % ENGINE)
+            f.write('#!/bin/sh\ncase "$1" in pick) printf "picker\\n"; read x; exit 0;; esac\nexec "%s" "$@"\n' % ENGINE)
         os.chmod(self.root + "/bin/rook", 0o755)
         # what the fake vera's first action runs, and what answering
         # t1's question runs: the rail again, changed
@@ -715,8 +719,28 @@ def main():
         r.keys("\x15", settle=0.2)
         r.keys("\x1b", settle=0.3)
 
-        # 09: orbit, and back to the same home
+        # 08b: prefix-s at home is the picker, floated over the cockpit
         r.keys("`s", settle=0.8)
+        r.snap("08-pick")
+        st8p = r.state()
+        lines = r.lines()
+        boxed = any("│picker" in l for l in lines)
+        check("prefix-s at home floats the picker as a popup over the cockpit, home still the view under it", boxed and st8p["scope"] == "root" and st8p["root"]["view"] == "home" and slot_of(lines[0]).startswith("  rook  │  home"), (boxed, st8p["scope"], st8p["root"]["view"]))
+        r.keys("\r", settle=0.6)
+        st8q = r.state()
+        check("dismissing the picker leaves home as it was, the selection kept", not any("picker" in l for l in r.lines()) and st8q["root"]["view"] == "home" and st8q["root"]["selected"] == "t:t2", str(st8q["root"]))
+
+        # 08c: what the picker does when a row is chosen — `rook switch`
+        # from home — is going there: the space, not a row at home
+        r.rook("switch", "infra")
+        r.settle(0.6)
+        st8s = r.state()
+        check("switching to a space by name from home enters it", st8s["scope"] == "space" and slot_of(r.lines()[0]).startswith("  infra  │"), (st8s["scope"], repr(slot_of(r.lines()[0])[:20])))
+        r.keys("`o", settle=0.5)
+        check("and prefix-o is home again, the selection kept", r.state()["scope"] == "root" and r.state()["root"]["selected"] == "t:t2")
+
+        # 09: orbit, and back to the same home
+        r.keys(":orbit\r", settle=0.8)
         r.snap("09-orbit")
         lines = r.lines()
         check("orbit is named in the scope bar, esc rook in the corner, figures on the canvas", slot_of(lines[0]).startswith("  rook  │  orbit ") and "esc rook" in lines[0] and "┌┤" in "\n".join(lines), repr(slot_of(lines[0])[:50]))

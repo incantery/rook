@@ -645,6 +645,9 @@ pub const Server = struct {
         self.cur_sess = i;
         self.scrolling = false;
         self.selecting = false;
+        // Switching to a space by name is going there: from home,
+        // the picker's choice lands in the space, not on a row.
+        self.enterSpace();
         // a workspace pin that no longer exists can't hold focus
         if (self.sess().focus_pin) |fp| {
             if (self.pane(fp) == null) self.sess().focus_pin = null;
@@ -2348,8 +2351,9 @@ pub const Server = struct {
             }
             // At the root the keys are the view's: the input, the
             // cursor, ↵. The prefix still arms above, so prefix-o
-            // and prefix-s work from here.
-            if (self.at_root) {
+            // and prefix-s work from here — and a popup floated over
+            // home (the picker) takes the keys while it is up.
+            if (self.at_root and self.popup == null) {
                 if (!self.veraHoldsKeys()) c.paste.reset();
                 const used = self.altKey(c, rest);
                 rest = rest[used..];
@@ -2991,9 +2995,13 @@ pub const Server = struct {
                 const i: usize = key - '1';
                 if (i < self.sess().windows.items.len) self.selectWindow(i);
             },
-            // Orbit: the spatial subview of the root. The fzf picker
-            // it replaced is still `rook pick`.
-            's' => self.openView(if (self.conf.zoom_ledger) .ledger else .orbit),
+            // The picker — fzf over `rook ls`, enter switches, ctrl-o
+            // creates the name typed — lives in the Go front door,
+            // where the quoting has a home and the parsing has tests.
+            // Here it is one verb, like the worktree manager. It
+            // floats from home too: picking a space enters it, and
+            // orbit, which held this key for a while, is `:orbit`.
+            's' => self.openPopup("rook pick") catch {},
             'w' => self.openPopup("rook worktree") catch {},
             // The root, with the cursor on a section: running work,
             // or what needs you (`!` is the attention mark).
@@ -4267,9 +4275,9 @@ pub const Server = struct {
             vis += ui.module(out, t, "   ", t.muted, false);
             vis += ui.chip(out, t, "prefix", t.accent);
             const hint: []const u8 = if (self.at_root)
-                "  t vera · T pin · s orbit · / find · : command · a in progress · ! needs you · d detach"
+                "  t vera · T pin · s pick · / find · : command · a in progress · ! needs you · d detach"
             else
-                "  o rook · t vera · s orbit · c new · v - split · z zoom · u unread · i inspect";
+                "  o rook · t vera · s pick · c new · v - split · z zoom · u unread · i inspect";
             if (vis + chromepkg.cols(hint) + 14 <= cols) vis += ui.module(out, t, hint, t.muted, false);
         }
 

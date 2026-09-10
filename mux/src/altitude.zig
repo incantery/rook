@@ -813,7 +813,7 @@ pub fn draw(f: *renderpkg.Frame, st: *State, region: layoutpkg.Rect, p: Paint) r
         const long: []const u8 = if (text.len > 0)
             "esc clears"
         else if (st.painted == .home)
-            (std.fmt.bufPrint(&fb, "{s} · type to ask · / find · : command · :new <name> starts a space · prefix-s orbit", .{keys}) catch "")
+            (std.fmt.bufPrint(&fb, "{s} · type to ask · / find · : command · :new <name> starts a space · prefix-s pick a space", .{keys}) catch "")
         else
             (std.fmt.bufPrint(&fb, "{s} enter · / find · : command · esc home", .{keys}) catch "esc home");
         const short: []const u8 = if (text.len > 0) "esc clears" else if (st.painted == .home) (if (ascii) "up/down enter · / find · : command" else "↑ ↓ ↵ · / find · : command") else (if (ascii) "up/down enter · esc home" else "↑ ↓ ↵ · esc home");

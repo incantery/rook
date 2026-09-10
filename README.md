@@ -34,8 +34,8 @@ prefix = "` "`", `C-b` when unset).
 `prefix-c` a window, `prefix-v` / `prefix--` a split, `prefix-hjkl`
 focus (a bare `ctrl-hjkl` too, vim-navigator style, with
 `mux/nvim` handing edge moves back), `prefix-z` zoom, `prefix-[` copy
-mode, `prefix-P` pin a pane to the rail, `prefix-s` orbit (the picker
-is still `rook pick`), `prefix-w` worktrees, `prefix-u` the oldest
+mode, `prefix-P` pin a pane to the rail, `prefix-s` the workspace picker
+(fzf over `rook ls`, `rook pick` at a prompt), `prefix-w` worktrees, `prefix-u` the oldest
 thing you have not read. The tabs are clickable: a chip is its window,
 the `+` a new one. A tab is named once — the first program in it that
 was not the shell, or `rook rename` — and rook never renames it; the
@@ -65,7 +65,8 @@ panes without resizing them — and again dismisses her with her
 thread and draft kept; `prefix-T` pins her. `/` finds, `:`
 commands, `prefix-o` from anywhere comes back home, Esc closes one
 layer at a time. Under 81 columns the navigator and the inspector
-are a stack. `prefix-s` is orbit; `rook .` and `rook --space
+are a stack. `prefix-s` floats the picker from home too, and
+`:orbit` is orbit; `rook .` and `rook --space
 <name>` land in a space outright; `startup = "last-space"` makes
 plain `rook` do that too. `docs/altitude.md` is the model and the
 ontology; `scripts/altitude-fixture.py` renders it deterministically.
