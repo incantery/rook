@@ -603,6 +603,21 @@ pub fn session(gpa: std.mem.Allocator, sock_path: []const u8, op: u8, name: []co
                 _ = ptypkg.writeAllFd(1, msg.payload);
                 return;
             }
+            // `new` answers with the pane it made (or the one the
+            // existing workspace is on), the way `window` and `split`
+            // do: a caller that starts work should not have to read
+            // the table to find where it started.
+            if ((op == 'n' or op == 'N') and msg.kind == @intFromEnum(proto.s2c.block_created)) {
+                if (msg.payload.len < 4) return error.BadReply;
+                const made = std.mem.readInt(u32, msg.payload[0..4], .little);
+                var lb: [64]u8 = undefined;
+                const line = if (isatty(1) != 0)
+                    std.fmt.bufPrint(&lb, "{d}\n", .{made}) catch return
+                else
+                    std.fmt.bufPrint(&lb, "{{\"ok\":true,\"pane\":{d}}}\n", .{made}) catch return;
+                _ = ptypkg.writeAllFd(1, line);
+                return;
+            }
             if (op != 'l' and msg.kind == @intFromEnum(proto.s2c.ack)) {
                 // Read-your-writes, without making an interactive
                 // pipeline noisy: the serial goes out only when stdout
