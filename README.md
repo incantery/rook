@@ -155,9 +155,9 @@ When Claude has quit, the pane is a shell again and comes back as one.
 **Worktrees.** One agent, one branch, one checkout, one workspace —
 and a lifecycle that ends with all of them gone. The model is
 [grove](https://github.com/incantery/grove)'s, with rook as the place
-a worktree is worked in; `rook worktree` is the manager (`prefix-w`
-floats it), and the verbs are plain commands from any checkout —
-`grove` at a prompt does the same without rook:
+a worktree is worked in; `prefix-w` floats grove's manager, and the
+verbs are plain commands from any checkout — `grove` at a prompt does
+the same without rook:
 
 ```sh
 rook worktree ls              # the rows, once; --json for machines

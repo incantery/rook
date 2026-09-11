@@ -84,7 +84,8 @@ const usage = `rook — the multiplexer, owned
   rook stats | kill       server introspection / shutdown
   rook url                the web client URL (token included)
   rook worktree ...       git worktrees as workspaces (ls|new|open|merge|rm) — grove's
-                          model (github.com/incantery/grove), rook as the place
+                          model (github.com/incantery/grove), rook as the place;
+                          a bare "rook worktree" (prefix-w) is grove's manager
   rook skill [--install]  the skill for an agent inside a pane; --install puts it
                           where Claude Code finds it (~/.claude/skills/rook)
   rook version

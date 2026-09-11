@@ -2440,6 +2440,25 @@ pub const Server = struct {
                     }
                 }
             }
+            // The same four keys as the kitty keyboard protocol spells
+            // them. A pane that pushed kitty flags — Claude Code, the
+            // companion's chat — gets Ctrl-h from the glass as
+            // `ESC [ 104 ; 5 u`, not 0x08, because mirrorKitty makes
+            // the glass encode for the focused pane; the navigator
+            // has to read that spelling too or those panes swallow
+            // the motion. A release of a key the pane never saw
+            // pressed is dropped with it.
+            if (self.popup == null) {
+                if (kittyNavDir(rest)) |hit| {
+                    if (!self.fgOwnsCtrlNav()) {
+                        if (hit.release or self.navigate(hit.dir)) {
+                            c.paste.reset();
+                            rest = rest[hit.len..];
+                            continue;
+                        }
+                    }
+                }
+            }
             // forward up to the next byte the server wants for itself
             const end = runEnd(&c.paste, rest, self.prefix_key);
             // A pane an actor owns does not take typed keys: the gate
@@ -6532,6 +6551,67 @@ fn ctrlNavDir(b: u8) ?u8 {
         0x0c => 'l', // C-l
         else => null,
     };
+}
+
+const KittyNav = struct { dir: u8, len: usize, release: bool };
+
+/// Ctrl-h/j/k/l in the kitty keyboard protocol's spelling:
+/// `CSI <code> ; <mods> [: <event>] u`, where the code is the plain
+/// letter and the modifier field is 1 + bits (ctrl is 4). Only a
+/// plain ctrl counts — ctrl+shift+h is somebody else's chord — and
+/// caps/num lock bits are ignored. Event 3 is a release.
+fn kittyNavDir(bytes: []const u8) ?KittyNav {
+    if (bytes.len < 6 or bytes[0] != 0x1b or bytes[1] != '[') return null;
+    var i: usize = 2;
+    var code: u32 = 0;
+    while (i < bytes.len and bytes[i] >= '0' and bytes[i] <= '9') : (i += 1) code = code * 10 + (bytes[i] - '0');
+    if (i == 2 or i >= bytes.len or bytes[i] != ';') return null;
+    i += 1;
+    var mods: u32 = 0;
+    const mstart = i;
+    while (i < bytes.len and bytes[i] >= '0' and bytes[i] <= '9') : (i += 1) mods = mods * 10 + (bytes[i] - '0');
+    if (i == mstart or i >= bytes.len) return null;
+    var event: u32 = 1;
+    if (bytes[i] == ':') {
+        i += 1;
+        const estart = i;
+        event = 0;
+        while (i < bytes.len and bytes[i] >= '0' and bytes[i] <= '9') : (i += 1) event = event * 10 + (bytes[i] - '0');
+        if (i == estart or i >= bytes.len) return null;
+    }
+    if (bytes[i] != 'u') return null;
+    const dir: u8 = switch (code) {
+        'h', 'j', 'k', 'l' => @intCast(code),
+        else => return null,
+    };
+    if (mods == 0) return null;
+    const bits = mods - 1;
+    // ctrl set; shift, alt, super, hyper, meta clear; lock bits free
+    if (bits & 4 == 0 or bits & (1 | 2 | 8 | 16 | 32) != 0) return null;
+    return .{ .dir = dir, .len = i + 1, .release = event == 3 };
+}
+
+test "kitty-spelled ctrl-hjkl is the navigator's, in every event form" {
+    const t = std.testing;
+    try t.expectEqual(KittyNav{ .dir = 'h', .len = 8, .release = false }, kittyNavDir("\x1b[104;5u").?);
+    try t.expectEqual(KittyNav{ .dir = 'l', .len = 10, .release = false }, kittyNavDir("\x1b[108;5:1u").?);
+    try t.expectEqual(KittyNav{ .dir = 'j', .len = 10, .release = false }, kittyNavDir("\x1b[106;5:2u").?);
+    try t.expectEqual(KittyNav{ .dir = 'k', .len = 10, .release = true }, kittyNavDir("\x1b[107;5:3u").?);
+    // caps lock on is still ctrl-h
+    try t.expectEqual(@as(u8, 'h'), kittyNavDir("\x1b[104;69u").?.dir);
+    // trailing bytes belong to the next key
+    try t.expectEqual(@as(usize, 8), kittyNavDir("\x1b[104;5uabc").?.len);
+}
+
+test "other kitty keys are not the navigator's" {
+    const t = std.testing;
+    try t.expect(kittyNavDir("\x1b[104;6u") == null); // ctrl+shift+h
+    try t.expect(kittyNavDir("\x1b[104;7u") == null); // ctrl+alt+h
+    try t.expect(kittyNavDir("\x1b[104;1u") == null); // plain h
+    try t.expect(kittyNavDir("\x1b[105;5u") == null); // ctrl+i
+    try t.expect(kittyNavDir("\x1b[104;5~") == null); // not a u
+    try t.expect(kittyNavDir("\x1b[<0;3;4M") == null); // a mouse report
+    try t.expect(kittyNavDir("\x08") == null);
 }
 
 fn plural(n: usize) []const u8 {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -11,7 +12,6 @@ import (
 	"github.com/incantery/grove"
 	"github.com/incantery/rook/internal/config"
 	"github.com/incantery/rook/internal/mux"
-	"github.com/incantery/rook/internal/worktree/ui"
 )
 
 const worktreeUsage = "rook worktree [ls [--json] | new <name> [--from <ref>] [--fetch] | open <name> | merge <name> | rm <name> [--force]]"
@@ -33,19 +33,14 @@ func runWorktree(args []string) error {
 	}
 	repo.Place = enginePlace{}
 	if len(args) == 0 {
-		// no verb: the manager itself — standalone here, or in the
-		// prefix-w popup, which is the same program at popup size
-		opts, err := worktreeOptions(repo)
+		// No verb: the manager, which is grove's — standalone here, or
+		// in the prefix-w popup, which is the same program at popup
+		// size. It finds rook as the place from the pane it runs in.
+		bin, err := exec.LookPath("grove")
 		if err != nil {
-			return err
+			return fmt.Errorf("the worktree manager is grove, which is not on PATH (brew install --cask incantery/tap/grove)")
 		}
-		attach, err := ui.Run(repo, opts)
-		if err != nil || attach == "" {
-			return err
-		}
-		// the workspace is already current server-side; become a client
-		bin := mux.EnginePath()
-		return syscall.Exec(bin, []string{filepath.Base(bin)}, os.Environ())
+		return syscall.Exec(bin, []string{"grove"}, append(os.Environ(), "GROVE_PLACE=rook"))
 	}
 	verb, rest := args[0], args[1:]
 	switch verb {
