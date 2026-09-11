@@ -14,9 +14,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/incantery/grove"
 	"github.com/incantery/rook/internal/mux"
 	"github.com/incantery/rook/internal/tui"
-	"github.com/incantery/rook/internal/worktree"
 )
 
 var (
@@ -39,7 +39,7 @@ const (
 )
 
 type row struct {
-	worktree.Worktree
+	grove.Worktree
 	// Agent is the program rook found running in the worktree's
 	// workspace ("claude", "claude ×2"), empty when none; Unread says
 	// a pane there rang, notified or finished while nobody looked.
@@ -64,8 +64,8 @@ type doneMsg struct {
 }
 
 type model struct {
-	repo   worktree.Repo
-	opts   worktree.Options
+	repo   grove.Repo
+	opts   grove.Conventions
 	rows   []row
 	cursor int
 	width  int
@@ -83,7 +83,7 @@ type model struct {
 // Run shows the manager and blocks until it exits. It returns the
 // session to attach to, when the user opened a worktree from outside
 // rook (inside rook the client has already switched).
-func Run(repo worktree.Repo, opts worktree.Options) (attach string, err error) {
+func Run(repo grove.Repo, opts grove.Conventions) (attach string, err error) {
 	in := textinput.New()
 	in.Prompt = accent.Render("new worktree ") + dim.Render(repo.Name+"--")
 	in.CharLimit = 64
@@ -208,7 +208,7 @@ func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter", "o":
 		if cur, ok := m.current(); ok {
 			m.mode = modeBusy
-			return m, open(cur.Worktree)
+			return m, open(m.repo, cur.Worktree)
 		}
 	case "n":
 		m.mode = modeNaming
@@ -270,9 +270,9 @@ func (m model) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-func open(wt worktree.Worktree) tea.Cmd {
+func open(repo grove.Repo, wt grove.Worktree) tea.Cmd {
 	return func() tea.Msg {
-		if err := worktree.Open(wt); err != nil {
+		if err := repo.Open(wt); err != nil {
 			return doneMsg{err: err}
 		}
 		if mux.Inside() {
@@ -282,17 +282,17 @@ func open(wt worktree.Worktree) tea.Cmd {
 	}
 }
 
-func create(repo worktree.Repo, name string, opts worktree.Options) tea.Cmd {
+func create(repo grove.Repo, name string, opts grove.Conventions) tea.Cmd {
 	return func() tea.Msg {
 		wt, err := repo.New(name, "", opts)
 		if err != nil {
 			return doneMsg{err: err}
 		}
-		return open(wt)()
+		return open(repo, wt)()
 	}
 }
 
-func merge(repo worktree.Repo, wt worktree.Worktree) tea.Cmd {
+func merge(repo grove.Repo, wt grove.Worktree) tea.Cmd {
 	return func() tea.Msg {
 		if err := repo.Merge(wt.Name); err != nil {
 			return doneMsg{err: err}
@@ -301,7 +301,7 @@ func merge(repo worktree.Repo, wt worktree.Worktree) tea.Cmd {
 	}
 }
 
-func remove(repo worktree.Repo, wt worktree.Worktree, force bool) tea.Cmd {
+func remove(repo grove.Repo, wt grove.Worktree, force bool) tea.Cmd {
 	return func() tea.Msg {
 		if err := repo.Remove(wt, force); err != nil {
 			return doneMsg{err: err}
@@ -310,7 +310,7 @@ func remove(repo worktree.Repo, wt worktree.Worktree, force bool) tea.Cmd {
 	}
 }
 
-func displayName(repo worktree.Repo, wt worktree.Worktree) string {
+func displayName(repo grove.Repo, wt grove.Worktree) string {
 	switch {
 	case wt.Main:
 		return repo.Name

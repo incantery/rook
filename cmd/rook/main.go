@@ -83,7 +83,8 @@ const usage = `rook — the multiplexer, owned
   rook nav h|j|k|l        move focus (vim plugins call this at edges)
   rook stats | kill       server introspection / shutdown
   rook url                the web client URL (token included)
-  rook worktree ...       git worktrees (ls|new|open|merge|rm)
+  rook worktree ...       git worktrees as workspaces (ls|new|open|merge|rm) — grove's
+                          model (github.com/incantery/grove), rook as the place
   rook skill [--install]  the skill for an agent inside a pane; --install puts it
                           where Claude Code finds it (~/.claude/skills/rook)
   rook version

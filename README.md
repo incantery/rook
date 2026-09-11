@@ -153,20 +153,25 @@ conversation, typed into the rebuilt shell as you would have typed it.
 When Claude has quit, the pane is a shell again and comes back as one.
 
 **Worktrees.** One agent, one branch, one checkout, one workspace —
-and a lifecycle that ends with all of them gone. `rook worktree` is
-the manager (`prefix-w` floats it); the verbs are plain commands from
-any checkout:
+and a lifecycle that ends with all of them gone. The model is
+[grove](https://github.com/incantery/grove)'s, with rook as the place
+a worktree is worked in; `rook worktree` is the manager (`prefix-w`
+floats it), and the verbs are plain commands from any checkout —
+`grove` at a prompt does the same without rook:
 
 ```sh
 rook worktree ls              # the rows, once; --json for machines
-rook worktree new agent-a     # ../<repo>--agent-a on branch agent-a, workspace opened
+rook worktree new agent-a     # ../<repo>--agent-a on branch agent-a, workspace opened:
+                              # the local branch, origin's (tracked) if origin has it,
+                              # else a fresh one off main; --fetch asks origin first
 rook worktree merge agent-a   # merge into main, then remove worktree + workspace + branch
 rook worktree rm agent-a      # refuses dirty or unmerged; --force to discard
 ```
 
 Files git doesn't carry but a checkout needs are conventions in
-`rook.toml`, copied or linked from the main checkout into every new
-worktree:
+`rook.toml` (this person's, for every repo) or `grove.toml` at the
+repo root (the repo's own), copied or linked from the main checkout
+into every new worktree:
 
 ```toml
 [worktree]

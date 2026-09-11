@@ -8,6 +8,7 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/coder/websocket v1.8.15
+	github.com/incantery/grove v0.0.0-20260911121639-3e779dfa070e
 )
 
 require (

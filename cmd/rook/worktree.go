@@ -8,30 +8,34 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/incantery/grove"
 	"github.com/incantery/rook/internal/config"
 	"github.com/incantery/rook/internal/mux"
-	"github.com/incantery/rook/internal/worktree"
 	"github.com/incantery/rook/internal/worktree/ui"
 )
 
-const worktreeUsage = "rook worktree [ls [--json] | new <name> [--from <ref>] | open <name> | merge <name> | rm <name> [--force]]"
+const worktreeUsage = "rook worktree [ls [--json] | new <name> [--from <ref>] [--fetch] | open <name> | merge <name> | rm <name> [--force]]"
 
-// runWorktree is `rook worktree <verb>`: git worktrees as rook sessions.
-// The repo is whichever one the current directory is in — a worktree
-// answers with its true home, so these work from inside any checkout.
+// runWorktree is `rook worktree <verb>`: git worktrees as rook
+// workspaces. The model is grove's (github.com/incantery/grove); what
+// is rook's is the place — its own engine, reached the way the rest
+// of the front door reaches it, not through PATH. The repo is
+// whichever one the current directory is in — a worktree answers with
+// its true home, so these work from inside any checkout.
 func runWorktree(args []string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
 	}
-	repo, err := worktree.Find(cwd)
+	repo, err := grove.Find(cwd)
 	if err != nil {
 		return err
 	}
+	repo.Place = enginePlace{}
 	if len(args) == 0 {
 		// no verb: the manager itself — standalone here, or in the
 		// prefix-w popup, which is the same program at popup size
-		opts, err := worktreeOptions()
+		opts, err := worktreeOptions(repo)
 		if err != nil {
 			return err
 		}
@@ -49,11 +53,14 @@ func runWorktree(args []string) error {
 		return listWorktrees(repo, has(rest, "--json"))
 	case "new", "add":
 		name, from := "", ""
+		fetch := false
 		for i := 0; i < len(rest); i++ {
 			switch {
 			case rest[i] == "--from" && i+1 < len(rest):
 				i++
 				from = rest[i]
+			case rest[i] == "--fetch":
+				fetch = true
 			case strings.HasPrefix(rest[i], "-"):
 				return fmt.Errorf("worktree new: unknown flag %s", rest[i])
 			default:
@@ -61,9 +68,14 @@ func runWorktree(args []string) error {
 			}
 		}
 		if name == "" {
-			return fmt.Errorf("usage: rook worktree new <name> [--from <ref>]")
+			return fmt.Errorf("usage: rook worktree new <name> [--from <ref>] [--fetch]")
 		}
-		opts, err := worktreeOptions()
+		if fetch {
+			if err := repo.Fetch(); err != nil {
+				return err
+			}
+		}
+		opts, err := worktreeOptions(repo)
 		if err != nil {
 			return err
 		}
@@ -71,7 +83,7 @@ func runWorktree(args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := worktree.Open(wt); err != nil {
+		if err := repo.Open(wt); err != nil {
 			return err
 		}
 		fmt.Println(wt.Path)
@@ -82,12 +94,12 @@ func runWorktree(args []string) error {
 		}
 		wt, err := repo.Get(rest[0])
 		if rest[0] == repo.Name {
-			wt, err = repo.MainWorktree()
+			wt, err = repo.Main()
 		}
 		if err != nil {
 			return err
 		}
-		return worktree.Open(wt)
+		return repo.Open(wt)
 	case "merge":
 		if len(rest) != 1 {
 			return fmt.Errorf("usage: rook worktree merge <name>")
@@ -118,20 +130,41 @@ func runWorktree(args []string) error {
 	}
 }
 
-// worktreeOptions reads the [worktree] conventions from rook.toml.
-func worktreeOptions() (worktree.Options, error) {
+// enginePlace is rook as a grove.Place: the workspace side of the
+// lifecycle, through the engine the front door already resolves.
+type enginePlace struct{}
+
+func (enginePlace) Name() string                   { return "rook" }
+func (enginePlace) Open(session, dir string) error { return mux.Open(session, dir) }
+func (enginePlace) Close(session string) error     { return mux.Close(session) }
+func (enginePlace) Live() map[string]bool {
+	names, _ := mux.Sessions()
+	live := map[string]bool{}
+	for _, n := range names {
+		live[n] = true
+	}
+	return live
+}
+
+// worktreeOptions is what a fresh checkout needs that git does not
+// carry: the [worktree] table of rook.toml (this person's, for every
+// repo), merged with grove's own — grove.toml at the repo root and
+// ~/.config/grove/grove.toml — so a repo that wrote its conventions
+// down for grove has them here too.
+func worktreeOptions(repo grove.Repo) (grove.Conventions, error) {
 	cfgPath, err := config.Path()
 	if err != nil {
-		return worktree.Options{}, err
+		return grove.Conventions{}, err
 	}
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		return worktree.Options{}, err
+		return grove.Conventions{}, err
 	}
-	return worktree.Options{Copy: cfg.Worktree.Copy, Link: cfg.Worktree.Link}, nil
+	mine := grove.Conventions{Copy: cfg.Worktree.Copy, Link: cfg.Worktree.Link}
+	return mine.Merge(grove.UserConventions()).Merge(grove.LoadConventions(repo.Root)), nil
 }
 
-func listWorktrees(repo worktree.Repo, asJSON bool) error {
+func listWorktrees(repo grove.Repo, asJSON bool) error {
 	wts, err := repo.List()
 	if err != nil {
 		return err
