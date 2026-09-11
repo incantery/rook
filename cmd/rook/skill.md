@@ -26,6 +26,7 @@ verb that takes one.
 ```sh
 rook state                 # one JSON snapshot: workspaces, windows, panes, focus
 rook blocks                # one line per pane: id, workspace:window, program, cwd
+rook blocks --json         # the same, as a JSON array (workspace, window, place, program, cwd)
 rook read . -n 200         # your own pane's last 200 lines, history included
 rook read 7                # pane 7's viewport, plain text
 ```
@@ -122,6 +123,8 @@ to drive, and never claim the pane the person is typing in.
 ```sh
 rook ls                        # workspace names
 rook new -q NAME [DIR]         # create one without moving the person
+rook new -q NAME DIR -- claude # …born running a program; the pane ends when it does
+rook close NAME                # close one: every pane in it is hung up
 rook switch NAME               # (a person lands at home — a work navigator
                                #  and an inspector; rook . or rook --space
                                #  NAME land them in a space)

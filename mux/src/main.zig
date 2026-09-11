@@ -6,11 +6,11 @@
 //!   rook server         run the server in the foreground
 //!   rook nav <dir>      move focus h/j/k/l (vim plugins call this at edges)
 //!   rook popup <cmd>    float a command over the current window
-//!   rook ls / switch / new <name> [cwd] / close <name>   workspaces
+//!   rook ls / switch / new [-q] <name> [cwd] [-- program...] / close <name>   workspaces
 //!   rook state / watch       the state feed: snapshot, or subscribe
 //!   rook side [-]            push side-panel models (JSON frames on stdin)
 //!   rook side demo           print the demo models, to pipe into the above
-//!   rook blocks / raw <id>   block table; raw single-block attach
+//!   rook blocks [--json] / raw <id>   block table; raw single-block attach
 //!   rook capture <id>        one pane's viewport as plain text
 //!   rook read <id> [-n N]    the same, or its last N lines with history
 //!   rook send <id> <text>    type into a pane; `run` adds Enter, `key` names keys
@@ -116,7 +116,12 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (std.mem.eql(u8, cmd, "blocks")) {
-        try client.blocks(gpa, path);
+        // rook blocks [--json]
+        var json = false;
+        for (argv[2..]) |a| {
+            if (std.mem.eql(u8, std.mem.span(a), "--json")) json = true;
+        }
+        try client.blocks(gpa, path, json);
         return;
     }
     if (std.mem.eql(u8, cmd, "capture") or std.mem.eql(u8, cmd, "read")) {
@@ -338,18 +343,35 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (std.mem.eql(u8, cmd, "new")) {
-        // `new -q` creates the workspace without moving the person —
-        // what an agent spawns with.
+        // rook new [-q] <name> [cwd] [-- program...]
+        // `-q` creates the workspace without moving the person — what
+        // an agent spawns with. After `--` is what the first pane is
+        // born running, the tmux shape: when it exits, so does the pane.
         var rest = argv[2..];
         var op: u8 = 'n';
         if (rest.len > 0 and std.mem.eql(u8, std.mem.span(rest[0]), "-q")) {
             op = 'N';
             rest = rest[1..];
         }
-        if (rest.len < 1) return error.BadArgs;
-        var arg: []const u8 = std.mem.span(rest[0]);
-        if (rest.len > 1) {
-            arg = try std.fmt.allocPrint(gpa, "{s}\t{s}", .{ arg, std.mem.span(rest[1]) });
+        var prog: std.ArrayList(u8) = .empty;
+        var head: []const [*:0]const u8 = rest;
+        for (rest, 0..) |a, i| {
+            if (std.mem.eql(u8, std.mem.span(a), "--")) {
+                head = rest[0..i];
+                for (rest[i + 1 ..], 0..) |w, j| {
+                    if (j > 0) try prog.append(gpa, ' ');
+                    try prog.appendSlice(gpa, std.mem.span(w));
+                }
+                break;
+            }
+        }
+        if (head.len < 1) return error.BadArgs;
+        var arg: []const u8 = std.mem.span(head[0]);
+        const dir: []const u8 = if (head.len > 1) std.mem.span(head[1]) else "";
+        if (prog.items.len > 0) {
+            arg = try std.fmt.allocPrint(gpa, "{s}\t{s}\t{s}", .{ arg, dir, prog.items });
+        } else if (dir.len > 0) {
+            arg = try std.fmt.allocPrint(gpa, "{s}\t{s}", .{ arg, dir });
         }
         try client.session(gpa, path, op, arg);
         return;

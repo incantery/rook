@@ -92,12 +92,13 @@ pub fn popup(sock_path: []const u8, cmd: []const u8) !void {
     try proto.write(sock, @intFromEnum(proto.c2s.popup), cmd);
 }
 
-/// Print the block table (id, session:window, fg, size, cwd).
-pub fn blocks(gpa: std.mem.Allocator, sock_path: []const u8) !void {
+/// Print the block table (id, session:window, fg, size, cwd), or
+/// the same as one JSON array.
+pub fn blocks(gpa: std.mem.Allocator, sock_path: []const u8, json: bool) !void {
     const sock = ptypkg.unixConnect(sock_path);
     if (sock < 0) return error.ConnectFailed;
     defer ptypkg.closeFd(sock);
-    try proto.write(sock, @intFromEnum(proto.c2s.blocks), "");
+    try proto.write(sock, @intFromEnum(proto.c2s.blocks), if (json) "json" else "");
     _ = ptypkg.setNonblockFd(sock);
     var reader = proto.Reader.init(gpa);
     defer reader.deinit();

@@ -57,10 +57,13 @@ const usage = `rook — the multiplexer, owned
   rook home               rook's home, said outright
   rook attach [--root | --space <name> [--cwd DIR]]   the exact form of the three above
   rook ls                 list workspaces
-  rook new <name>         create/switch workspace
+  rook new [-q] <name> [cwd] [-- cmd...]
+                          create/switch workspace; -q makes it without moving you;
+                          after -- is what its first pane is born running
   rook switch <name>      switch workspace
+  rook close <name>       close a workspace (hangs up every pane in it)
   rook pick               pick a workspace (fzf; prefix-s floats this)
-  rook blocks             the block table (stable ids)
+  rook blocks [--json]    the block table (stable ids), or the same as JSON
   rook raw <id>           this terminal becomes one block, no chrome
   rook state | watch      the state feed: one snapshot, or one per change
   rook read <id> [-n N]   a pane as plain text: the viewport, or its last N lines
@@ -94,7 +97,7 @@ docs/surfaces.md in the repo is the state feed and the rail, in full.
 // verbs the Zig engine owns; rook execs into it verbatim.
 var muxVerbs = map[string]bool{
 	"server": true, "stats": true, "kill": true, "nav": true,
-	"popup": true, "ls": true, "switch": true, "new": true,
+	"popup": true, "ls": true, "switch": true, "new": true, "close": true,
 	"blocks": true, "raw": true,
 	// the state feed (out) and the side rail's model (in)
 	"state": true, "watch": true, "capture": true, "side": true,

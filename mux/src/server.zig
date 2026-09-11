@@ -530,7 +530,7 @@ pub const Server = struct {
         // fresh boot opens a clean workspace instead of last session's
         // splits. The state file is still saved, so opting in restores.
         const restored = self.conf.restore and try self.restoreState();
-        if (!restored) _ = try self.newSession("main", null, true);
+        if (!restored) _ = try self.newSession("main", null, null, true);
         // Rook lands at home. The spaces are restored underneath it,
         // running; `startup = "last-space"` is the opt-in that lands
         // in the space the server was showing instead.
@@ -596,7 +596,11 @@ pub const Server = struct {
     /// Create (or find) a workspace. `show` false builds it without
     /// changing which workspace the person is looking at — the quiet
     /// form the fleet spawns into.
-    fn newSession(self: *Server, name: []const u8, cwd: ?[*:0]const u8, show: bool) !*Session {
+    /// A workspace, made if rook does not hold one by that name. cmd,
+    /// when given, is the program its first pane is born running — the
+    /// tmux shape, `new -s x claude` — and the pane remembers it as the
+    /// way back after a restart until the program says better.
+    fn newSession(self: *Server, name: []const u8, cwd: ?[*:0]const u8, cmd: ?[*:0]const u8, show: bool) !*Session {
         for (self.sessions.items, 0..) |sn, i| {
             if (std.mem.eql(u8, sn.label(), name)) {
                 if (show) self.switchSession(i);
@@ -610,7 +614,7 @@ pub const Server = struct {
         const was = self.cur_sess;
         const old_focused: ?u32 = if (self.sessions.items.len > 1) self.window().focused else null;
         self.cur_sess = self.sessions.items.len - 1;
-        try self.newWindow(cwd);
+        try self.newWindow(cwd, cmd);
         if (show) {
             if (old_focused) |o| self.focusEvents(o, self.window().focused);
         } else if (self.sessions.items.len > 1) {
@@ -669,7 +673,7 @@ pub const Server = struct {
         return null;
     }
 
-    fn newWindow(self: *Server, cwd_override: ?[*:0]const u8) !void {
+    fn newWindow(self: *Server, cwd_override: ?[*:0]const u8, cmd: ?[*:0]const u8) !void {
         const sn = self.sess();
         // a window is seen when it is made: its first prompt is not news
         // an explicit cwd wins; otherwise inherit from what the user
@@ -681,17 +685,18 @@ pub const Server = struct {
         w.* = .{ .layout = layoutpkg.Layout.init(self.gpa), .seen_ms = panepkg.epochMs() };
         try sn.windows.append(self.gpa, w);
         sn.cur = sn.windows.items.len - 1;
-        const p = try self.startPane(cwd);
+        const p = try self.startPane(cwd, cmd);
+        if (cmd) |c| p.setResume(std.mem.span(c));
         try w.layout.seed(p.id);
         w.focused = p.id;
         if (prev_focused) |old_id| self.focusEvents(old_id, p.id);
         try self.relayout();
     }
 
-    fn startPane(self: *Server, cwd: ?[*:0]const u8) !*panepkg.Pane {
+    fn startPane(self: *Server, cwd: ?[*:0]const u8, cmd: ?[*:0]const u8) !*panepkg.Pane {
         const g = self.geometry();
         const dir: ?[*:0]const u8 = cwd orelse if (self.cwd) |c| c.ptr else null;
-        const p = try panepkg.Pane.start(self.gpa, self.io, self.shell.ptr, dir, g.cols, self.bodyRows() -| 1, self.wake_w, self.next_id, null, self.conf.scrollback_bytes);
+        const p = try panepkg.Pane.start(self.gpa, self.io, self.shell.ptr, dir, g.cols, self.bodyRows() -| 1, self.wake_w, self.next_id, cmd, self.conf.scrollback_bytes);
         try self.panes.append(self.gpa, p);
         self.next_id += 1;
         return p;
@@ -932,7 +937,7 @@ pub const Server = struct {
         const cwd = self.focusedCwd(&cwd_buf);
         const w = self.window();
         w.zoomed = false;
-        const p = try self.startPane(cwd);
+        const p = try self.startPane(cwd, null);
         try w.layout.split(w.focused, p.id, side_by_side);
         self.setFocus(p.id);
         try self.relayout();
@@ -1373,7 +1378,7 @@ pub const Server = struct {
                         if (self.pane(bid)) |p| p.write(msg.payload);
                     } else self.input(c, msg.payload);
                 },
-                @intFromEnum(proto.c2s.blocks) => self.sendBlocks(c),
+                @intFromEnum(proto.c2s.blocks) => self.sendBlocks(c, msg.payload),
                 @intFromEnum(proto.c2s.state) => self.sendState(c, msg.payload),
                 @intFromEnum(proto.c2s.side) => self.sidePush(c, msg.payload),
                 @intFromEnum(proto.c2s.capture) => {
@@ -1449,13 +1454,25 @@ pub const Server = struct {
                             // they made, so a caller never has to diff
                             // the table to find out.
                             'n', 'N' => if (name.len > 0) {
-                                // payload: name[\tcwd]
+                                // payload: name[\tcwd[\tcmd]] — the program the
+                                // first pane is born running, if any
                                 var nm = name;
                                 var cwd: ?[*:0]const u8 = null;
                                 var cwd_buf: [1024]u8 = undefined;
+                                var cmd: ?[*:0]const u8 = null;
+                                var cmd_buf: [4096]u8 = undefined;
                                 if (std.mem.indexOfScalar(u8, name, '\t')) |tab| {
                                     nm = name[0..tab];
-                                    const dir = name[tab + 1 ..];
+                                    var dir = name[tab + 1 ..];
+                                    if (std.mem.indexOfScalar(u8, dir, '\t')) |tab2| {
+                                        const prog = dir[tab2 + 1 ..];
+                                        dir = dir[0..tab2];
+                                        if (prog.len > 0 and prog.len < cmd_buf.len) {
+                                            @memcpy(cmd_buf[0..prog.len], prog);
+                                            cmd_buf[prog.len] = 0;
+                                            cmd = @ptrCast(&cmd_buf);
+                                        }
+                                    }
                                     if (dir.len > 0 and dir.len < cwd_buf.len) {
                                         @memcpy(cwd_buf[0..dir.len], dir);
                                         cwd_buf[dir.len] = 0;
@@ -1463,7 +1480,7 @@ pub const Server = struct {
                                     }
                                 }
                                 if (nm.len > 0) {
-                                    if (self.newSession(nm, cwd, op == 'n')) |sn| {
+                                    if (self.newSession(nm, cwd, cmd, op == 'n')) |sn| {
                                         if (sn.windows.items.len > 0)
                                             self.replyCreated(c, sn.windows.items[sn.cur].focused);
                                     } else |_| {}
@@ -1507,13 +1524,45 @@ pub const Server = struct {
 
     /// One line per pane: id, session:window, fg program, cwd. The
     /// web client's block list, and `rook blocks`. Asking once
-    /// subscribes the client to pushes when the table changes.
-    fn sendBlocks(self: *Server, c: *Client) void {
-        c.wants_blocks = true;
+    /// subscribes the client to pushes when the table changes. Asked
+    /// with "json" it is the same table as one JSON array, once, in
+    /// the state feed's own words for where a pane is (`placeOf`) —
+    /// for a program, which should not have to split tabs.
+    fn sendBlocks(self: *Server, c: *Client, form: []const u8) void {
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(self.gpa);
-        self.buildBlocks(&out);
+        if (std.mem.eql(u8, form, "json")) {
+            self.buildBlocksJson(&out);
+        } else {
+            c.wants_blocks = true;
+            self.buildBlocks(&out);
+        }
         self.sendTo(c, @intFromEnum(proto.s2c.blocks_text), out.items);
+    }
+
+    fn buildBlocksJson(self: *Server, out: *std.ArrayList(u8)) void {
+        const gpa = self.gpa;
+        out.append(gpa, '[') catch return;
+        var n: usize = 0;
+        for (self.panes.items) |p| {
+            const at = self.placeOf(p.id) orelse continue;
+            if (n > 0) out.append(gpa, ',') catch return;
+            n += 1;
+            var nb: [64]u8 = undefined;
+            var cb: [1024]u8 = undefined;
+            out.print(gpa, "{{\"id\":{d},\"workspace\":", .{p.id}) catch return;
+            if (at.workspace.len > 0) statefeed.str(gpa, out, at.workspace) else out.appendSlice(gpa, "null") catch return;
+            out.appendSlice(gpa, ",\"window\":") catch return;
+            if (at.window) |wi| out.print(gpa, "{d}", .{wi}) catch return else out.appendSlice(gpa, "null") catch return;
+            out.appendSlice(gpa, ",\"place\":") catch return;
+            statefeed.str(gpa, out, at.place);
+            out.appendSlice(gpa, ",\"program\":") catch return;
+            statefeed.str(gpa, out, p.fgName(&nb) orelse "shell");
+            out.print(gpa, ",\"cols\":{d},\"rows\":{d},\"cwd\":", .{ p.cols, p.rows }) catch return;
+            statefeed.str(gpa, out, if (p.fgCwd(&cb)) |cc| cc else "");
+            out.print(gpa, ",\"visible\":{s},\"focused\":{s}}}", .{ if (at.visible) "true" else "false", if (at.focused) "true" else "false" }) catch return;
+        }
+        out.appendSlice(gpa, "]\n") catch return;
     }
 
     fn buildBlocks(self: *Server, out: *std.ArrayList(u8)) void {
@@ -2155,14 +2204,14 @@ pub const Server = struct {
                     self.gpa.destroy(w);
                     return null;
                 };
-                const p = self.startPane(cwd) catch return null;
+                const p = self.startPane(cwd, null) catch return null;
                 w.layout.seed(p.id) catch {};
                 w.focused = p.id;
                 if (focus) self.focusPane(p.id);
                 return p.id;
             },
             'v', '-' => {
-                const p = self.startPane(cwd) catch return null;
+                const p = self.startPane(cwd, null) catch return null;
                 loc.w.layout.split(bid, p.id, op == 'v') catch return null;
                 loc.w.zoomed = false;
                 if (loc.w == self.window()) self.relayout() catch {};
@@ -2640,7 +2689,7 @@ pub const Server = struct {
             .window => |i| {
                 if (i < self.sess().windows.items.len and i != self.sess().cur) self.selectWindow(i);
             },
-            .new => self.newWindow(null) catch {},
+            .new => self.newWindow(null, null) catch {},
         }
     }
 
@@ -2988,7 +3037,7 @@ pub const Server = struct {
             'v', '|' => self.splitPane(true) catch {},
             '-' => self.splitPane(false) catch {},
             'h', 'j', 'k', 'l' => _ = self.navigate(key),
-            'c' => self.newWindow(null) catch {},
+            'c' => self.newWindow(null, null) catch {},
             'n' => self.selectWindow((self.sess().cur + 1) % self.sess().windows.items.len),
             'p' => self.selectWindow((self.sess().cur + self.sess().windows.items.len - 1) % self.sess().windows.items.len),
             '1'...'9' => {
@@ -3624,7 +3673,7 @@ pub const Server = struct {
                     }
                 }
                 if (name.len == 0) return;
-                _ = self.newSession(name, cwd, true) catch return;
+                _ = self.newSession(name, cwd, null, true) catch return;
                 self.enterSpace();
             },
             else => {},
@@ -3879,7 +3928,7 @@ pub const Server = struct {
                     cwd_z[dir.len] = 0;
                     break :blk @ptrCast(&cwd_z);
                 } else null;
-                const p = try self.startPane(cwd_arg);
+                const p = try self.startPane(cwd_arg, null);
                 last_pane = p;
                 if (is_global) {
                     try self.global_pins.append(self.gpa, p.id);
@@ -3897,7 +3946,7 @@ pub const Server = struct {
                 } else null;
                 const sn = self.sess();
                 const w = sn.windows.items[sn.windows.items.len - 1];
-                const p = try self.startPane(cwd_arg);
+                const p = try self.startPane(cwd_arg, null);
                 try w.layout.split(w.focused, p.id, true);
                 last_pane = p;
             } else if (std.mem.startsWith(u8, line, "window ") and self.sessions.items.len > 0) {
@@ -3914,7 +3963,7 @@ pub const Server = struct {
                 const w = try self.gpa.create(Window);
                 w.* = .{ .layout = layoutpkg.Layout.init(self.gpa), .seen_ms = panepkg.epochMs() };
                 try sn.windows.append(self.gpa, w);
-                const p = try self.startPane(cwd_arg);
+                const p = try self.startPane(cwd_arg, null);
                 try w.layout.seed(p.id);
                 w.focused = p.id;
                 last_pane = p;
@@ -3926,7 +3975,7 @@ pub const Server = struct {
         // a session line with no windows would be an empty shell; give
         // it one so the invariant (every session has a window) holds
         if (made_any and !sess_has_window and self.sess().windows.items.len == 0) {
-            try self.newWindow(null);
+            try self.newWindow(null, null);
         }
         if (!made_any) return false;
         // drop any restored session that ended up windowless
@@ -5249,7 +5298,7 @@ pub const Server = struct {
             .new => if (arg.len > 0) {
                 self.alt.clear();
                 self.enterSpace();
-                _ = self.newSession(arg, null, true) catch {};
+                _ = self.newSession(arg, null, null, true) catch {};
             },
             .rename => if (arg.len > 0) {
                 self.renameWindow(arg);

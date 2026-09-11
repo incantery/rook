@@ -30,7 +30,8 @@ is the engine's own manual: the keys, the rail, the state feed, the
 build. The prefix comes from `~/.config/rook/rook.toml` (`[tmux]
 prefix = "` "`", `C-b` when unset).
 
-**Workspaces, windows, panes.** `rook ls / new / switch / pick`;
+**Workspaces, windows, panes.** `rook ls / new / switch / close / pick`
+(`rook new -q <name> <dir> -- claude` is a space born running a program);
 `prefix-c` a window, `prefix-v` / `prefix--` a split, `prefix-hjkl`
 focus (a bare `ctrl-hjkl` too, vim-navigator style, with
 `mux/nvim` handing edge moves back), `prefix-z` zoom, `prefix-[` copy
