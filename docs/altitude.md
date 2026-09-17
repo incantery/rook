@@ -383,15 +383,46 @@ looking at. Run it after any change to the frame.
   "region": "composer|thread|dash", "wide": bool, "turns": n,
   "draft": bool}`. The draft itself is not published.
 - `bar`: whether the calm bar is on.
-- `workspaces[].windows[].name` (minted), `named`, `program` (the live
-  tool of the focused pane).
+- `workspaces[].windows[].name` (minted), `named`, `nameBy`, `program`
+  (the live tool of the focused pane). `nameBy` is whose word the name
+  is: `none`, `program` (the first program that spoke), `model` (a
+  namer's suggestion) or `hand`. Only `hand` is final.
 - `panes[].input`: `{"state": "human"}` or the actor and one of the
   five states, with `sinceMs`.
 - `surfaces[]`: the rail's model, still published verbatim for the
   web client and any producer; an `agents` item may carry `actor`,
   `event` and `result` beside its rail fields.
 - The restore file (`<sock>.state`, still `v2`) carries `name <n>`
-  under a minted window and `origin <space>` under a global pin.
+  under a minted window (`name-hand` or `name-model` when that is whose
+  word it was; a bare `name` reads back as a guess) and `origin <space>`
+  under a global pin.
+
+## The namer
+
+A name minted from the first program that spoke is often the wrong
+word: a tab that read `zoxide` at birth reads `zoxide` all day. So a
+minted name is now a guess, and a better guess may replace it. A name
+given by hand is still final.
+
+- `rook rename --suggest <pane> <name>` offers a name for the window
+  that holds `<pane>`. The engine takes it unless `nameBy` is `hand`.
+  The engine runs no model and no subprocess; it only accepts a word.
+- `rookd` runs the namer (`internal/namer`). For each tab not named by
+  hand it gathers the project (the repository's name, even inside a
+  linked worktree), branch, program, title and the last 40 lines of
+  the screen, pipes that to a command, and suggests the command's one
+  line of stdout.
+- It asks when a tab's facts change and have held still for 8 s: the
+  directory, the branch, the program, the title (spinner glyphs
+  stripped). With unchanged facts it asks again every 10 minutes if the
+  pane has printed since, and then a new name must be said twice
+  before it lands. The window's oldest pane speaks for it, so moving
+  focus between splits renames nothing.
+- The command is a seam: `[namer] command = "..."` in `rook.toml`,
+  default `wisp name` (incantery/wisp: the model Apple ships on the
+  Mac, about 0.4 s a call, nothing leaves the machine). `[namer] off =
+  true` turns it off. No command on PATH means no namer, and tabs keep
+  the names rook mints for itself.
 
 ## Owed
 

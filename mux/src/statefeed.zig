@@ -208,7 +208,10 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
             const program: []const u8 = if (!form.drift) "" else if (sv.pane(w.focused)) |p| (p.fgName(&nb) orelse "shell") else "shell";
             out.print(gpa, "{{\"index\":{d},\"name\":", .{wi + 1}) catch return;
             str(gpa, out, name);
-            out.print(gpa, ",\"named\":{s},\"program\":", .{boolStr(w.named)}) catch return;
+            // `nameBy`: whose word the name is — none, program, model,
+            // hand. Only `hand` is final; a namer reads this to know
+            // which tabs are still its to improve.
+            out.print(gpa, ",\"named\":{s},\"nameBy\":\"{s}\",\"program\":", .{ boolStr(w.named), w.name_by.word() }) catch return;
             str(gpa, out, program);
             out.print(gpa, ",\"current\":{s},\"zoomed\":{s},\"focus\":{d},\"layout\":", .{
                 boolStr(wi == sn.cur),

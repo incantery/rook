@@ -178,14 +178,22 @@ const Window = struct {
     /// the window is current, so "seen" tracks looking rather than
     /// switching.
     seen_ms: i64 = 0,
-    /// The tab's name, minted once and then frozen (docs/altitude.md,
-    /// resolution 6): a name a person gave, else the first program
-    /// in it that was not the shell. Rook never changes a minted name;
-    /// the activity glyph and the actor suffix change freely around
-    /// it. Until it is minted the tab reads the live program.
+    /// The tab's name, minted once (docs/altitude.md, resolution 6):
+    /// a name a person gave, else the first program in it that was
+    /// not the shell. The engine never changes a minted name for
+    /// itself; a namer may offer a better one (`suggestName`), and
+    /// only where a person has not spoken. The activity glyph and the
+    /// actor suffix change freely around it. Until it is minted the
+    /// tab reads the live program.
     name: [32]u8 = @splat(0),
     name_len: usize = 0,
     named: bool = false,
+    /// Whose word the name is. A person's (`hand`) is final: nothing
+    /// but another rename by hand changes it. A `program` name — the
+    /// first program that spoke — and a `model` name — a namer's
+    /// suggestion, `rook rename --suggest` — are rook's best guess,
+    /// and a better guess may replace them.
+    name_by: NameBy = .none,
 
     pub fn label(self: *const Window) []const u8 {
         return self.name[0..self.name_len];
@@ -193,6 +201,17 @@ const Window = struct {
     fn setName(self: *Window, n: []const u8) void {
         self.name_len = @min(n.len, self.name.len);
         @memcpy(self.name[0..self.name_len], n[0..self.name_len]);
+    }
+};
+
+pub const NameBy = enum {
+    none,
+    program,
+    model,
+    hand,
+
+    pub fn word(self: NameBy) []const u8 {
+        return @tagName(self);
     }
 };
 
@@ -1490,6 +1509,9 @@ pub const Server = struct {
                             // 'r' names the current window: the one act
                             // that changes a minted tab name.
                             'r' => if (name.len > 0) self.renameWindow(name),
+                            // 'g' is a namer's suggestion for a pane's
+                            // window: it yields to a name given by hand.
+                            'g' => if (name.len > 0) self.suggestName(name),
                             else => {},
                         }
                         if (op != 'l') {
@@ -3845,7 +3867,15 @@ pub const Server = struct {
                 // a minted name survives the restart: it is identity,
                 // and identity is what a restore is for
                 if (w.named and std.mem.indexOfScalar(u8, w.label(), '\n') == null) {
-                    out.appendSlice(self.gpa, "name ") catch return;
+                    // whose word it was rides along, so a restart does
+                    // not turn a guess into a decision or the reverse.
+                    // A bare `name` is what older state files wrote for
+                    // both; it reads back as a guess.
+                    out.appendSlice(self.gpa, switch (w.name_by) {
+                        .hand => "name-hand ",
+                        .model => "name-model ",
+                        else => "name ",
+                    }) catch return;
                     out.appendSlice(self.gpa, w.label()) catch return;
                     out.append(self.gpa, '\n') catch return;
                 }
@@ -3902,12 +3932,14 @@ pub const Server = struct {
                 if (last_pane) |lp| self.setOrigin(lp.id, line["origin ".len..]);
                 continue;
             }
-            if (std.mem.startsWith(u8, line, "name ")) {
-                const nm = line["name ".len..];
+            if (std.mem.startsWith(u8, line, "name ") or std.mem.startsWith(u8, line, "name-hand ") or std.mem.startsWith(u8, line, "name-model ")) {
+                const sp = std.mem.indexOfScalar(u8, line, ' ').?;
+                const nm = line[sp + 1 ..];
                 if (last_window) |w| {
                     if (nm.len > 0) {
                         w.setName(nm);
                         w.named = true;
+                        w.name_by = if (line[4] == ' ') .program else if (line[5] == 'h') .hand else .model;
                     }
                 }
                 continue;
@@ -4223,6 +4255,7 @@ pub const Server = struct {
         }
         w.setName(name);
         w.named = true;
+        w.name_by = .program;
         self.state_dirty = true;
         _ = self.touch();
     }
@@ -4256,10 +4289,49 @@ pub const Server = struct {
         const w = self.window();
         w.setName(name);
         w.named = true;
+        w.name_by = .hand;
         self.state_dirty = true;
         _ = self.touch();
         self.full = true;
         self.pending = true;
+    }
+
+    /// `rook rename --suggest <pane> <name>`: a namer's word for the
+    /// window that holds `pane`. `arg` is `<pane-id> <name>`. It lands
+    /// only where a person has not spoken — a name given by hand is
+    /// never a namer's to change — and it is a no-op when the window
+    /// already wears it, so a namer that repeats itself costs nothing.
+    fn suggestName(self: *Server, arg: []const u8) void {
+        const sp = std.mem.indexOfScalar(u8, arg, ' ') orelse return;
+        const id = std.fmt.parseInt(u32, arg[0..sp], 10) catch return;
+        const name = std.mem.trim(u8, arg[sp + 1 ..], " ");
+        if (name.len == 0 or std.mem.indexOfScalar(u8, name, '\n') != null) return;
+        for (self.sessions.items) |sn| {
+            for (sn.windows.items) |w| {
+                if (!w.layout.contains(id)) continue;
+                if (w.name_by == .hand) return;
+                if (w.named and std.mem.eql(u8, w.label(), name)) {
+                    w.name_by = .model;
+                    return;
+                }
+                // a sibling already wearing it keeps it: two tabs
+                // with one name is worse than one tab with a dull one
+                var nb: [48]u8 = undefined;
+                var final: []const u8 = name;
+                var ord: usize = 2;
+                while (self.nameTaken(sn, w, final) and ord < 100) : (ord += 1) {
+                    final = std.fmt.bufPrint(&nb, "{s}·{d}", .{ name, ord }) catch name;
+                }
+                w.setName(final);
+                w.named = true;
+                w.name_by = .model;
+                self.state_dirty = true;
+                _ = self.touch();
+                self.full = true;
+                self.pending = true;
+                return;
+            }
+        }
     }
 
     /// The first pane in the window running an agent, by the cached

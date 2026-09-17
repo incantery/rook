@@ -22,6 +22,8 @@
 //!   rook own <id> <actor> | --paused <actor> | --release | --request | --take
 //!                       who holds a pane's keyboard (docs/altitude.md)
 //!   rook rename <name>  name the current tab; it never renames itself again
+//!   rook rename --suggest <pane> <name>   a namer's word for that pane's tab;
+//!                       it yields to a name given by hand
 //!   rook kill           stop the server
 const std = @import("std");
 const server = @import("server.zig");
@@ -309,15 +311,27 @@ pub fn main(init: std.process.Init) !void {
     }
     if (std.mem.eql(u8, cmd, "rename")) {
         if (argv.len < 3) {
-            std.debug.print("usage: rook rename <name>\n", .{});
+            std.debug.print("usage: rook rename <name> | --suggest <pane> <name>\n", .{});
             return error.BadArgs;
         }
+        const suggest = std.mem.eql(u8, std.mem.span(argv[2]), "--suggest");
+        if (suggest) {
+            if (argv.len < 5) {
+                std.debug.print("usage: rook rename --suggest <pane> <name>\n", .{});
+                return error.BadArgs;
+            }
+            _ = std.fmt.parseInt(u32, std.mem.span(argv[3]), 10) catch {
+                std.debug.print("rook rename --suggest: {s} is not a pane id\n", .{argv[3]});
+                return error.BadArgs;
+            };
+        }
         var joined: std.ArrayList(u8) = .empty;
-        for (argv[2..], 0..) |a, i| {
+        const from: usize = if (suggest) 3 else 2;
+        for (argv[from..], 0..) |a, i| {
             if (i > 0) try joined.append(gpa, ' ');
             try joined.appendSlice(gpa, std.mem.span(a));
         }
-        try client.session(gpa, path, 'r', joined.items);
+        try client.session(gpa, path, if (suggest) 'g' else 'r', joined.items);
         return;
     }
     if (std.mem.eql(u8, cmd, "jump")) {

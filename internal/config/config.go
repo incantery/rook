@@ -27,7 +27,31 @@ type Config struct {
 	// parses for itself (mux/README.md). Nothing here reads it — but an
 	// unrecognized key refuses to boot, and one file with two readers
 	// must not mean that either reader's keys break the other's.
-	Mux map[string]any `toml:"mux"`
+	Mux   map[string]any `toml:"mux"`
+	Namer Namer          `toml:"namer"`
+}
+
+// Namer is the [namer] table: what gives tabs their names once the
+// first program's name stops being the best rook can do. rookd runs
+// it; the engine only accepts its suggestions, and never over a name
+// a person gave.
+type Namer struct {
+	// Command reads what a tab holds on stdin and prints a name. Unset
+	// means "wisp name"; a command that is not on PATH names nothing.
+	Command *string `toml:"command"`
+	// Off turns the namer off whatever the command.
+	Off bool `toml:"off"`
+}
+
+// NamerCommand is the command to run, or "" for none.
+func (c Config) NamerCommand(def string) string {
+	if c.Namer.Off {
+		return ""
+	}
+	if c.Namer.Command != nil {
+		return *c.Namer.Command
+	}
+	return def
 }
 
 // Worktree is the [worktree] table: what a fresh worktree needs that git

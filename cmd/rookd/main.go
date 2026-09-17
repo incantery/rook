@@ -5,14 +5,18 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net"
+	"os"
 	"os/exec"
 	"syscall"
 	"time"
 
+	"github.com/incantery/rook/internal/config"
 	"github.com/incantery/rook/internal/mux"
+	"github.com/incantery/rook/internal/namer"
 	"github.com/incantery/rook/internal/webd"
 )
 
@@ -59,6 +63,36 @@ func superviseMux(sock string) {
 	}
 }
 
+// nameTabs runs the tab namer against the engine on sock. The config
+// is read once: rookd is restarted by launchd, not reloaded. A config
+// that does not load names nothing rather than guessing.
+func nameTabs(sock string) {
+	command := namer.DefaultCommand
+	if path, err := config.Path(); err == nil {
+		c, err := config.Load(path)
+		if err != nil {
+			log.Printf("namer: off: %v", err)
+			return
+		}
+		command = c.NamerCommand(namer.DefaultCommand)
+	}
+	if command == "" {
+		log.Printf("namer: off by config")
+		return
+	}
+	n := namer.New(namer.Options{
+		Command: command,
+		Engine: func(args ...string) (string, error) {
+			cmd := exec.Command(mux.EnginePath(), args...)
+			cmd.Env = append(os.Environ(), "ROOK_MUX_SOCK="+sock)
+			out, err := cmd.Output()
+			return string(out), err
+		},
+		Logf: log.Printf,
+	})
+	n.Run(context.Background(), 4*time.Second)
+}
+
 func main() {
 	addr := flag.String("addr", "0.0.0.0:7673", "web bridge listen address")
 	sock := flag.String("sock", webd.DefaultSock(), "engine unix socket")
@@ -67,5 +101,6 @@ func main() {
 	flag.Parse()
 
 	go superviseMux(*sock)
+	go nameTabs(*sock)
 	log.Fatal(webd.Serve(webd.Options{Addr: *addr, Sock: *sock, Dir: *dir, Token: *token}))
 }
