@@ -76,7 +76,9 @@ const usage = `rook — the multiplexer, owned
   rook resume <id> <cmd>  how to bring the pane's program back after a restart
   rook own <id> <actor> | --paused <actor> | --release | --request | --take
                           who holds a pane's keyboard (docs/altitude.md)
-  rook rename <name>      name the current tab; rook never renames it again
+  rook rename <name> | --auto
+                          name the current tab for good, or give it back to rook
+                          to guess (which lets the namer speak again)
   rook side [-|demo]      push the side rail's model (JSON frames on stdin)
   rook companion [--json] where the companion (vera) is open, if she is
   rook popup <cmd...>     float a command over the current window

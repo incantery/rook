@@ -1,5 +1,6 @@
-# built binary
+# built binaries
 /rook
+/rookd
 # macOS Finder droppings
 .DS_Store
 dist/

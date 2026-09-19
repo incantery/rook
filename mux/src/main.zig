@@ -24,12 +24,60 @@
 //!   rook rename <name>  name the current tab; it never renames itself again
 //!   rook rename --suggest <pane> <name>   a namer's word for that pane's tab;
 //!                       it yields to a name given by hand
+//!   rook rename --auto   give the tab back: rook guesses again, and a
+//!                       namer may speak (the way out of a hand name)
 //!   rook kill           stop the server
 const std = @import("std");
 const server = @import("server.zig");
 const chrome = @import("chrome.zig");
 const client = @import("client.zig");
 const ptypkg = @import("pty.zig");
+
+const rename_usage =
+    \\usage: rook rename <name>              name the current tab, for good
+    \\       rook rename --auto              give it back to rook to guess
+    \\       rook rename --suggest <pane> <name>   a namer's word for a tab
+    \\
+;
+
+/// The session op `rook rename <args...>` means, and the argument its
+/// payload starts at. Pulled out of the dispatch because the one thing
+/// it must never do is hard to see inline: a flag is not a tab name.
+/// `rook rename --help` named the tab `--help`, by hand, and a name
+/// given by hand is forever.
+const RenamePlan = struct { op: u8, from: usize };
+
+fn renamePlan(first: []const u8, n: usize) error{ Usage, UnknownOption }!RenamePlan {
+    if (n == 0) return error.Usage;
+    // --auto carries no payload, so its join starts past the end
+    if (std.mem.eql(u8, first, "--auto")) return .{ .op = 'u', .from = n };
+    if (std.mem.eql(u8, first, "--suggest")) {
+        if (n < 3) return error.Usage;
+        return .{ .op = 'g', .from = 1 };
+    }
+    if (first.len > 1 and first[0] == '-') return error.UnknownOption;
+    return .{ .op = 'r', .from = 0 };
+}
+
+test "a flag is never a tab name" {
+    const t = std.testing;
+    // the slip that named a live tab `--help`, by hand, forever
+    try t.expectError(error.UnknownOption, renamePlan("--help", 1));
+    try t.expectError(error.UnknownOption, renamePlan("-h", 1));
+    try t.expectError(error.UnknownOption, renamePlan("--sugest", 3));
+    try t.expectError(error.Usage, renamePlan("", 0));
+    // a lone dash is a word a person may want on a tab
+    try t.expectEqual(RenamePlan{ .op = 'r', .from = 0 }, try renamePlan("-", 1));
+}
+
+test "rename plans its three ops" {
+    const t = std.testing;
+    try t.expectEqual(RenamePlan{ .op = 'r', .from = 0 }, try renamePlan("the", 3));
+    try t.expectEqual(RenamePlan{ .op = 'u', .from = 1 }, try renamePlan("--auto", 1));
+    try t.expectEqual(RenamePlan{ .op = 'g', .from = 1 }, try renamePlan("--suggest", 3));
+    // --suggest wants a pane and a name, not one or the other
+    try t.expectError(error.Usage, renamePlan("--suggest", 2));
+}
 
 test {
     _ = @import("layout.zig");
@@ -310,28 +358,26 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (std.mem.eql(u8, cmd, "rename")) {
-        if (argv.len < 3) {
-            std.debug.print("usage: rook rename <name> | --suggest <pane> <name>\n", .{});
+        const args = argv.len - 2;
+        const first = if (args > 0) std.mem.span(argv[2]) else "";
+        const plan = renamePlan(first, args) catch |e| {
+            if (e == error.UnknownOption)
+                std.debug.print("rook rename: unknown option {s}\n", .{first});
+            std.debug.print("{s}", .{rename_usage});
             return error.BadArgs;
-        }
-        const suggest = std.mem.eql(u8, std.mem.span(argv[2]), "--suggest");
-        if (suggest) {
-            if (argv.len < 5) {
-                std.debug.print("usage: rook rename --suggest <pane> <name>\n", .{});
-                return error.BadArgs;
-            }
+        };
+        if (plan.op == 'g') {
             _ = std.fmt.parseInt(u32, std.mem.span(argv[3]), 10) catch {
                 std.debug.print("rook rename --suggest: {s} is not a pane id\n", .{argv[3]});
                 return error.BadArgs;
             };
         }
         var joined: std.ArrayList(u8) = .empty;
-        const from: usize = if (suggest) 3 else 2;
-        for (argv[from..], 0..) |a, i| {
+        for (argv[2 + plan.from ..], 0..) |a, i| {
             if (i > 0) try joined.append(gpa, ' ');
             try joined.appendSlice(gpa, std.mem.span(a));
         }
-        try client.session(gpa, path, if (suggest) 'g' else 'r', joined.items);
+        try client.session(gpa, path, plan.op, joined.items);
         return;
     }
     if (std.mem.eql(u8, cmd, "jump")) {

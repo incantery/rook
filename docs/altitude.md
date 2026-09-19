@@ -407,6 +407,14 @@ given by hand is still final.
 - `rook rename --suggest <pane> <name>` offers a name for the window
   that holds `<pane>`. The engine takes it unless `nameBy` is `hand`.
   The engine runs no model and no subprocess; it only accepts a word.
+- `rook rename --auto` gives a tab back: it stops being named, rook
+  mints from the program again, and the namer may speak. It is the one
+  way out of a name given by hand, which nothing else undoes. A flag
+  is never taken as a name — `rook rename --help` prints usage.
+- The namer lives in `rookd`, so `make install` installs `rookd` too
+  and restarts it (`scripts/restart-rookd.sh`). A rook installed
+  without that step has the new engine and the old nanny, and its tabs
+  keep the names the first program gave them.
 - `rookd` runs the namer (`internal/namer`). For each tab not named by
   hand it gathers the project (the repository's name, even inside a
   linked worktree), branch, program, title and the last 40 lines of

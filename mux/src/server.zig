@@ -1512,6 +1512,8 @@ pub const Server = struct {
                             // 'g' is a namer's suggestion for a pane's
                             // window: it yields to a name given by hand.
                             'g' => if (name.len > 0) self.suggestName(name),
+                            // 'u' gives the current tab back to rook.
+                            'u' => self.unnameWindow(),
                             else => {},
                         }
                         if (op != 'l') {
@@ -4290,6 +4292,21 @@ pub const Server = struct {
         w.setName(name);
         w.named = true;
         w.name_by = .hand;
+        self.state_dirty = true;
+        _ = self.touch();
+        self.full = true;
+        self.pending = true;
+    }
+
+    /// `rook rename --auto`: the current tab stops being named, so
+    /// rook mints from the program again on its next scan and a namer
+    /// may speak. It is the only way out of a name given by hand —
+    /// without it a slip of the wrist owns the tab forever.
+    fn unnameWindow(self: *Server) void {
+        const w = self.window();
+        w.setName("");
+        w.named = false;
+        w.name_by = .none;
         self.state_dirty = true;
         _ = self.touch();
         self.full = true;
