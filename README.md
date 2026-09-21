@@ -36,7 +36,8 @@ prefix = "` "`", `C-b` when unset).
 focus (a bare `ctrl-hjkl` too, vim-navigator style, with
 `mux/nvim` handing edge moves back), `prefix-z` zoom, `prefix-[` copy
 mode, `prefix-P` pin a pane to the rail, `prefix-s` the workspace picker
-(fzf over `rook ls`, `rook pick` at a prompt), `prefix-w` worktrees, `prefix-u` the oldest
+(fzf over `rook ls`, `rook pick` at a prompt), `prefix-w` worktrees, `prefix-g` grim (the
+resident agent, floated over whatever you are doing; `rook popup grim` is the same), `prefix-u` the oldest
 thing you have not read. The tabs are clickable: a chip is its window,
 the `+` a new one. A tab is named once — the first program in it that
 was not the shell, or `rook rename` — and rook never renames it; the

@@ -3095,6 +3095,13 @@ pub const Server = struct {
             // orbit, which held this key for a while, is `:orbit`.
             's' => self.openPopup("rook pick") catch {},
             'w' => self.openPopup("rook worktree") catch {},
+            // Grim: the resident agent, floated over whatever this is.
+            // The popup is only a view of it — grim is a service with a
+            // life of its own (github.com/incantery/grimoire), so
+            // closing this ends nothing. Like the two above it is one
+            // verb here; what grim is, is grim's. It floats from home
+            // too: what you want to ask is not always about a pane.
+            'g' => self.openPopup("grim") catch {},
             // The root, with the cursor on a section: running work,
             // or what needs you (`!` is the attention mark).
             'a' => self.goHomeAt(.running),
@@ -3161,7 +3168,7 @@ pub const Server = struct {
     /// The prefix keys that mean something at the root.
     fn rootKey(key: u8) bool {
         return switch (key) {
-            'o', 's', 'a', '!', 't', 'T', '/', ':', 0x0f, 'd', 'A', 'u' => true,
+            'o', 's', 'g', 'a', '!', 't', 'T', '/', ':', 0x0f, 'd', 'A', 'u' => true,
             else => false,
         };
     }
