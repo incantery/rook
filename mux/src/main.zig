@@ -5,7 +5,7 @@
 //!   rook attach [--root | --space <name> [--cwd <dir>]]   attach somewhere exact
 //!   rook server         run the server in the foreground
 //!   rook nav <dir>      move focus h/j/k/l (vim plugins call this at edges)
-//!   rook popup <cmd>    float a command over the current window
+//!   rook popup [--size WxH] <cmd>   float a command over the current window
 //!   rook ls / switch / new [-q] <name> [cwd] [-- program...] / close <name>   workspaces
 //!   rook state / watch       the state feed: snapshot, or subscribe
 //!   rook side [-]            push side-panel models (JSON frames on stdin)
@@ -443,12 +443,21 @@ pub fn main(init: std.process.Init) !void {
     }
     if (std.mem.eql(u8, cmd, "popup")) {
         if (argv.len < 3) {
-            std.debug.print("usage: rook popup <command...>\n", .{});
+            std.debug.print("usage: rook popup [--size WxH] <command...>   (percent of the glass; 80x84 if unsaid)\n", .{});
             return error.BadArgs;
         }
         var joined: std.ArrayList(u8) = .empty;
-        for (argv[2..], 0..) |a, i| {
-            if (i > 0) try joined.append(gpa, ' ');
+        var rest = argv[2..];
+        // --size WxH: the popup's share of the glass, in percent
+        if (rest.len >= 3 and std.mem.eql(u8, std.mem.span(rest[0]), "--size")) {
+            try joined.append(gpa, 0x1f);
+            try joined.appendSlice(gpa, std.mem.span(rest[1]));
+            try joined.append(gpa, 0x1f);
+            rest = rest[2..];
+        }
+        const head = joined.items.len;
+        for (rest) |a| {
+            if (joined.items.len > head) try joined.append(gpa, ' ');
             try joined.appendSlice(gpa, std.mem.span(a));
         }
         try client.popup(path, joined.items);

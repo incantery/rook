@@ -81,7 +81,8 @@ const usage = `rook — the multiplexer, owned
                           to guess (which lets the namer speak again)
   rook side [-|demo]      push the side rail's model (JSON frames on stdin)
   rook companion [--json] where the companion (vera) is open, if she is
-  rook popup <cmd...>     float a command over the current window
+  rook popup [--size WxH] <cmd...>   float a command over the current window
+                          (percent of the glass; 80x84 unless said)
   rook nav h|j|k|l        move focus (vim plugins call this at edges)
   rook stats | kill       server introspection / shutdown
   rook url                the web client URL (token included)

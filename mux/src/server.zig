@@ -396,6 +396,7 @@ pub const Server = struct {
     /// A floating pane over the current window: all input goes to it,
     /// it closes when its process exits. One at a time.
     popup: ?u32 = null,
+    popup_pct: [2]u8 = .{ 80, 84 },
     /// The bars as last shipped. A mark appearing on a hidden window's
     /// tab, a window opened from the front door, a count changing on
     /// the calm bar: none of it dirties a pane cell, so the bars are
@@ -740,9 +741,32 @@ pub const Server = struct {
     fn popupRect(self: *Server) layoutpkg.Rect {
         const g = self.geometry();
         const rows = self.bodyRows() -| 1;
-        const w: u16 = @max(@min(g.cols, 30), g.cols * 6 / 10);
-        const h: u16 = @max(@min(rows, 8), rows * 6 / 10);
+        const w: u16 = @max(@min(g.cols, 30), @as(u16, @intCast(@as(u32, g.cols) * self.popup_pct[0] / 100)));
+        const h: u16 = @max(@min(rows, 8), @as(u16, @intCast(@as(u32, rows) * self.popup_pct[1] / 100)));
         return .{ .x = (g.cols -| w) / 2, .y = (rows -| h) / 2, .w = w, .h = h };
+    }
+
+    /// A popup's share of the glass, width and height, in percent. A
+    /// picker is happy at the default; something a person reads and
+    /// types in for minutes — grim — asks for more (`rook popup --size
+    /// 86x90 …`, which arrives as a `\x1fWxH\x1f` prefix on the command
+    /// so that a request without one is exactly what it always was).
+    const popup_default = [2]u8{ 80, 84 };
+
+    fn popupSized(self: *Server, payload: []const u8) []const u8 {
+        const p = popupSize(payload);
+        self.popup_pct = p.pct;
+        return p.cmd;
+    }
+
+    /// Pure: a popup request taken apart — its size, and its command.
+    pub fn popupSize(payload: []const u8) struct { pct: [2]u8, cmd: []const u8 } {
+        if (payload.len < 2 or payload[0] != 0x1f) return .{ .pct = popup_default, .cmd = payload };
+        const end = std.mem.indexOfScalarPos(u8, payload, 1, 0x1f) orelse return .{ .pct = popup_default, .cmd = payload };
+        var it = std.mem.splitScalar(u8, payload[1..end], 'x');
+        const w = std.fmt.parseInt(u8, it.next() orelse "", 10) catch popup_default[0];
+        const h = std.fmt.parseInt(u8, it.next() orelse "", 10) catch popup_default[1];
+        return .{ .pct = .{ std.math.clamp(w, 30, 100), std.math.clamp(h, 30, 100) }, .cmd = payload[end + 1 ..] };
     }
 
     fn openPopup(self: *Server, cmd: []const u8) !void {
@@ -1524,7 +1548,7 @@ pub const Server = struct {
                     }
                 },
                 @intFromEnum(proto.c2s.popup) => {
-                    if (msg.payload.len > 0) self.openPopup(msg.payload) catch {};
+                    if (msg.payload.len > 0) self.openPopup(self.popupSized(msg.payload)) catch {};
                 },
                 @intFromEnum(proto.c2s.nav) => {
                     // vim hit a window edge and hands us the move; an
@@ -3093,15 +3117,15 @@ pub const Server = struct {
             // Here it is one verb, like the worktree manager. It
             // floats from home too: picking a space enters it, and
             // orbit, which held this key for a while, is `:orbit`.
-            's' => self.openPopup("rook pick") catch {},
-            'w' => self.openPopup("rook worktree") catch {},
+            's' => self.openPopup(self.popupSized("rook pick")) catch {},
+            'w' => self.openPopup(self.popupSized("rook worktree")) catch {},
             // Grim: the resident agent, floated over whatever this is.
             // The popup is only a view of it — grim is a service with a
             // life of its own (github.com/incantery/grimoire), so
             // closing this ends nothing. Like the two above it is one
             // verb here; what grim is, is grim's. It floats from home
             // too: what you want to ask is not always about a pane.
-            'g' => self.openPopup("grim") catch {},
+            'g' => self.openPopup(self.popupSized("\x1f88x92\x1fgrim")) catch {},
             // The root, with the cursor on a section: running work,
             // or what needs you (`!` is the attention mark).
             'a' => self.goHomeAt(.running),
@@ -6807,4 +6831,16 @@ test "a byte spent on a command cannot be part of a marker" {
     p.reset();
     try std.testing.expectEqual(@as(usize, 3), runEnd(&p, "00~", '`'));
     try std.testing.expect(!p.active);
+}
+
+test "a popup request says how big it wants to be, or says nothing" {
+    const plain = Server.popupSize("rook pick");
+    try std.testing.expectEqualStrings("rook pick", plain.cmd);
+    try std.testing.expectEqual([2]u8{ 80, 84 }, plain.pct);
+    const sized = Server.popupSize("\x1f88x92\x1fgrim");
+    try std.testing.expectEqualStrings("grim", sized.cmd);
+    try std.testing.expectEqual([2]u8{ 88, 92 }, sized.pct);
+    // nonsense is clamped, or ignored: a popup is never a sliver or off the glass
+    try std.testing.expectEqual([2]u8{ 30, 100 }, Server.popupSize("\x1f5x250\x1fx").pct);
+    try std.testing.expectEqual([2]u8{ 80, 84 }, Server.popupSize("\x1fwide\x1fx").pct);
 }
