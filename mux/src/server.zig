@@ -3125,7 +3125,7 @@ pub const Server = struct {
             // closing this ends nothing. Like the two above it is one
             // verb here; what grim is, is grim's. It floats from home
             // too: what you want to ask is not always about a pane.
-            'g' => self.openPopup(self.popupSized("\x1f88x92\x1fgrim")) catch {},
+            'g' => self.openPopup(self.popupSized("\x1f76x90\x1fgrim")) catch {},
             // The root, with the cursor on a section: running work,
             // or what needs you (`!` is the attention mark).
             'a' => self.goHomeAt(.running),
@@ -6837,9 +6837,9 @@ test "a popup request says how big it wants to be, or says nothing" {
     const plain = Server.popupSize("rook pick");
     try std.testing.expectEqualStrings("rook pick", plain.cmd);
     try std.testing.expectEqual([2]u8{ 80, 84 }, plain.pct);
-    const sized = Server.popupSize("\x1f88x92\x1fgrim");
+    const sized = Server.popupSize("\x1f76x90\x1fgrim");
     try std.testing.expectEqualStrings("grim", sized.cmd);
-    try std.testing.expectEqual([2]u8{ 88, 92 }, sized.pct);
+    try std.testing.expectEqual([2]u8{ 76, 90 }, sized.pct);
     // nonsense is clamped, or ignored: a popup is never a sliver or off the glass
     try std.testing.expectEqual([2]u8{ 30, 100 }, Server.popupSize("\x1f5x250\x1fx").pct);
     try std.testing.expectEqual([2]u8{ 80, 84 }, Server.popupSize("\x1fwide\x1fx").pct);
