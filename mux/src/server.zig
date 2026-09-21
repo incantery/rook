@@ -397,6 +397,10 @@ pub const Server = struct {
     /// it closes when its process exits. One at a time.
     popup: ?u32 = null,
     popup_pct: [2]u8 = .{ 80, 84 },
+    /// The most cells a popup takes, width and height; 0 is no limit.
+    /// A percentage of a big glass is a takeover; a conversation wants
+    /// a surface with room around it.
+    popup_max: [2]u16 = .{ 0, 0 },
     /// The bars as last shipped. A mark appearing on a hidden window's
     /// tab, a window opened from the front door, a count changing on
     /// the calm bar: none of it dirties a pane cell, so the bars are
@@ -741,32 +745,45 @@ pub const Server = struct {
     fn popupRect(self: *Server) layoutpkg.Rect {
         const g = self.geometry();
         const rows = self.bodyRows() -| 1;
-        const w: u16 = @max(@min(g.cols, 30), @as(u16, @intCast(@as(u32, g.cols) * self.popup_pct[0] / 100)));
-        const h: u16 = @max(@min(rows, 8), @as(u16, @intCast(@as(u32, rows) * self.popup_pct[1] / 100)));
+        var w: u16 = @max(@min(g.cols, 30), @as(u16, @intCast(@as(u32, g.cols) * self.popup_pct[0] / 100)));
+        var h: u16 = @max(@min(rows, 8), @as(u16, @intCast(@as(u32, rows) * self.popup_pct[1] / 100)));
+        if (self.popup_max[0] > 0) w = @min(w, self.popup_max[0]);
+        if (self.popup_max[1] > 0) h = @min(h, self.popup_max[1]);
         return .{ .x = (g.cols -| w) / 2, .y = (rows -| h) / 2, .w = w, .h = h };
     }
 
     /// A popup's share of the glass, width and height, in percent. A
     /// picker is happy at the default; something a person reads and
     /// types in for minutes — grim — asks for more (`rook popup --size
-    /// 86x90 …`, which arrives as a `\x1fWxH\x1f` prefix on the command
+    /// 70x85 …`, which arrives as a `\x1fWxH\x1f` prefix on the command
     /// so that a request without one is exactly what it always was).
+    /// `WxH@MWxMH` adds the most cells it should take: on a big glass
+    /// a conversation is a surface with room around it, not a takeover.
     const popup_default = [2]u8{ 80, 84 };
 
     fn popupSized(self: *Server, payload: []const u8) []const u8 {
         const p = popupSize(payload);
         self.popup_pct = p.pct;
+        self.popup_max = p.max;
         return p.cmd;
     }
 
-    /// Pure: a popup request taken apart — its size, and its command.
-    pub fn popupSize(payload: []const u8) struct { pct: [2]u8, cmd: []const u8 } {
-        if (payload.len < 2 or payload[0] != 0x1f) return .{ .pct = popup_default, .cmd = payload };
-        const end = std.mem.indexOfScalarPos(u8, payload, 1, 0x1f) orelse return .{ .pct = popup_default, .cmd = payload };
-        var it = std.mem.splitScalar(u8, payload[1..end], 'x');
+    /// Pure: a popup request taken apart — its size, its limit, and its command.
+    pub fn popupSize(payload: []const u8) struct { pct: [2]u8, max: [2]u16, cmd: []const u8 } {
+        const none = [2]u16{ 0, 0 };
+        if (payload.len < 2 or payload[0] != 0x1f) return .{ .pct = popup_default, .max = none, .cmd = payload };
+        const end = std.mem.indexOfScalarPos(u8, payload, 1, 0x1f) orelse return .{ .pct = popup_default, .max = none, .cmd = payload };
+        var halves = std.mem.splitScalar(u8, payload[1..end], '@');
+        var it = std.mem.splitScalar(u8, halves.next() orelse "", 'x');
         const w = std.fmt.parseInt(u8, it.next() orelse "", 10) catch popup_default[0];
         const h = std.fmt.parseInt(u8, it.next() orelse "", 10) catch popup_default[1];
-        return .{ .pct = .{ std.math.clamp(w, 30, 100), std.math.clamp(h, 30, 100) }, .cmd = payload[end + 1 ..] };
+        var max = none;
+        if (halves.next()) |lim| {
+            var li = std.mem.splitScalar(u8, lim, 'x');
+            max[0] = std.fmt.parseInt(u16, li.next() orelse "", 10) catch 0;
+            max[1] = std.fmt.parseInt(u16, li.next() orelse "", 10) catch 0;
+        }
+        return .{ .pct = .{ std.math.clamp(w, 30, 100), std.math.clamp(h, 30, 100) }, .max = max, .cmd = payload[end + 1 ..] };
     }
 
     fn openPopup(self: *Server, cmd: []const u8) !void {
@@ -3125,7 +3142,7 @@ pub const Server = struct {
             // closing this ends nothing. Like the two above it is one
             // verb here; what grim is, is grim's. It floats from home
             // too: what you want to ask is not always about a pane.
-            'g' => self.openPopup(self.popupSized("\x1f76x90\x1fgrim")) catch {},
+            'g' => self.openPopup(self.popupSized("\x1f72x86@124x48\x1fgrim")) catch {},
             // The root, with the cursor on a section: running work,
             // or what needs you (`!` is the attention mark).
             'a' => self.goHomeAt(.running),
@@ -6837,9 +6854,11 @@ test "a popup request says how big it wants to be, or says nothing" {
     const plain = Server.popupSize("rook pick");
     try std.testing.expectEqualStrings("rook pick", plain.cmd);
     try std.testing.expectEqual([2]u8{ 80, 84 }, plain.pct);
-    const sized = Server.popupSize("\x1f76x90\x1fgrim");
+    const sized = Server.popupSize("\x1f72x86@124x48\x1fgrim");
     try std.testing.expectEqualStrings("grim", sized.cmd);
-    try std.testing.expectEqual([2]u8{ 76, 90 }, sized.pct);
+    try std.testing.expectEqual([2]u8{ 72, 86 }, sized.pct);
+    try std.testing.expectEqual([2]u16{ 124, 48 }, sized.max);
+    try std.testing.expectEqual([2]u16{ 0, 0 }, Server.popupSize("\x1f80x84\x1fx").max);
     // nonsense is clamped, or ignored: a popup is never a sliver or off the glass
     try std.testing.expectEqual([2]u8{ 30, 100 }, Server.popupSize("\x1f5x250\x1fx").pct);
     try std.testing.expectEqual([2]u8{ 80, 84 }, Server.popupSize("\x1fwide\x1fx").pct);

@@ -347,7 +347,7 @@ the accent is left for what is live inside it. (`render.Paint`.)
 
     prefix-o     home, from anywhere (idempotent at the root)
     prefix-s     the workspace picker (fzf), from a space or from home
-    prefix-g     grim, floated: the resident agent's popup, from a space or from home
+    prefix-g     grim, floated at 72×86% and at most 124×48 cells: the resident agent's popup, from a space or from home
     prefix-a     home, cursor on the first running item
     prefix-!     home, cursor on the first thing that needs you
     prefix-t     home, the field empty for a request

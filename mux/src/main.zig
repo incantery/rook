@@ -5,7 +5,7 @@
 //!   rook attach [--root | --space <name> [--cwd <dir>]]   attach somewhere exact
 //!   rook server         run the server in the foreground
 //!   rook nav <dir>      move focus h/j/k/l (vim plugins call this at edges)
-//!   rook popup [--size WxH] <cmd>   float a command over the current window
+//!   rook popup [--size WxH[@MWxMH]] <cmd>   float a command over the current window
 //!   rook ls / switch / new [-q] <name> [cwd] [-- program...] / close <name>   workspaces
 //!   rook state / watch       the state feed: snapshot, or subscribe
 //!   rook side [-]            push side-panel models (JSON frames on stdin)
@@ -443,7 +443,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (std.mem.eql(u8, cmd, "popup")) {
         if (argv.len < 3) {
-            std.debug.print("usage: rook popup [--size WxH] <command...>   (percent of the glass; 80x84 if unsaid)\n", .{});
+            std.debug.print("usage: rook popup [--size WxH[@MWxMH]] <command...>   (percent of the glass, and at most that many cells; 80x84 if unsaid)\n", .{});
             return error.BadArgs;
         }
         var joined: std.ArrayList(u8) = .empty;
