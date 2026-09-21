@@ -330,6 +330,19 @@ are the moves from a script. Five states on `panes[].input`; `prefix-i`
 shows them in a box. Focus is observing: scroll, copy mode and
 selection are always safe.
 
+## A popup is the one lit plane
+
+While a popup is up, everything behind it is drawn under a scrim: every
+cell faint, its colours pulled most of the way to the ground, and no
+pane wearing the focus accent. It is still there to glance at; it no
+longer competes to be read. A popup whose program names a background
+(OSC 11; grim does, from its theme) stands on that ground, solid, so a
+translucent terminal's wallpaper does not show through the thing being
+read. The rest of the glass stays translucent. One that names none (the
+fzf picker) keeps the glass's own. The border is a quiet neutral: with
+the world dimmed the popup does not need a bright line to be found, and
+the accent is left for what is live inside it. (`render.Paint`.)
+
 ## Keys
 
     prefix-o     home, from anywhere (idempotent at the root)

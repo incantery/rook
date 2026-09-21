@@ -42,6 +42,31 @@ pub const Bar = struct { y: u16, bytes: []const u8 };
 /// or the inspector holds the keys and no pane should show one.
 pub const CursorOverride = struct { x: u16, y: u16, bar: bool = false, hidden: bool = false };
 
+/// How a pane is put on the glass, beyond where.
+///
+/// A popup is the one lit plane while it is up. Two things make that
+/// true rather than hoped for. The world behind it is drawn under a
+/// `scrim`: every cell faint, and what colour it had pulled most of the
+/// way to the ground, so it is still there to glance at and no longer
+/// competes to be read. And the popup itself may stand on a `ground`:
+/// cells the program left unpainted are painted with the background it
+/// asked for, so a translucent terminal's wallpaper and whatever was
+/// underneath stop showing through the one thing being read. A program
+/// that never named a background (fzf, a shell) keeps the glass's own.
+pub const Paint = struct {
+    scrim: bool = false,
+    ground: ?vt.color.RGB = null,
+};
+
+fn toward(c: vt.color.RGB, to: vt.color.RGB, pct: u16) vt.color.RGB {
+    const mix = struct {
+        fn f(a: u8, b: u8, p: u16) u8 {
+            return @intCast((@as(u16, a) * (100 - p) + @as(u16, b) * p) / 100);
+        }
+    }.f;
+    return .{ .r = mix(c.r, to.r, pct), .g = mix(c.g, to.g, pct), .b = mix(c.b, to.b, pct) };
+}
+
 pub const Frame = struct {
     buf: std.ArrayList(u8) = .empty,
     gpa: std.mem.Allocator,
@@ -107,7 +132,7 @@ pub const Frame = struct {
         var cursor_style: []const u8 = csi ++ "0 q";
         for (placed) |pl| {
             const pane = findPane(panes, pl.pane) orelse continue;
-            self.drawPane(pane, pl.rect, full);
+            self.drawPane(pane, pl.rect, full, .{ .scrim = popup != null });
             if (pl.pane == focused) {
                 const cur = pane.rs.cursor;
                 // DECSCUSR: the focused pane's cursor shape is the
@@ -126,7 +151,8 @@ pub const Frame = struct {
         }
 
         if (full) {
-            self.drawBorders(placed, focused, cols, rows, chrome.dock_x);
+            // under a popup no pane is the focused one: the accent is the popup's
+            self.drawBorders(placed, if (popup != null) 0 else focused, cols, rows, chrome.dock_x);
             // The side panel and its seam: chrome, so only on a full
             // repaint — nothing in it changes with pane output.
             if (chrome.side) |side| {
@@ -170,13 +196,13 @@ pub const Frame = struct {
 
         if (popup) |po| {
             if (findPane(panes, po.pane)) |pp| {
-                self.drawBox(po.rect);
+                self.drawBox(po.rect, pp.ground);
                 self.drawPane(pp, .{
                     .x = po.rect.x + 1,
                     .y = po.rect.y + 1,
                     .w = po.rect.w -| 2,
                     .h = po.rect.h -| 2,
-                }, true);
+                }, true, .{ .ground = pp.ground });
                 // the popup owns the cursor while it is up
                 cursor = null;
                 const cur = pp.rs.cursor;
@@ -213,10 +239,12 @@ pub const Frame = struct {
     /// repaint: the overlay is rebuilt from nothing every frame it is
     /// needed, so row-dirty means nothing here.
     pub fn drawPaneIn(self: *Frame, pane: *panepkg.Pane, rect: layoutpkg.Rect) void {
-        self.drawPane(pane, rect, true);
+        self.drawPane(pane, rect, true, .{});
     }
 
-    fn drawPane(self: *Frame, pane: *panepkg.Pane, rect: layoutpkg.Rect, full: bool) void {
+    fn drawPane(self: *Frame, pane: *panepkg.Pane, rect: layoutpkg.Rect, full: bool, paint: Paint) void {
+        var blank: Sgr = .{ .bg = paint.ground };
+        blank.faint = paint.scrim;
         const rs = &pane.rs;
         const colors = &rs.colors;
         const row_cells = rs.row_data.items(.cells);
@@ -229,6 +257,10 @@ pub const Frame = struct {
             self.cup(rect.x, rect.y + @as(u16, @intCast(y)));
             self.put(csi ++ "0m");
             var last_sgr: Sgr = .{};
+            if (paint.ground != null) {
+                blank.emit(self);
+                last_sgr = blank;
+            }
             const raws = row_cells[y].items(.raw);
             const styles = row_cells[y].items(.style);
             const graphemes = row_cells[y].items(.grapheme);
@@ -242,6 +274,13 @@ pub const Frame = struct {
                 if (row_sels[y]) |sr| {
                     if (x >= sr[0] and x <= sr[1]) sgr.inverse = !sgr.inverse;
                 }
+                if (paint.scrim) {
+                    sgr.faint = true;
+                    sgr.bold = false;
+                    if (sgr.fg) |c| sgr.fg = toward(c, colors.background, 45);
+                    if (sgr.bg) |c| sgr.bg = toward(c, colors.background, 65);
+                }
+                if (sgr.bg == null) sgr.bg = paint.ground;
                 // A wide glyph's tail is covered by its head cell.
                 if (raw.wide == .spacer_tail) continue;
                 const cp: u21 = switch (raw.content_tag) {
@@ -272,7 +311,7 @@ pub const Frame = struct {
             }
             // pad the remainder of the pane width
             if (rect.w > vcols) {
-                self.put(csi ++ "0m");
+                blank.emit(self);
                 var pad: usize = rect.w - vcols;
                 while (pad > 0) : (pad -= 1) self.put(" ");
             }
@@ -282,7 +321,7 @@ pub const Frame = struct {
         var y: usize = vrows;
         while (y < rect.h) : (y += 1) {
             self.cup(rect.x, rect.y + @as(u16, @intCast(y)));
-            self.put(csi ++ "0m");
+            blank.emit(self);
             var pad: usize = rect.w;
             while (pad > 0) : (pad -= 1) self.put(" ");
         }
@@ -295,7 +334,7 @@ pub const Frame = struct {
         self.buf.clearRetainingCapacity();
         self.put(csi ++ "?2026h");
         self.put(csi ++ "2J" ++ csi ++ "H" ++ csi ++ "0m");
-        self.drawPane(pane, .{ .x = 0, .y = 0, .w = pane.cols, .h = pane.rows }, true);
+        self.drawPane(pane, .{ .x = 0, .y = 0, .w = pane.cols, .h = pane.rows }, true, .{});
         const cur = pane.rs.cursor;
         if (cur.visible) {
             if (cur.viewport) |v| {
@@ -361,9 +400,16 @@ pub const Frame = struct {
         return self.buf.items;
     }
 
-    /// A full box border for the popup, accent-colored.
-    fn drawBox(self: *Frame, r: layoutpkg.Rect) void {
-        self.drawBoxIn(r, self.accent);
+    /// The popup's border. It is quiet — a lifted neutral, not the
+    /// accent: with the world behind it under a scrim the popup does
+    /// not need a bright line to be found, and the accent is left for
+    /// what is live inside it. It stands on the popup's ground, so the
+    /// plane has one edge rather than a line floating beside it.
+    fn drawBox(self: *Frame, r: layoutpkg.Rect, ground: ?vt.color.RGB) void {
+        if (r.w < 2 or r.h < 2) return;
+        self.putFg(chromepkg.overlay0);
+        if (ground) |g| self.print(csi ++ "48;2;{d};{d};{d}m", .{ g.r, g.g, g.b });
+        self.boxLines(r);
     }
 
     /// A box border in any color — the inspector and the altitude
@@ -371,6 +417,11 @@ pub const Frame = struct {
     pub fn drawBoxIn(self: *Frame, r: layoutpkg.Rect, color: chromepkg.Rgb) void {
         if (r.w < 2 or r.h < 2) return;
         self.putFg(color);
+        self.boxLines(r);
+    }
+
+    /// The lines of a box, in whatever colours are set.
+    fn boxLines(self: *Frame, r: layoutpkg.Rect) void {
         self.cup(r.x, r.y);
         self.put("┌");
         var x: u16 = 1;
@@ -494,3 +545,13 @@ const Sgr = struct {
         f.put("m");
     }
 };
+
+test "a scrim pulls a colour most of the way to the ground, and never past it" {
+    const bright: vt.color.RGB = .{ .r = 250, .g = 128, .b = 25 };
+    const ground: vt.color.RGB = .{ .r = 20, .g = 22, .b = 31 };
+    const dimmed = toward(bright, ground, 45);
+    try std.testing.expect(dimmed.r < bright.r and dimmed.r > ground.r);
+    try std.testing.expect(dimmed.g < bright.g and dimmed.g > ground.g);
+    try std.testing.expectEqual(bright, toward(bright, ground, 0));
+    try std.testing.expectEqual(ground, toward(bright, ground, 100));
+}

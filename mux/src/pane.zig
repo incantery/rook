@@ -136,6 +136,11 @@ pub const Pane = struct {
     term: vt.Terminal,
     lock: u32 = 0,
     rs: vt.RenderState = .empty,
+    /// The background the program asked for (OSC 11), as of the last
+    /// snapshot; null when it never said. A pane in a window ignores
+    /// it — the glass's own ground shows through, translucent. A popup
+    /// stands on it: see `render.Paint.ground`.
+    ground: ?vt.color.RGB = null,
     thread: ?std.Thread = null,
     exited: std.atomic.Value(bool) = .init(false),
     /// Wall-clock ms of the last batch this pane's pty produced, 0 if
@@ -523,6 +528,7 @@ pub const Pane = struct {
         os_unfair_lock_lock(&self.lock);
         defer os_unfair_lock_unlock(&self.lock);
         try self.rs.update(self.gpa, &self.term);
+        self.ground = self.term.colors.background.override;
     }
 
     /// Replace the selection with viewport-coord cells a→b (inclusive,
