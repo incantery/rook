@@ -6,6 +6,7 @@
 //!   rook server         run the server in the foreground
 //!   rook nav <dir>      move focus h/j/k/l (vim plugins call this at edges)
 //!   rook popup [--size WxH[@MWxMH]] <cmd>   float a command over the current window
+//!   rook notify [--mark ok|failed|needs-you|unread] <text>   a line on the calm bar, until a key
 //!   rook ls / switch / new [-q] <name> [cwd] [-- program...] / close <name>   workspaces
 //!   rook state / watch       the state feed: snapshot, or subscribe
 //!   rook side [-]            push side-panel models (JSON frames on stdin)
@@ -461,6 +462,28 @@ pub fn main(init: std.process.Init) !void {
             try joined.appendSlice(gpa, std.mem.span(a));
         }
         try client.popup(path, joined.items);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "notify")) {
+        // rook notify [--mark ok|failed|needs-you|unread] <text...>
+        var mark: u8 = '-';
+        var rest = argv[2..];
+        if (rest.len >= 2 and std.mem.eql(u8, std.mem.span(rest[0]), "--mark")) {
+            const m = std.mem.span(rest[1]);
+            mark = if (std.mem.eql(u8, m, "ok")) 's' else if (std.mem.eql(u8, m, "failed")) 'f' else if (std.mem.eql(u8, m, "needs-you")) 'a' else if (std.mem.eql(u8, m, "unread")) 'u' else '-';
+            rest = rest[2..];
+        }
+        if (rest.len == 0) {
+            std.debug.print("usage: rook notify [--mark ok|failed|needs-you|unread] <text...>   (one line on the calm bar; it stays until you press a key)\n", .{});
+            return error.BadArgs;
+        }
+        var joined: std.ArrayList(u8) = .empty;
+        defer joined.deinit(gpa);
+        for (rest) |a| {
+            if (joined.items.len > 0) try joined.append(gpa, ' ');
+            try joined.appendSlice(gpa, std.mem.span(a));
+        }
+        try client.notify(path, mark, joined.items);
         return;
     }
     if (std.mem.eql(u8, cmd, "nav")) {

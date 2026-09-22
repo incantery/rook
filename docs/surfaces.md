@@ -755,6 +755,7 @@ Honest inventory, so this document is not mistaken for a description.
 | `rook state` / `watch` / `capture` | **built** |
 | the program's signals — bell, OSC 9/99/777, title, OSC 7, OSC 9;4 — on `panes[]`; bell and notification passed to the glass | **built** (`pane.zig` effects, `Server.pollSignals`) |
 | the unread channel: `panes[].unread`, the tab's `●`, `found[].unread` on the rail, `prefix-u` / `rook jump` | **built** — `docs/attention.md` |
+| `rook notify`: one marked line on the calm bar, held until a key after it has been read | **built** (`c2s.notify`) — `docs/attention.md` |
 | a pane by id from the front door: `read` / `send` / `run` / `key` / `wait` / `split` / `window` / `focus` / `close-pane`, `$ROOK_MUX_PANE` as the caller's id, `rook --skill` | **built** (`c2s.input`, `c2s.pane_cmd`) |
 | resume: `panes[].resume`, kept while its program is in front, saved in the restore file, typed into the rebuilt shell on boot; `[mux] restore` on by default | **built** (`c2s.resume`, state file v2) |
 | `companion.zig` + `Server.scanCompanion` | **built** — the one resident rook watches for by name, published as `companion` and read out loud by `rook companion` |

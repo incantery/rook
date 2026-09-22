@@ -82,6 +82,7 @@ const usage = `rook — the multiplexer, owned
   rook side [-|demo]      push the side rail's model (JSON frames on stdin)
   rook companion [--json] where the companion (vera) is open, if she is
   rook popup [--size WxH] <cmd...>   float a command over the current window
+  rook notify [--mark ok|failed|needs-you|unread] <text...>   say a line on the bar
                           (percent of the glass; 80x84 unless said)
   rook nav h|j|k|l        move focus (vim plugins call this at edges)
   rook stats | kill       server introspection / shutdown
@@ -102,7 +103,7 @@ docs/surfaces.md in the repo is the state feed and the rail, in full.
 // verbs the Zig engine owns; rook execs into it verbatim.
 var muxVerbs = map[string]bool{
 	"server": true, "stats": true, "kill": true, "nav": true,
-	"popup": true, "ls": true, "switch": true, "new": true, "close": true,
+	"popup": true, "notify": true, "ls": true, "switch": true, "new": true, "close": true,
 	"blocks": true, "raw": true,
 	// the state feed (out) and the side rail's model (in)
 	"state": true, "watch": true, "capture": true, "side": true,

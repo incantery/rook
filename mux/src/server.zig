@@ -459,6 +459,16 @@ pub const Server = struct {
     /// prefix-i: the focused pane's provenance and input ownership,
     /// in a box. Any key closes it.
     inspect: bool = false,
+    /// `rook notify`: one line said to the person on the calm bar,
+    /// with a mark. It stays until a keystroke arrives after it has
+    /// been up long enough to have been read — a person away from the
+    /// desk finds it when they come back; a person typing is not
+    /// interrupted, and does not lose it to the key they were already
+    /// pressing. A newer notice replaces it.
+    notice: [240]u8 = @splat(0),
+    notice_len: usize = 0,
+    notice_mark: ui.Mark = .none,
+    notice_ms: i64 = 0,
     /// Resurrect file: sessions/windows/cwds, saved on structural
     /// change (debounced), restored on server boot. Scrollback is not
     /// saved — that's the event log's job, later.
@@ -784,6 +794,49 @@ pub const Server = struct {
             max[1] = std.fmt.parseInt(u16, li.next() orelse "", 10) catch 0;
         }
         return .{ .pct = .{ std.math.clamp(w, 30, 100), std.math.clamp(h, 30, 100) }, .max = max, .cmd = payload[end + 1 ..] };
+    }
+
+    /// How long a notice is held before a keystroke may dismiss it.
+    const notice_hold_ms: i64 = 8000;
+
+    /// `[mark u8][text]`: say a line on the calm bar. The mark is one
+    /// letter — s finished well, f failed, a needs you, u there is
+    /// something to see — and anything else is no mark at all.
+    fn notify(self: *Server, c: *Client, payload: []const u8) void {
+        if (payload.len < 2) return;
+        const text = std.mem.trim(u8, payload[1..], " \t\r\n");
+        if (text.len == 0) return;
+        // one line: the first, cut on a codepoint boundary
+        const line = if (std.mem.indexOfScalar(u8, text, '\n')) |nl| text[0..nl] else text;
+        const kept = chromepkg.clip(line, @intCast(self.notice.len));
+        @memcpy(self.notice[0..kept.len], kept);
+        self.notice_len = kept.len;
+        self.notice_mark = noticeMark(payload[0]);
+        self.notice_ms = nowMs();
+        _ = self.touch();
+        self.ack(c);
+        self.full = true;
+        self.pending = true;
+    }
+
+    /// Pure: the letter a notice carries, as a mark.
+    pub fn noticeMark(letter: u8) ui.Mark {
+        return switch (letter) {
+            's' => .success,
+            'f' => .failed,
+            'a' => .attention,
+            'u' => .unread,
+            else => .none,
+        };
+    }
+
+    /// A keystroke after the hold: the notice has been read.
+    fn noticeSeen(self: *Server) void {
+        if (self.notice_len == 0 or nowMs() - self.notice_ms < notice_hold_ms) return;
+        self.notice_len = 0;
+        self.notice_mark = .none;
+        self.full = true;
+        self.pending = true;
     }
 
     fn openPopup(self: *Server, cmd: []const u8) !void {
@@ -1490,6 +1543,7 @@ pub const Server = struct {
                     }
                 },
                 @intFromEnum(proto.c2s.own) => self.ownCmd(c, msg.payload),
+                @intFromEnum(proto.c2s.notify) => self.notify(c, msg.payload),
                 @intFromEnum(proto.c2s.block_cmd) => self.blockCmd(c, msg.payload),
                 @intFromEnum(proto.c2s.attach_block) => self.attachBlock(c, msg.payload),
                 @intFromEnum(proto.c2s.session) => {
@@ -2447,6 +2501,8 @@ pub const Server = struct {
                     continue;
                 }
             }
+            // a key, not a mouse report: the person is here and has seen the bar
+            self.noticeSeen();
             if (self.scrolling) {
                 c.paste.reset();
                 self.scrollKey(rest[0]);
@@ -4466,6 +4522,30 @@ pub const Server = struct {
                 out.put(mod_list.items);
                 vis += w;
                 left_n += 1;
+            }
+        }
+
+        // What was said to the person, with its mark, in the room the
+        // modules left: the mark in its ink, the words plain. Cut to
+        // fit before the right side, never pushing it off.
+        if (self.notice_len > 0) {
+            const mark = self.notice_mark;
+            var glyph_w: u16 = 0;
+            if (mark != .none) glyph_w = chromepkg.cols(ui.markGlyph(t, mark)) + 1;
+            const room = cols -| (vis + right_w + 5 + glyph_w);
+            if (room >= 8) {
+                vis += ui.moduleSep(out, t);
+                if (mark != .none) {
+                    vis += ui.module(out, t, ui.markGlyph(t, mark), ui.markInk(t, mark), mark == .attention);
+                    vis += ui.module(out, t, " ", t.muted, false);
+                }
+                const said = self.notice[0..self.notice_len];
+                if (chromepkg.cols(said) <= room) {
+                    vis += ui.module(out, t, said, if (mark == .attention) t.attention else t.secondary, mark == .attention);
+                } else {
+                    vis += ui.module(out, t, chromepkg.clip(said, room - 1), if (mark == .attention) t.attention else t.secondary, mark == .attention);
+                    vis += ui.module(out, t, "…", t.muted, false);
+                }
             }
         }
 
@@ -6848,6 +6928,14 @@ test "a byte spent on a command cannot be part of a marker" {
     p.reset();
     try std.testing.expectEqual(@as(usize, 3), runEnd(&p, "00~", '`'));
     try std.testing.expect(!p.active);
+}
+
+test "a notice's letter is its mark, and an unknown letter is calm" {
+    try std.testing.expectEqual(ui.Mark.success, Server.noticeMark('s'));
+    try std.testing.expectEqual(ui.Mark.failed, Server.noticeMark('f'));
+    try std.testing.expectEqual(ui.Mark.attention, Server.noticeMark('a'));
+    try std.testing.expectEqual(ui.Mark.unread, Server.noticeMark('u'));
+    try std.testing.expectEqual(ui.Mark.none, Server.noticeMark('-'));
 }
 
 test "a popup request says how big it wants to be, or says nothing" {

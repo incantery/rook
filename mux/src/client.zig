@@ -92,6 +92,19 @@ pub fn popup(sock_path: []const u8, cmd: []const u8) !void {
     try proto.write(sock, @intFromEnum(proto.c2s.popup), cmd);
 }
 
+/// One-shot: a line for the person on the calm bar. `mark` is one
+/// letter (s f a u, or anything else for none); see Server.notify.
+pub fn notify(sock_path: []const u8, mark: u8, text: []const u8) !void {
+    const sock = ptypkg.unixConnect(sock_path);
+    if (sock < 0) return error.ConnectFailed;
+    defer ptypkg.closeFd(sock);
+    var buf: [512]u8 = undefined;
+    const n = @min(text.len, buf.len - 1);
+    buf[0] = mark;
+    @memcpy(buf[1 .. 1 + n], text[0..n]);
+    try proto.write(sock, @intFromEnum(proto.c2s.notify), buf[0 .. 1 + n]);
+}
+
 /// Print the block table (id, session:window, fg, size, cwd), or
 /// the same as one JSON array.
 pub fn blocks(gpa: std.mem.Allocator, sock_path: []const u8, json: bool) !void {

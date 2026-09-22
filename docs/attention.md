@@ -81,6 +81,22 @@ elsewhere. Nothing needs to be installed in Claude for this. A
 producer that wants *state* still reads the hook events and the pane,
 as verad does.
 
+## A line said to you
+
+`rook notify [--mark ok|failed|needs-you|unread] <text>` puts one line
+on the calm bar, with its mark — `✓`, `✕`, `!`, `•` — for something that
+happened where you were not looking: an operation ended, a program is
+waiting for an answer. It is not a row that appears; the bar was there
+already. It stays until you press a key after it has been up for eight
+seconds, so a person away from the desk finds it on coming back and a
+person typing is neither interrupted nor robbed of it by the key they
+were already pressing. A mouse report is not a key. A newer notice
+replaces it; there is no queue, because a queue on a bar is a log, and
+the log is the caller's (grim's thread has every one of them).
+
+Grim sends every ending here and the desktop hears only what needs
+you — `docs/ambient.md` in grimoire.
+
 ## Coming back
 
 A pane that told rook how to bring its program back (`rook resume`)
