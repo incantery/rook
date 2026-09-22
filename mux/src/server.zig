@@ -3634,6 +3634,12 @@ pub const Server = struct {
 
     fn redraw(self: *Server) !void {
         if (self.popup != null) self.full = true; // popups sit over dirty math
+        // Under a popup the chrome is under the scrim too: the bars
+        // and the root's canvas are built on the faded theme for this
+        // frame, so the popup is the one lit plane, bars included.
+        const lit = self.ui;
+        defer self.ui = lit;
+        if (self.popup != null) self.ui = lit.under();
         // Looking at the focused pane reads it; the dot it wore on
         // the tab and the rail goes with this frame.
         if (self.markSeen()) self.full = true;

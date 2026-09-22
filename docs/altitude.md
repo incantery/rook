@@ -334,8 +334,10 @@ selection are always safe.
 
 While a popup is up, everything behind it is drawn under a scrim: every
 cell faint, its colours pulled most of the way to the ground, and no
-pane wearing the focus accent. It is still there to glance at; it no
-longer competes to be read. A popup whose program names a background
+pane wearing the focus accent. The chrome is under it too: the tab bar,
+the calm bar and the root's canvas are built on the theme faded to its
+own ground (`ui.Theme.under`) for as long as the popup is up. It is all
+still there to glance at; none of it competes to be read. A popup whose program names a background
 (OSC 11; grim does, from its theme) stands on that ground, solid, so a
 translucent terminal's wallpaper does not show through the thing being
 read. The rest of the glass stays translucent. One that names none (the

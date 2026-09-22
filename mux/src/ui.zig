@@ -83,7 +83,32 @@ pub const Theme = struct {
     pub fn init(accent: Rgb, glyphs: Glyphs) Theme {
         return .{ .accent = accent, .border_focused = accent, .glyphs = glyphs };
     }
+
+    /// The same theme under a scrim: every ink and every fill pulled
+    /// most of the way to the chrome ground, which stays where it is.
+    /// The bars and the canvas wear this while a popup is the one lit
+    /// plane, so nothing outside it competes — the same pull the
+    /// panes get (render.Paint.scrim), on chrome's own ground.
+    pub fn under(self: Theme) Theme {
+        var t = self;
+        inline for (std.meta.fields(Theme)) |f| {
+            if (f.type == Rgb and !std.mem.eql(u8, f.name, "chrome") and !std.mem.eql(u8, f.name, "work")) {
+                @field(t, f.name) = toward(@field(self, f.name), self.chrome, 55);
+            }
+        }
+        return t;
+    }
 };
+
+/// A colour pulled `pct` of the way to another.
+pub fn toward(c: Rgb, to: Rgb, pct: u16) Rgb {
+    const mix = struct {
+        fn f(a: u8, b: u8, p: u16) u8 {
+            return @intCast((@as(u16, a) * (100 - p) + @as(u16, b) * p) / 100);
+        }
+    }.f;
+    return .{ .r = mix(c.r, to.r, pct), .g = mix(c.g, to.g, pct), .b = mix(c.b, to.b, pct) };
+}
 
 /// A mark: the exceptional state a tab, a pane or a row carries.
 /// Calm is `.none`, and calm draws nothing.
@@ -406,6 +431,17 @@ pub fn edgeInk(t: *const Theme, e: Edge) Rgb {
         .normal => t.border,
         .focused => t.border_focused,
     };
+}
+
+test "under a scrim the chrome's inks fade to its ground, and the ground stays" {
+    const t: Theme = .{};
+    const u = t.under();
+    try std.testing.expectEqual(t.chrome, u.chrome);
+    try std.testing.expect(!std.meta.eql(t.primary, u.primary));
+    try std.testing.expect(!std.meta.eql(t.attention, u.attention));
+    // faded, not gone: a mark's ink is still not the ground
+    try std.testing.expect(!std.meta.eql(u.attention, u.chrome));
+    try std.testing.expectEqual(t.glyphs, u.glyphs);
 }
 
 test "a tab's width is what it draws, at every fit" {
