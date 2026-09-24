@@ -1,6 +1,6 @@
 //! The prefix table: which key after the prefix does what. Rook ships
 //! the verbs and a multiplexer's bindings for them — splits, focus,
-//! windows, copy mode, rook's own home — and nothing that names a
+//! windows, copy mode, home and back — and nothing that names a
 //! program. What floats in a popup, which agent, which picker: the
 //! config says, in a [keys] table in the same rook.toml:
 //!
@@ -11,10 +11,9 @@
 //!   x = ""                           # unbound
 //!
 //! A key is one printable character or `C-<letter>`; a verb is one of
-//! `verbs` below, with an argument where it takes one. A line the
-//! table cannot read is skipped, not fatal: the Go half is the one that
-//! refuses a bad file, and it only checks that [keys] is a table of
-//! strings.
+//! `Verb` below, with an argument where it takes one. The rows arrive
+//! in the compiled config (config.zig); the Go half has already
+//! refused a key or a verb this table would skip.
 const std = @import("std");
 
 pub const Verb = enum {
@@ -210,47 +209,6 @@ pub fn defaults() Keys {
     return k;
 }
 
-/// The [keys] table of a rook.toml, over `into` (the defaults, as a
-/// rule). Keys may be bare or quoted — `"C-o"`, `"|"`, `"="` — and a
-/// `#` after the value's closing quote is a comment.
-pub fn parse(toml: []const u8, into: *Keys) void {
-    var in_keys = false;
-    var lines = std.mem.splitScalar(u8, toml, '\n');
-    while (lines.next()) |line| {
-        const t = std.mem.trim(u8, line, " \t\r");
-        if (t.len == 0 or t[0] == '#') continue;
-        if (t[0] == '[') {
-            in_keys = std.mem.eql(u8, t, "[keys]");
-            continue;
-        }
-        if (!in_keys) continue;
-        var name: []const u8 = undefined;
-        var after: []const u8 = undefined;
-        if (t[0] == '"' or t[0] == '\'') {
-            const close = std.mem.indexOfScalarPos(u8, t, 1, t[0]) orelse continue;
-            name = t[1..close];
-            after = std.mem.trimStart(u8, t[close + 1 ..], " \t");
-            if (after.len == 0 or after[0] != '=') continue;
-            after = after[1..];
-        } else {
-            const eq = std.mem.indexOfScalar(u8, t, '=') orelse continue;
-            name = std.mem.trim(u8, t[0..eq], " \t");
-            after = t[eq + 1 ..];
-        }
-        const v = std.mem.trim(u8, after, " \t");
-        if (v.len < 2 or (v[0] != '"' and v[0] != '\'')) continue;
-        const vclose = std.mem.indexOfScalarPos(u8, v, 1, v[0]) orelse continue;
-        const key = parseKey(name) orelse continue;
-        into.set(key, v[1..vclose]);
-    }
-}
-
-pub fn load(toml: []const u8) Keys {
-    var k = defaults();
-    parse(toml, &k);
-    return k;
-}
-
 test "defaults carry no program" {
     const k = defaults();
     for (k.slots) |b| try std.testing.expect(b.verb != .popup);
@@ -260,31 +218,22 @@ test "defaults carry no program" {
     try std.testing.expectEqualStrings("3", k.arg(k.get('3')));
 }
 
-test "a [keys] table binds, rebinds, and unbinds" {
+test "rows bind, rebind, and unbind over the defaults" {
     var k = defaults();
-    parse(
-        \\[tmux]
-        \\g = "popup nope"
-        \\[keys]
-        \\g = "popup 72x86@124x48 grim"   # the agent
-        \\s = "popup rook pick"
-        \\"C-o" = "home"
-        \\"=" = 'split-down'
-        \\t = "zoom"
-        \\x = ""
-        \\q = "no-such-verb"
-        \\[other]
-        \\w = "popup nope"
-    , &k);
+    k.set('g', "popup 72x86@124x48 grim");
+    k.set('s', "popup rook pick");
+    k.set(0x0f, "home");
+    k.set('=', "split-down");
+    k.set('t', "zoom");
+    k.set('x', "");
+    k.set('q', "no-such-verb");
     try std.testing.expectEqual(Verb.popup, k.get('g').verb);
     try std.testing.expectEqualStrings("\x1f72x86@124x48\x1fgrim", k.arg(k.get('g')));
     try std.testing.expectEqualStrings("rook pick", k.arg(k.get('s')));
     try std.testing.expectEqual(Verb.home, k.get(0x0f).verb);
     try std.testing.expectEqual(Verb.split_down, k.get('=').verb);
-    try std.testing.expectEqual(Verb.zoom, k.get('t').verb);
     try std.testing.expectEqual(Verb.none, k.get('x').verb);
     try std.testing.expectEqual(Verb.none, k.get('q').verb);
-    try std.testing.expectEqual(Verb.none, k.get('w').verb);
     // the first key bound to it, in byte order
     try std.testing.expectEqual(@as(?u8, 't'), k.keyFor(.zoom));
     // x was kill-pane's only key, and it is unbound

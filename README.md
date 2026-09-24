@@ -30,6 +30,16 @@ is the engine's own manual: the keys, the rail, the state feed, the
 build. The prefix comes from `~/.config/rook/rook.toml` (`[tmux]
 prefix = "` "`", `C-b` when unset).
 
+**The config is live.** `rook.toml` has one reader, the front door:
+`rook config check` says whether it is good (and why not), `rook config
+json` is the engine's half compiled — what the engine boots on — and
+`rook reload` hands a running server the file as it is now. rookd does
+that for you: save the file and it reloads, or, if the file does not
+load, the calm bar says why and the config that was running stays.
+Keys, colours, glyphs, the bar, the rail and home's colour change on
+the spot; `[home]` windows seed the next home; `restore` and `startup`
+wait for the next boot.
+
 **Workspaces, windows, panes.** `rook ls / new / switch / close / pick`
 (`rook new -q <name> <dir> -- claude` is a space born running a program);
 `prefix-c` a window, `prefix-v` / `prefix--` a split, `prefix-hjkl`

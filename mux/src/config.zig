@@ -1,74 +1,32 @@
-//! Configuration, minimal, from the same ~/.config/rook/rook.toml
-//! the Go rook uses. [tmux] prefix = "`" or "C-b" (compat), and a
-//! [mux] section for knobs that earned one:
-//!   nav_owners = ["nvim", "fzf"]   # programs that keep Ctrl-hjkl
-//!   scrollback_mb = 4
-//!   accent = "#cba6f7"             # chrome color: tabs, borders, popup
-//!   restore = false                # skip resurrecting the last layout on boot
-//!   sidebar_mode = "hidden"        # the legacy spaces/agents side panel:
-//!                                  # open, collapsed, hidden
-//!   sidebar = false                # the older spelling: true = open
-//!   sidebar_width = 30             # its width in columns, open
-//!   agents = ["claude"]            # programs the agents rail looks for
-//!                                  # (none unless named)
-//!   bar = true                     # the calm bar: one row at the bottom,
-//!                                  # who holds the focused pane's keys
-//!                                  # left, signals right (false = off)
-//!   glyphs = "unicode"             # "ascii" for a glass without the marks
-//!   status_space = ["input", "-", "working", "attention", "unread", "pins"]
-//!                                  # the calm bar's modules; "-" is where
-//!                                  # the right-aligned ones start (also
-//!                                  # agents, blocked, session)
-//!   startup = "home"               # where plain `rook` lands: "home", or
-//!                                  # "last-space" for the space you were in
+//! Configuration, as the engine is handed it. The Go front door owns
+//! rook.toml: `rook config json` parses it with a real TOML parser,
+//! refuses what is wrong with it, and prints one JSON document — the
+//! engine's half, already checked (internal/config/engine.go). The
+//! engine runs that at boot (`load`), and a running engine is handed a
+//! fresh one over the socket by `rook reload` (`c2s.config`). There is
+//! no second parser here to drift from the first.
 //!
-//! the [companion] table the Go half already reads — the one resident
-//! rook knows by name, so it can say when and where it is open. Rook
-//! names no occupant: without this table there is none.
-//!   [companion]
-//!   command = "vera"               # what summons it; its first word
-//!   program = "vera"               # …or the program outright, when
-//!                                  # the command's first word is a
-//!                                  # wrapper (`program = ""` = off)
-//!
-//! [home] (`Home`, below), and [keys] — what each key after the prefix
-//! does — which is keys.zig's, read by `keysConfig`.
+//! What the document carries — `prefix`, `[mux]`, the companion's
+//! program, `[keys]`, `[home]` — is read into the structs below, over
+//! the engine's own defaults. The knobs themselves are documented in
+//! README.md and mux/README.md.
 const std = @import("std");
 const chrome = @import("chrome.zig");
 const keyspkg = @import("keys.zig");
+const ptypkg = @import("pty.zig");
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+extern "c" fn pipe(fds: *[2]ptypkg.fd_t) c_int;
+extern "c" fn dup2(old: ptypkg.fd_t, new: ptypkg.fd_t) c_int;
+extern "c" fn execvp(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+extern "c" fn execv(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+extern "c" fn _exit(code: c_int) noreturn;
+extern "c" fn read(fd: ptypkg.fd_t, buf: [*]u8, n: usize) isize;
+extern "c" fn close(fd: ptypkg.fd_t) c_int;
+extern "c" fn waitpid(pid: ptypkg.pid_t, status: ?*c_int, options: c_int) ptypkg.pid_t;
+extern "c" fn _NSGetExecutablePath(buf: [*]u8, size: *u32) c_int;
 
-pub fn prefixKey() u8 {
-    var buf: [4096]u8 = undefined;
-    const home = std.mem.span(getenv("HOME") orelse return 0x02);
-    var path_buf: [1024]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}/.config/rook/rook.toml", .{home}) catch return 0x02;
-    const f = std.c.fopen(path, "r") orelse return 0x02;
-    defer _ = std.c.fclose(f);
-    const n = std.c.fread(&buf, 1, buf.len, f);
-    return parsePrefix(buf[0..n]) orelse 0x02;
-}
-
-/// Finds `prefix = "..."` and translates tmux key syntax: "C-x" is
-/// ctrl, a single char is itself.
-pub fn parsePrefix(toml: []const u8) ?u8 {
-    var lines = std.mem.splitScalar(u8, toml, '\n');
-    while (lines.next()) |line| {
-        const t = std.mem.trim(u8, line, " \t\r");
-        if (!std.mem.startsWith(u8, t, "prefix")) continue;
-        const eq = std.mem.indexOfScalar(u8, t, '=') orelse continue;
-        const val = std.mem.trim(u8, t[eq + 1 ..], " \t\"'");
-        if (val.len == 1) return val[0];
-        if (val.len == 3 and (val[0] == 'C' or val[0] == 'c') and val[1] == '-') {
-            const ch = std.ascii.toLower(val[2]);
-            if (ch >= 'a' and ch <= 'z') return ch - 'a' + 1;
-        }
-    }
-    return null;
-}
-
-/// The [mux] knobs, defaults matching the hardcoded originals.
+/// The [mux] knobs, over their defaults.
 pub const Mux = struct {
     /// newline-joined program names that own Ctrl-h/j/k/l
     owners: [512]u8 = @splat(0),
@@ -78,44 +36,27 @@ pub const Mux = struct {
     /// popup box. A hex color or one of the eight ANSI names, which map
     /// into the same palette.
     accent: chrome.Rgb = chrome.mauve,
-    /// The legacy side panel. Hidden unless asked for: the frame is
-    /// the tab bar, the work at full width, and the calm bar, and
-    /// home (prefix-o) is where the spaces and the agents are
-    /// looked at. A config that says `sidebar_mode = "open"` gets the
-    /// rail back, folding to the collapsed dots on narrow glass and
-    /// away when even that would crowd the work. `sidebar = true` is
-    /// the older spelling of `.open`, and the later of the two lines
-    /// in a file wins.
+    /// The legacy side panel, hidden unless asked for. `sidebar = true`
+    /// is the older spelling of `.open`; `sidebar_mode` wins over it.
     side_mode: chrome.SideMode = .hidden,
     sidebar_width: u16 = 30,
     /// Resurrect the last saved layout on server boot: workspaces,
     /// windows, cwds, and every pane that told rook how to bring its
-    /// program back (`rook resume`). On by default since resume exists;
-    /// a boot with nothing saved opens a clean workspace either way.
+    /// program back (`rook resume`).
     restore: bool = true,
     /// newline-joined foreground program names that mean "an agent is
     /// running in this pane", so a session somebody started by hand
-    /// still shows up on the agents rail instead of being invisible to
-    /// everything but the tab bar. Rook names none itself: empty means
-    /// the rail sees only what a producer pushes.
+    /// still shows up on the agents rail. Rook names none itself.
     agents: [256]u8 = @splat(0),
     agents_len: usize = 0,
-    /// The companion's program name: the foreground program that
-    /// means "the resident is open in this pane". One name, not a
-    /// list — the slot is singular by design, and rook reports every
-    /// pane running it. Empty means no companion: rook ships the slot,
-    /// and only the config names an occupant.
+    /// The companion's program name: the foreground program that means
+    /// "the resident is open in this pane". Empty means no companion.
     companion: [64]u8 = @splat(0),
     companion_len: usize = 0,
-    companion_from: enum { none, name, command, program } = .none,
-    /// The calm bar at the bottom of the glass. On by default and
-    /// kept on: appearing and disappearing would resize every hosted
-    /// TUI, the one motion rook must never cause, so the choice is
-    /// made once here rather than per signal.
+    /// The calm bar at the bottom of the glass.
     bar: bool = true,
     /// ASCII marks and glyphs for a glass that cannot show the
-    /// Unicode ones. The inks and fills are the same, so the
-    /// hierarchy survives the swap (docs/ui-design-system.md).
+    /// Unicode ones (docs/ui-design-system.md).
     ascii_glyphs: bool = false,
     /// Where a glass lands: home, unless `last-space` asks for the
     /// space the server is showing instead.
@@ -142,154 +83,16 @@ pub const Mux = struct {
     pub fn statusSpace(self: *const Mux) []const u8 {
         return if (self.status_space_len > 0) self.status_space[0..self.status_space_len] else default_status_space;
     }
-
-    /// Precedence, whichever order the lines appear in: `program`
-    /// (said outright), then the first word of `command` (what
-    /// summons her, which is usually her binary), then `name`.
-    ///
-    /// `name` last on purpose. To the Go half it labels the popup, not
-    /// the program — a config that reads `command = "vera chat"` and
-    /// `name = "Vera"` means one thing there and would mean another
-    /// here, and a shared file where one key means two things is how
-    /// `lsp` once cost the host its whole config. It is taken only
-    /// when nothing better names the occupant.
-    fn setCompanion(self: *Mux, val: []const u8, from: @TypeOf(@as(Mux, undefined).companion_from)) void {
-        if (@intFromEnum(self.companion_from) > @intFromEnum(from)) return;
-        const word = std.mem.sliceTo(std.mem.trim(u8, val, " \t"), ' ');
-        const base = std.fs.path.basename(word);
-        if (base.len > self.companion.len) return;
-        @memcpy(self.companion[0..base.len], base);
-        self.companion_len = base.len;
-        self.companion_from = from;
-    }
 };
 
 /// Who holds the keys, then the signals, with one global attention
 /// count and no more of a dashboard than that.
 pub const default_status_space = "input\n-\nworking\nattention\nunread\npins";
 
-/// The prefix table: rook's defaults under the file's [keys] (keys.zig).
-pub fn keysConfig() keyspkg.Keys {
-    var buf: [8192]u8 = undefined;
-    const home = std.mem.span(getenv("HOME") orelse return keyspkg.defaults());
-    var path_buf: [1024]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}/.config/rook/rook.toml", .{home}) catch return keyspkg.defaults();
-    const f = std.c.fopen(path, "r") orelse return keyspkg.defaults();
-    defer _ = std.c.fclose(f);
-    const n = std.c.fread(&buf, 1, buf.len, f);
-    return keyspkg.load(buf[0..n]);
-}
-
-pub fn muxConfig() Mux {
-    var out: Mux = .{};
-    var buf: [8192]u8 = undefined;
-    const home = std.mem.span(getenv("HOME") orelse return out);
-    var path_buf: [1024]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}/.config/rook/rook.toml", .{home}) catch return out;
-    const f = std.c.fopen(path, "r") orelse return out;
-    defer _ = std.c.fclose(f);
-    const n = std.c.fread(&buf, 1, buf.len, f);
-    parseMux(buf[0..n], &out);
-    return out;
-}
-
-pub fn parseMux(toml: []const u8, out: *Mux) void {
-    var section: enum { other, mux, companion } = .other;
-    var lines = std.mem.splitScalar(u8, toml, '\n');
-    while (lines.next()) |line| {
-        const t = std.mem.trim(u8, line, " \t\r");
-        if (t.len == 0 or t[0] == '#') continue;
-        if (t[0] == '[') {
-            section = if (std.mem.eql(u8, t, "[mux]"))
-                .mux
-            else if (std.mem.eql(u8, t, "[companion]"))
-                .companion
-            else
-                .other;
-            continue;
-        }
-        if (section == .other) continue;
-        const eq = std.mem.indexOfScalar(u8, t, '=') orelse continue;
-        const key = std.mem.trim(u8, t[0..eq], " \t");
-        const val = std.mem.trim(u8, t[eq + 1 ..], " \t");
-        if (section == .companion) {
-            // The Go half's slot: `command` is what summons it and
-            // `name` labels it. Any of the three can tell the engine
-            // which program to watch for, in the order `setCompanion`
-            // spells out; `key` is the front door's business and is
-            // skipped here, as is anything else the table grows.
-            const v = std.mem.trim(u8, val, "\"'");
-            if (std.mem.eql(u8, key, "program")) {
-                out.setCompanion(v, .program);
-            } else if (std.mem.eql(u8, key, "command")) {
-                out.setCompanion(v, .command);
-            } else if (std.mem.eql(u8, key, "name")) {
-                out.setCompanion(v, .name);
-            }
-            continue;
-        }
-        if (std.mem.eql(u8, key, "scrollback_mb")) {
-            const mb = std.fmt.parseInt(usize, std.mem.trim(u8, val, "\"'"), 10) catch continue;
-            const clamped: usize = @min(mb, 256);
-            out.scrollback_bytes = clamped * 1024 * 1024;
-        } else if (std.mem.eql(u8, key, "accent")) {
-            const v = std.mem.trim(u8, val, "\"'");
-            out.accent = chrome.Rgb.parse(v) orelse chrome.named(v) orelse out.accent;
-        } else if (std.mem.eql(u8, key, "restore")) {
-            const v = std.mem.trim(u8, val, "\"'");
-            out.restore = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
-        } else if (std.mem.eql(u8, key, "sidebar")) {
-            const v = std.mem.trim(u8, val, "\"'");
-            const on = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
-            out.side_mode = if (on) .open else .hidden;
-        } else if (std.mem.eql(u8, key, "sidebar_mode")) {
-            const v = std.mem.trim(u8, val, "\"'");
-            out.side_mode = chrome.SideMode.parse(v) orelse out.side_mode;
-        } else if (std.mem.eql(u8, key, "sidebar_width")) {
-            const n = std.fmt.parseInt(u16, std.mem.trim(u8, val, "\"'"), 10) catch continue;
-            out.sidebar_width = std.math.clamp(n, 16, 60);
-        } else if (std.mem.eql(u8, key, "nav_owners")) {
-            out.owners_len = parseList(val, &out.owners);
-        } else if (std.mem.eql(u8, key, "agents")) {
-            out.agents_len = parseList(val, &out.agents);
-        } else if (std.mem.eql(u8, key, "bar")) {
-            const v = std.mem.trim(u8, val, "\"'");
-            out.bar = !(std.mem.eql(u8, v, "false") or std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "off"));
-        } else if (std.mem.eql(u8, key, "glyphs")) {
-            const v = std.mem.trim(u8, val, "\"'");
-            out.ascii_glyphs = std.mem.eql(u8, v, "ascii");
-        } else if (std.mem.eql(u8, key, "status_space")) {
-            out.status_space_len = parseList(val, &out.status_space);
-        } else if (std.mem.eql(u8, key, "startup")) {
-            const v = std.mem.trim(u8, val, "\"'");
-            out.startup_last_space = std.mem.eql(u8, v, "last-space") or std.mem.eql(u8, v, "last_space") or std.mem.eql(u8, v, "space");
-        }
-    }
-}
-
 /// Home: the one workspace outside the list of spaces, a key away
 /// from any of them (docs/home.md). Rook seeds it from here when it
 /// is gone to and it is not there; with nothing configured it is one
 /// shell in `~`, a scratch pad.
-///
-///   [home]
-///   on_empty = "return"      # its last pane closed: back to the space
-///                            # you came from, and home starts over next
-///                            # time; "stay" seeds it again in place
-///   dir = "~"                # where its panes start, unless they say
-///   color = "cyan"           # its accent, and its chrome's tint (a hex
-///                            # colour or an ANSI name; the accent unset)
-///   [[home.window]]
-///   name = "me"
-///   dir = "~/work"
-///   panes = ["grim", "docket"]        # each a pane, side by side
-///   [[home.window]]
-///   name = "notes"
-///   [[home.window.pane]]
-///   command = "nvim scratch.md"
-///   dir = "~/notes"
-///   [[home.window.pane]]
-///   split = "down"                    # a shell, under it
 pub const Home = struct {
     pub const max_windows = 8;
     pub const max_panes = 8;
@@ -327,105 +130,209 @@ pub const Home = struct {
     }
 };
 
-pub fn homeConfig() Home {
-    var out: Home = .{};
-    var buf: [8192]u8 = undefined;
-    const home = std.mem.span(getenv("HOME") orelse return out);
-    var path_buf: [1024]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}/.config/rook/rook.toml", .{home}) catch return out;
-    const f = std.c.fopen(path, "r") orelse return out;
-    defer _ = std.c.fclose(f);
-    const n = std.c.fread(&buf, 1, buf.len, f);
-    parseHome(buf[0..n], &out);
+/// Everything the engine is configured with.
+pub const Config = struct {
+    /// C-b when unset, as tmux has it.
+    prefix: u8 = 0x02,
+    mux: Mux = .{},
+    /// empty here; `defaults` fills it (the table is built at run time)
+    keys: keyspkg.Keys = .{},
+    home: Home = .{},
+
+    /// The engine's defaults, which a document is read over.
+    pub fn defaults() Config {
+        return .{ .keys = keyspkg.defaults() };
+    }
+};
+
+/// The document as `rook config json` writes it. Every field is
+/// optional: what is left out is the default.
+const Doc = struct {
+    v: u32 = 0,
+    prefix: []const u8 = "",
+    mux: struct {
+        nav_owners: []const []const u8 = &.{},
+        scrollback_mb: ?u32 = null,
+        accent: []const u8 = "",
+        restore: ?bool = null,
+        sidebar_mode: []const u8 = "",
+        sidebar: ?bool = null,
+        sidebar_width: ?u16 = null,
+        agents: []const []const u8 = &.{},
+        bar: ?bool = null,
+        glyphs: []const u8 = "",
+        status_space: []const []const u8 = &.{},
+        startup: []const u8 = "",
+    } = .{},
+    companion: []const u8 = "",
+    keys: ?std.json.ArrayHashMap([]const u8) = null,
+    home: struct {
+        on_empty: []const u8 = "",
+        color: []const u8 = "",
+        dir: []const u8 = "",
+        windows: []const struct {
+            name: []const u8 = "",
+            dir: []const u8 = "",
+            panes: []const struct {
+                command: []const u8 = "",
+                dir: []const u8 = "",
+                split: []const u8 = "",
+            } = &.{},
+        } = &.{},
+    } = .{},
+};
+
+/// The newest document shape this engine reads; an older front door's
+/// document still reads, a newer one is refused rather than half-read.
+pub const doc_version = 1;
+
+/// A compiled document → the config, over the defaults.
+pub fn fromJson(gpa: std.mem.Allocator, bytes: []const u8) !Config {
+    const parsed = try std.json.parseFromSlice(Doc, gpa, bytes, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    const d = parsed.value;
+    if (d.v > doc_version) return error.NewerConfig;
+    var out = Config.defaults();
+    if (keyspkg.parseKey(d.prefix)) |k| out.prefix = k;
+
+    const m = &out.mux;
+    m.owners_len = joinInto(d.mux.nav_owners, &m.owners);
+    if (d.mux.scrollback_mb) |mb| m.scrollback_bytes = @as(usize, @min(mb, 256)) * 1024 * 1024;
+    if (d.mux.accent.len > 0) m.accent = chrome.Rgb.parse(d.mux.accent) orelse chrome.named(d.mux.accent) orelse m.accent;
+    if (d.mux.sidebar) |on| m.side_mode = if (on) .open else .hidden;
+    if (d.mux.sidebar_mode.len > 0) m.side_mode = chrome.SideMode.parse(d.mux.sidebar_mode) orelse m.side_mode;
+    if (d.mux.sidebar_width) |w| m.sidebar_width = std.math.clamp(w, 16, 60);
+    if (d.mux.restore) |r| m.restore = r;
+    m.agents_len = joinInto(d.mux.agents, &m.agents);
+    if (d.mux.bar) |b| m.bar = b;
+    m.ascii_glyphs = std.mem.eql(u8, d.mux.glyphs, "ascii");
+    m.status_space_len = joinInto(d.mux.status_space, &m.status_space);
+    const st = d.mux.startup;
+    m.startup_last_space = std.mem.eql(u8, st, "last-space") or std.mem.eql(u8, st, "last_space") or std.mem.eql(u8, st, "space");
+    const comp = d.companion[0..@min(d.companion.len, m.companion.len)];
+    @memcpy(m.companion[0..comp.len], comp);
+    m.companion_len = comp.len;
+
+    if (d.keys) |ks| {
+        var it = ks.map.iterator();
+        while (it.next()) |e| {
+            const key = keyspkg.parseKey(e.key_ptr.*) orelse continue;
+            out.keys.set(key, e.value_ptr.*);
+        }
+    }
+
+    const h = &out.home;
+    h.stay = std.mem.eql(u8, d.home.on_empty, "stay");
+    if (d.home.color.len > 0) h.color = chrome.Rgb.parse(d.home.color) orelse chrome.named(d.home.color);
+    h.dir = h.keep(d.home.dir);
+    for (d.home.windows) |w| {
+        if (h.windows_n == Home.max_windows) break;
+        var hw: Home.Window = .{ .name = h.keep(w.name), .dir = h.keep(w.dir) };
+        for (w.panes) |p| {
+            if (hw.panes_n == Home.max_panes) break;
+            hw.panes[hw.panes_n] = .{ .cmd = h.keep(p.command), .dir = h.keep(p.dir), .down = std.mem.eql(u8, p.split, "down") };
+            hw.panes_n += 1;
+        }
+        h.windows[h.windows_n] = hw;
+        h.windows_n += 1;
+    }
     return out;
 }
 
-pub fn parseHome(toml: []const u8, out: *Home) void {
-    var section: enum { other, home, window, pane } = .other;
-    var lines = std.mem.splitScalar(u8, toml, '\n');
-    while (lines.next()) |line| {
-        const t = std.mem.trim(u8, line, " \t\r");
-        if (t.len == 0 or t[0] == '#') continue;
-        if (t[0] == '[') {
-            if (std.mem.eql(u8, t, "[home]")) {
-                section = .home;
-            } else if (std.mem.eql(u8, t, "[[home.window]]")) {
-                section = .other;
-                if (out.windows_n < Home.max_windows) {
-                    out.windows[out.windows_n] = .{};
-                    out.windows_n += 1;
-                    section = .window;
-                }
-            } else if (std.mem.eql(u8, t, "[[home.window.pane]]")) {
-                section = .other;
-                if (out.windows_n > 0) {
-                    const w = &out.windows[out.windows_n - 1];
-                    if (w.panes_n < Home.max_panes) {
-                        w.panes[w.panes_n] = .{};
-                        w.panes_n += 1;
-                        section = .pane;
-                    }
-                }
-            } else section = .other;
-            continue;
+/// Names → `a\nb` in `buf`; the length written.
+fn joinInto(names: []const []const u8, buf: []u8) usize {
+    var len: usize = 0;
+    for (names) |n| {
+        if (len + n.len + 1 > buf.len) break;
+        if (len > 0) {
+            buf[len] = '\n';
+            len += 1;
         }
-        if (section == .other) continue;
-        const eq = std.mem.indexOfScalar(u8, t, '=') orelse continue;
-        const key = std.mem.trim(u8, t[0..eq], " \t");
-        const raw = std.mem.trim(u8, t[eq + 1 ..], " \t");
-        switch (section) {
-            .home => {
-                const v = quoted(raw) orelse continue;
-                if (std.mem.eql(u8, key, "on_empty")) {
-                    out.stay = std.mem.eql(u8, v, "stay");
-                } else if (std.mem.eql(u8, key, "dir")) {
-                    out.dir = out.keep(v);
-                } else if (std.mem.eql(u8, key, "color")) {
-                    out.color = chrome.Rgb.parse(v) orelse chrome.named(v);
-                }
-            },
-            .window => {
-                const w = &out.windows[out.windows_n - 1];
-                if (std.mem.eql(u8, key, "name")) {
-                    w.name = out.keep(quoted(raw) orelse continue);
-                } else if (std.mem.eql(u8, key, "dir")) {
-                    w.dir = out.keep(quoted(raw) orelse continue);
-                } else if (std.mem.eql(u8, key, "panes")) {
-                    // a list of commands, each quoted: commands have
-                    // spaces, so this is not parseList's split on them
-                    var rest = raw;
-                    while (std.mem.indexOfAny(u8, rest, "\"'")) |q| {
-                        const close = std.mem.indexOfScalarPos(u8, rest, q + 1, rest[q]) orelse break;
-                        if (w.panes_n < Home.max_panes) {
-                            w.panes[w.panes_n] = .{ .cmd = out.keep(rest[q + 1 .. close]) };
-                            w.panes_n += 1;
-                        }
-                        rest = rest[close + 1 ..];
-                    }
-                }
-            },
-            .pane => {
-                const w = &out.windows[out.windows_n - 1];
-                const p = &w.panes[w.panes_n - 1];
-                const v = quoted(raw) orelse continue;
-                if (std.mem.eql(u8, key, "command")) {
-                    p.cmd = out.keep(v);
-                } else if (std.mem.eql(u8, key, "dir")) {
-                    p.dir = out.keep(v);
-                } else if (std.mem.eql(u8, key, "split")) {
-                    p.down = std.mem.eql(u8, v, "down");
-                }
-            },
-            .other => {},
-        }
+        @memcpy(buf[len..][0..n.len], n);
+        len += n.len;
     }
+    return len;
 }
 
-/// `"x"` or `'x'` → `x`; a trailing `# comment` after the value is fine.
-fn quoted(raw: []const u8) ?[]const u8 {
-    if (raw.len < 2 or (raw[0] != '"' and raw[0] != '\'')) return null;
-    const close = std.mem.indexOfScalarPos(u8, raw, 1, raw[0]) orelse return null;
-    return raw[1..close];
+/// The config at boot: the front door's compiled document, or the
+/// defaults and the reason there is none, for the calm bar to say.
+pub const Loaded = struct { config: Config, err: []const u8 = "" };
+
+pub fn load(gpa: std.mem.Allocator) Loaded {
+    const bytes = fetch(gpa) catch |e| return .{ .config = Config.defaults(), .err = switch (e) {
+        error.NoFrontDoor => "config: rook not found; defaults",
+        error.Refused => "config: rook.toml refused (rook config check); defaults",
+    } };
+    defer gpa.free(bytes);
+    const c = fromJson(gpa, bytes) catch return .{ .config = Config.defaults(), .err = "config: unreadable (rook config json); defaults" };
+    return .{ .config = c };
+}
+
+/// Run `rook config json` and keep its stdout. The front door is
+/// `$ROOK_FRONT_DOOR` when the launcher said where it is, else the
+/// `bin/rook` of the install this engine is part of (it lives in
+/// `libexec/rook/`), else whatever `rook` is on PATH. Called before
+/// any pane thread exists, so forking here is plain.
+pub fn fetch(gpa: std.mem.Allocator) ![]u8 {
+    var cands: [3]?[*:0]const u8 = .{ null, null, null };
+    if (getenv("ROOK_FRONT_DOOR")) |p| cands[0] = p;
+    var exe_buf: [1024]u8 = undefined;
+    var sib_buf: [1100]u8 = undefined;
+    var exe_len: u32 = exe_buf.len;
+    if (_NSGetExecutablePath(&exe_buf, &exe_len) == 0) {
+        const exe = std.mem.sliceTo(&exe_buf, 0);
+        const dir = std.fs.path.dirname(exe) orelse "";
+        if (std.fmt.bufPrintZ(&sib_buf, "{s}/../../bin/rook", .{dir})) |z| cands[1] = z.ptr else |_| {}
+    }
+    cands[2] = "rook";
+    var refused = false;
+    for (cands, 0..) |cand, i| {
+        const c = cand orelse continue;
+        const r = runJson(gpa, c, i == 2) catch |e| {
+            if (e == error.Refused) refused = true;
+            continue;
+        };
+        return r;
+    }
+    return if (refused) error.Refused else error.NoFrontDoor;
+}
+
+/// One candidate: `<rook> config json`, stdout captured. Exit 127 is
+/// "no such program", anything else nonzero is the file refused.
+fn runJson(gpa: std.mem.Allocator, path: [*:0]const u8, search: bool) ![]u8 {
+    var p: [2]ptypkg.fd_t = undefined;
+    if (pipe(&p) != 0) return error.PipeFailed;
+    const pid = ptypkg.fork_();
+    if (pid < 0) {
+        _ = close(p[0]);
+        _ = close(p[1]);
+        return error.ForkFailed;
+    }
+    if (pid == 0) {
+        _ = dup2(p[1], 1);
+        _ = close(p[0]);
+        _ = close(p[1]);
+        const argv = [_:null]?[*:0]const u8{ path, "config", "json", null };
+        _ = if (search) execvp(path, &argv) else execv(path, &argv);
+        _exit(127);
+    }
+    _ = close(p[1]);
+    defer _ = close(p[0]);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = read(p[0], &buf, buf.len);
+        if (n <= 0) break;
+        try out.appendSlice(gpa, buf[0..@intCast(n)]);
+        if (out.items.len > 1 << 20) break;
+    }
+    var status: c_int = 0;
+    _ = waitpid(pid, &status, 0);
+    const code = (status >> 8) & 0xff;
+    if (code == 127) return error.NotFound;
+    if (status != 0) return error.Refused;
+    return out.toOwnedSlice(gpa);
 }
 
 /// A home directory as the config spells it: `~` and `~/x` are under
@@ -438,177 +345,57 @@ pub fn expandDir(dir: []const u8, buf: []u8) ?[:0]const u8 {
     return std.fmt.bufPrintZ(buf, "{s}/{s}", .{ h, dir }) catch null;
 }
 
-test "home: nothing configured is a scratch pad" {
-    var h: Home = .{};
-    parseHome("[tmux]\nprefix = \"`\"\n", &h);
-    try std.testing.expectEqual(@as(usize, 0), h.windows_n);
-    try std.testing.expect(!h.stay);
+test "an empty document is the defaults" {
+    const c = try fromJson(std.testing.allocator, "{}");
+    try std.testing.expectEqual(@as(u8, 0x02), c.prefix);
+    try std.testing.expect(c.mux.bar and c.mux.restore and !c.mux.ascii_glyphs);
+    try std.testing.expectEqual(chrome.mauve, c.mux.accent);
+    try std.testing.expectEqualStrings("", c.mux.companionSlice());
+    try std.testing.expectEqualStrings("", c.mux.agentsSlice());
+    try std.testing.expectEqualStrings(default_status_space, c.mux.statusSpace());
+    try std.testing.expectEqual(keyspkg.Verb.split_right, c.keys.get('v').verb);
+    try std.testing.expectEqual(@as(usize, 0), c.home.windows_n);
 }
 
-test "home: windows, their panes, and where they start" {
-    var h: Home = .{};
-    parseHome(
-        \\[home]
-        \\on_empty = "stay"
-        \\color = "cyan"
-        \\dir = "~/work"
-        \\[[home.window]]
-        \\name = "me"
-        \\panes = ["grim", "docket --all"]  # side by side
-        \\[[home.window]]
-        \\name = "notes"
-        \\dir = "~/notes"
-        \\[[home.window.pane]]
-        \\command = "nvim scratch.md"
-        \\[[home.window.pane]]
-        \\dir = "archive"
-        \\split = "down"
-        \\[keys]
-        \\name = "not a window"
-    , &h);
+test "a compiled document, read" {
+    const doc =
+        \\{"v":1,"prefix":"`","mux":{"nav_owners":["nvim","fzf"],"scrollback_mb":8,"accent":"cyan",
+        \\"sidebar":true,"sidebar_mode":"collapsed","agents":["claude","codex"],"bar":false,"glyphs":"ascii",
+        \\"status_space":["input","-","pins"],"startup":"last-space","restore":false,"future":1},
+        \\"companion":"vera","keys":{"g":"popup 72x86@124x48 grim","x":"","C-o":"home"},
+        \\"home":{"on_empty":"stay","color":"#112233","dir":"~/work","windows":[
+        \\{"name":"me","panes":[{"command":"docket"},{"command":""}]},
+        \\{"name":"notes","dir":"~/notes","panes":[{"command":"nvim"},{"dir":"archive","split":"down"}]}]}}
+    ;
+    const c = try fromJson(std.testing.allocator, doc);
     const eq = std.testing.expectEqualStrings;
+    try std.testing.expectEqual(@as(u8, '`'), c.prefix);
+    try eq("nvim\nfzf", c.mux.ownersSlice());
+    try std.testing.expectEqual(@as(usize, 8 * 1024 * 1024), c.mux.scrollback_bytes);
+    try std.testing.expectEqual(chrome.teal, c.mux.accent);
+    try std.testing.expectEqual(chrome.SideMode.collapsed, c.mux.side_mode); // mode over the old spelling
+    try eq("claude\ncodex", c.mux.agentsSlice());
+    try std.testing.expect(!c.mux.bar and c.mux.ascii_glyphs and c.mux.startup_last_space and !c.mux.restore);
+    try eq("input\n-\npins", c.mux.statusSpace());
+    try eq("vera", c.mux.companionSlice());
+    try std.testing.expectEqual(keyspkg.Verb.popup, c.keys.get('g').verb);
+    try eq("\x1f72x86@124x48\x1fgrim", c.keys.arg(c.keys.get('g')));
+    try std.testing.expectEqual(keyspkg.Verb.none, c.keys.get('x').verb);
+    try std.testing.expectEqual(keyspkg.Verb.home, c.keys.get(0x0f).verb);
+    try std.testing.expectEqual(keyspkg.Verb.split_right, c.keys.get('v').verb); // defaults stay under
+    const h = c.home;
     try std.testing.expect(h.stay);
-    try std.testing.expectEqual(@as(?chrome.Rgb, chrome.teal), h.color);
+    try std.testing.expectEqual(chrome.Rgb{ .r = 0x11, .g = 0x22, .b = 0x33 }, h.color.?);
     try eq("~/work", h.str(h.dir));
     try std.testing.expectEqual(@as(usize, 2), h.windows_n);
-    const me = h.windows[0];
-    try eq("me", h.str(me.name));
-    try std.testing.expectEqual(@as(usize, 2), me.panes_n);
-    try eq("grim", h.str(me.panes[0].cmd));
-    try eq("docket --all", h.str(me.panes[1].cmd));
-    const notes = h.windows[1];
-    try eq("notes", h.str(notes.name));
-    try eq("~/notes", h.str(notes.dir));
-    try std.testing.expectEqual(@as(usize, 2), notes.panes_n);
-    try eq("nvim scratch.md", h.str(notes.panes[0].cmd));
-    try eq("", h.str(notes.panes[1].cmd));
-    try eq("archive", h.str(notes.panes[1].dir));
-    try std.testing.expect(notes.panes[1].down and !notes.panes[0].down);
-    // a pane table before any window has nowhere to go
-    var stray: Home = .{};
-    parseHome("[[home.window.pane]]\ncommand = \"x\"\n", &stray);
-    try std.testing.expectEqual(@as(usize, 0), stray.windows_n);
+    try eq("me", h.str(h.windows[0].name));
+    try eq("docket", h.str(h.windows[0].panes[0].cmd));
+    try std.testing.expectEqual(@as(usize, 2), h.windows[0].panes_n);
+    try eq("~/notes", h.str(h.windows[1].dir));
+    try eq("archive", h.str(h.windows[1].panes[1].dir));
+    try std.testing.expect(h.windows[1].panes[1].down and !h.windows[1].panes[0].down);
 }
 
-/// `["a", "b"]` → `a\nb` in `buf`; returns the length written. The
-/// list form every [mux] list key uses.
-fn parseList(val: []const u8, buf: []u8) usize {
-    var len: usize = 0;
-    var it = std.mem.tokenizeAny(u8, val, "[]\"', ");
-    while (it.next()) |name| {
-        if (len + name.len + 1 > buf.len) break;
-        if (len > 0) {
-            buf[len] = '\n';
-            len += 1;
-        }
-        @memcpy(buf[len .. len + name.len], name);
-        len += name.len;
-    }
-    return len;
-}
-
-test "parseMux" {
-    var m: Mux = .{};
-    parseMux("[mux]\nscrollback_mb = 8\naccent = \"cyan\"\nnav_owners = [\"nvim\", \"fzf\"]\n", &m);
-    try std.testing.expectEqual(@as(usize, 8 * 1024 * 1024), m.scrollback_bytes);
-    try std.testing.expectEqual(chrome.teal, m.accent);
-    try std.testing.expectEqualStrings("nvim\nfzf", m.ownersSlice());
-    var d: Mux = .{};
-    parseMux("[tmux]\nprefix = \"`\"\naccent = \"red\"\n", &d);
-    try std.testing.expectEqual(chrome.mauve, d.accent); // wrong section: ignored
-    parseMux("[mux]\naccent = \"bright-blue\"\n", &d);
-    try std.testing.expectEqual(chrome.blue, d.accent);
-    parseMux("[mux]\naccent = \"#f9e2af\"\n", &d);
-    try std.testing.expectEqual(chrome.yellow, d.accent);
-    var sb: Mux = .{};
-    try std.testing.expectEqual(chrome.SideMode.hidden, sb.side_mode); // off unless asked
-    try std.testing.expectEqual(@as(u16, 30), sb.sidebar_width);
-    parseMux("[mux]\nsidebar = true\n", &sb);
-    try std.testing.expectEqual(chrome.SideMode.open, sb.side_mode);
-    parseMux("[mux]\nsidebar = false\nsidebar_width = 999\n", &sb);
-    try std.testing.expectEqual(chrome.SideMode.hidden, sb.side_mode); // the old spelling
-    try std.testing.expectEqual(@as(u16, 60), sb.sidebar_width); // clamped
-    parseMux("[mux]\nsidebar_mode = \"collapsed\"\n", &sb);
-    try std.testing.expectEqual(chrome.SideMode.collapsed, sb.side_mode);
-    parseMux("[mux]\nsidebar_mode = \"folded\"\n", &sb);
-    try std.testing.expectEqual(chrome.SideMode.collapsed, sb.side_mode); // a name it does not know changes nothing
-    var r: Mux = .{};
-    try std.testing.expectEqual(true, r.restore); // default on
-    parseMux("[mux]\nrestore = true\n", &r);
-    try std.testing.expectEqual(true, r.restore);
-    parseMux("[mux]\nrestore = false\n", &r);
-    try std.testing.expectEqual(false, r.restore);
-    var a: Mux = .{};
-    try std.testing.expectEqualStrings("", a.agentsSlice()); // rook names no agent
-    parseMux("[mux]\nagents = [\"claude\", \"codex\"]\n", &a);
-    try std.testing.expectEqualStrings("claude\ncodex", a.agentsSlice());
-    var b: Mux = .{};
-    try std.testing.expect(b.bar); // the calm bar is on unless turned off
-    parseMux("[mux]\nbar = false\n", &b);
-    try std.testing.expect(!b.bar);
-    parseMux("[mux]\nbar = true\n", &b);
-    try std.testing.expect(b.bar);
-    try std.testing.expect(!b.ascii_glyphs);
-    parseMux("[mux]\nglyphs = \"ascii\"\n", &b);
-    try std.testing.expect(b.ascii_glyphs);
-    // plain `rook` lands at home unless the config asks for the space
-    var s: Mux = .{};
-    try std.testing.expect(!s.startup_last_space);
-    parseMux("[mux]\nstartup = \"last-space\"\n", &s);
-    try std.testing.expect(s.startup_last_space);
-    parseMux("[mux]\nstartup = \"global\"\n", &s);
-    try std.testing.expect(!s.startup_last_space);
-}
-
-test "the status bar's modules are the default until a config names them" {
-    var d: Mux = .{};
-    try std.testing.expectEqualStrings(default_status_space, d.statusSpace());
-    parseMux("[mux]\nstatus_space = [\"input\"]\n", &d);
-    try std.testing.expectEqualStrings("input", d.statusSpace());
-}
-
-test "the companion slot, named or summoned" {
-    const eq = std.testing.expectEqualStrings;
-    // nothing configured: the slot is empty — rook names no occupant
-    var d: Mux = .{};
-    try eq("", d.companionSlice());
-    // the command's first word is the program to watch for
-    var c: Mux = .{};
-    parseMux("[companion]\ncommand = \"vera chat\"\n", &c);
-    try eq("vera", c.companionSlice());
-    // a path is still a program name
-    var p: Mux = .{};
-    parseMux("[companion]\ncommand = \"/opt/homebrew/bin/aider --dark\"\n", &p);
-    try eq("aider", p.companionSlice());
-    // `program` wins over the command, whichever order they come in
-    var n: Mux = .{};
-    parseMux("[companion]\ncommand = \"vera chat\"\nprogram = \"vera-dev\"\n", &n);
-    try eq("vera-dev", n.companionSlice());
-    var n2: Mux = .{};
-    parseMux("[companion]\nprogram = \"vera-dev\"\ncommand = \"vera chat\"\n", &n2);
-    try eq("vera-dev", n2.companionSlice());
-    // …and `name` loses to the command: over there it labels the
-    // popup, and a label is not a program name
-    var l: Mux = .{};
-    parseMux("[companion]\ncommand = \"vera chat\"\nname = \"Vera\"\n", &l);
-    try eq("vera", l.companionSlice());
-    // with nothing better, the label is what names the occupant
-    var only: Mux = .{};
-    parseMux("[companion]\nname = \"vera\"\n", &only);
-    try eq("vera", only.companionSlice());
-    // program named empty over a command: no companion at all
-    var off: Mux = .{};
-    parseMux("[companion]\ncommand = \"vera chat\"\nprogram = \"\"\n", &off);
-    try eq("", off.companionSlice());
-    // the table only counts under its own header
-    var elsewhere: Mux = .{};
-    parseMux("[mux]\nname = \"nope\"\n[worktree]\ncommand = \"nope\"\n", &elsewhere);
-    try eq("", elsewhere.companionSlice());
-}
-
-test "parsePrefix" {
-    try std.testing.expectEqual(@as(?u8, 0x60), parsePrefix("[tmux]\nprefix = \"`\"\n"));
-    try std.testing.expectEqual(@as(?u8, 0x02), parsePrefix("prefix = \"C-b\""));
-    try std.testing.expectEqual(@as(?u8, 0x01), parsePrefix("prefix = 'C-a'"));
-    try std.testing.expectEqual(@as(?u8, null), parsePrefix("[tmux]\nplugins = []\n"));
+test "a document from a newer front door is refused, not half-read" {
+    try std.testing.expectError(error.NewerConfig, fromJson(std.testing.allocator, "{\"v\":99}"));
 }

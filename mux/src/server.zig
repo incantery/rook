@@ -504,14 +504,18 @@ pub const Server = struct {
         defer gpa.free(sock_z);
         ptypkg.setEnv("ROOK_MUX_SOCK", sock_z.ptr);
 
+        // The config, compiled by the front door (config.load), before
+        // any pane exists: it forks, and nothing has threads yet.
+        const loaded = config.load(gpa);
         var self: Server = .{
             .gpa = gpa,
             .io = io,
             .listener = listener,
             .sock_path = sock_path,
-            .prefix_key = config.prefixKey(),
-            .keys = config.keysConfig(),
-            .conf = config.muxConfig(),
+            .prefix_key = loaded.config.prefix,
+            .keys = loaded.config.keys,
+            .conf = loaded.config.mux,
+            .home_conf = loaded.config.home,
             .wake_r = pipefds[0],
             .wake_w = pipefds[1],
             .frame = renderpkg.Frame.init(gpa),
@@ -528,13 +532,10 @@ pub const Server = struct {
             _ = std.fmt.bufPrintZ(self.state_tmp[0 .. self.state_tmp.len - 1], "{s}.state.tmp", .{sock_path}) catch {};
         } else |_| {}
 
-        self.ui = ui.Theme.init(self.conf.accent, if (self.conf.ascii_glyphs) .ascii else .unicode);
-        self.frame.accent = self.ui.border_focused;
-        self.frame.border = self.ui.border;
-        self.over.accent = self.ui.border_focused;
-        self.over.border = self.ui.border;
-        self.side.accent = self.conf.accent;
+        self.theme();
         self.side_mode = self.conf.side_mode;
+        // a config that did not load is said, once, where it is seen
+        if (loaded.err.len > 0) self.say('f', loaded.err);
         self.pid = ptypkg.selfPid();
         _ = std.fmt.bufPrint(&self.epoch, "{x:0>8}", .{
             @as(u32, @truncate(@as(u64, @bitCast(nowMs())) *% 2654435761 ^ @as(u64, @intCast(self.pid)))),
@@ -548,7 +549,6 @@ pub const Server = struct {
         // underneath it and the one it was showing next in line for
         // when home is left; `startup = "last-space"` is the opt-in
         // that lands in that space instead.
-        self.home_conf = config.homeConfig();
         if (!self.conf.startup_last_space) {
             if (self.ensureHome()) |i| self.switchSession(i) else |_| {}
         }
@@ -789,19 +789,62 @@ pub const Server = struct {
     /// something to see — and anything else is no mark at all.
     fn notify(self: *Server, c: *Client, payload: []const u8) void {
         if (payload.len < 2) return;
-        const text = std.mem.trim(u8, payload[1..], " \t\r\n");
+        self.say(payload[0], payload[1..]);
+        self.ack(c);
+    }
+
+    /// One line on the calm bar, with its mark: the notice `rook
+    /// notify` sets, and what rook says of itself (a config that did
+    /// not load).
+    fn say(self: *Server, mark: u8, said: []const u8) void {
+        const text = std.mem.trim(u8, said, " \t\r\n");
         if (text.len == 0) return;
         // one line: the first, cut on a codepoint boundary
         const line = if (std.mem.indexOfScalar(u8, text, '\n')) |nl| text[0..nl] else text;
         const kept = chromepkg.clip(line, @intCast(self.notice.len));
         @memcpy(self.notice[0..kept.len], kept);
         self.notice_len = kept.len;
-        self.notice_mark = noticeMark(payload[0]);
+        self.notice_mark = noticeMark(mark);
         self.notice_ms = nowMs();
         _ = self.touch();
-        self.ack(c);
         self.full = true;
         self.pending = true;
+    }
+
+    /// The theme and everything painted from it, from the config.
+    fn theme(self: *Server) void {
+        self.ui = ui.Theme.init(self.conf.accent, if (self.conf.ascii_glyphs) .ascii else .unicode);
+        self.frame.accent = self.ui.border_focused;
+        self.frame.border = self.ui.border;
+        self.over.accent = self.ui.border_focused;
+        self.over.border = self.ui.border;
+        self.side.accent = self.conf.accent;
+    }
+
+    /// `rook reload`: a freshly compiled config, applied to the running
+    /// server. Keys, colours, glyphs, the bar and its modules, the rail,
+    /// the agents and companion it looks for take effect now; the
+    /// scrollback a pane keeps applies to panes made from here on; home
+    /// is seeded from the new [home] the next time it is seeded — the
+    /// one that is up is somebody's work. `restore` and `startup` are
+    /// about a boot, and wait for the next one.
+    fn reloadConfig(self: *Server, c: *Client, payload: []const u8) void {
+        const cfg = config.fromJson(self.gpa, payload) catch |e| {
+            var eb: [96]u8 = undefined;
+            const why = std.fmt.bufPrint(&eb, "error: {s}", .{@errorName(e)}) catch "error";
+            self.sendTo(c, @intFromEnum(proto.s2c.text), why);
+            return;
+        };
+        self.prefix_key = cfg.prefix;
+        self.keys = cfg.keys;
+        self.conf = cfg.mux;
+        self.home_conf = cfg.home;
+        self.theme();
+        self.side_mode = self.conf.side_mode;
+        self.found_ms = 0; // look for agents and the companion again now
+        self.relayout() catch {};
+        _ = self.touch();
+        self.sendTo(c, @intFromEnum(proto.s2c.text), "ok");
     }
 
     /// Pure: the letter a notice carries, as a mark.
@@ -1422,6 +1465,7 @@ pub const Server = struct {
                         self.pending = true;
                     }
                 },
+                @intFromEnum(proto.c2s.config) => self.reloadConfig(c, msg.payload),
                 @intFromEnum(proto.c2s.popup) => {
                     if (msg.payload.len > 0) self.openPopup(self.popupSized(msg.payload)) catch {};
                 },

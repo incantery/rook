@@ -63,9 +63,14 @@ class Rook:
         })
         for k in ("XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME"):
             os.makedirs(self.env[k], exist_ok=True)
-        os.makedirs(self.root + "/.config/rook", exist_ok=True)
-        with open(self.root + "/.config/rook/rook.toml", "w") as f:
+        # the config is compiled by the front door (`rook config json`),
+        # which reads it where XDG says: this checkout's rook, built here
+        os.makedirs(self.env["XDG_CONFIG_HOME"] + "/rook", exist_ok=True)
+        with open(self.env["XDG_CONFIG_HOME"] + "/rook/rook.toml", "w") as f:
             f.write('[tmux]\nprefix = "`"\n')
+        front = os.path.join(self.root, "rook")
+        subprocess.run(["go", "build", "-o", front, "./cmd/rook"], cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))), check=True)
+        self.env["ROOK_FRONT_DOOR"] = front
         self.srv = subprocess.Popen([ENGINE, "server"], env=self.env, cwd=self.root,
                                     stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
         time.sleep(1.0)

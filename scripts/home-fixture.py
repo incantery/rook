@@ -42,6 +42,10 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ENGINE = os.path.join(REPO, "mux", "zig-out", "bin", "engine")
 OUT = sys.argv[1] if len(sys.argv) > 1 else tempfile.mkdtemp(prefix="/tmp/rook-home-")
 os.makedirs(OUT, exist_ok=True)
+# The front door compiles rook.toml for the engine (`rook config json`):
+# this checkout's, built once, never the installed one.
+FRONT = os.path.join(tempfile.mkdtemp(prefix="/tmp/rk-front-"), "rook")
+subprocess.run(["go", "build", "-o", FRONT, "./cmd/rook"], cwd=REPO, check=True)
 
 fails = []
 
@@ -59,7 +63,7 @@ def real(p):
 class Rook:
     """A sandboxed engine behind a pyte glass."""
 
-    def __init__(self, conf="", tag="home", cols=100, rows=24, attach=None, dirs=()):
+    def __init__(self, conf="", tag="home", cols=100, rows=24, attach=None, dirs=(), front=None):
         self.root = tempfile.mkdtemp(prefix="/tmp/rk-%s-" % tag)
         self.cols, self.rows = cols, rows
         os.makedirs(self.root + "/.config/rook")
@@ -75,7 +79,7 @@ class Rook:
             "ROOK_MUX_SOCK": self.sock, "SHELL": "/bin/sh", "HOME": self.root,
             "XDG_STATE_HOME": self.root + "/state", "XDG_CONFIG_HOME": self.root + "/.config",
             "TERM": "xterm-256color", "PS1": "$ ", "ENV": self.root + "/.shrc",
-            "PATH": "/usr/bin:/bin",
+            "PATH": "/usr/bin:/bin", "ROOK_FRONT_DOOR": front or FRONT, "ROOK_ENGINE": ENGINE,
         })
         with open(self.root + "/.shrc", "w") as f:
             f.write("PS1='$ '\n")
@@ -115,6 +119,15 @@ class Rook:
     def keys(self, s, settle=0.4):
         os.write(self.fd, s.encode() if isinstance(s, str) else s)
         self.settle(settle)
+
+    def write_conf(self, conf):
+        with open(self.root + "/.config/rook/rook.toml", "w") as f:
+            f.write('[tmux]\nprefix = "`"\n' + conf)
+
+    def front(self, *args):
+        p = subprocess.run([FRONT] + list(args), env=self.env, cwd=self.root,
+                           capture_output=True, text=True, timeout=10)
+        return p.returncode, (p.stdout + p.stderr).strip()
 
     def rook(self, *args):
         p = subprocess.run([ENGINE] + list(args), env=self.env, cwd=self.root,
@@ -337,6 +350,43 @@ try:
     sessions = [l for l in saved.splitlines() if l.startswith("session ")]
     check("the saved state has the spaces and not home", sessions and not any(l.split()[1] == "home" for l in sessions), sessions)
     check("the space home goes back to wears the star", any(l == "session main *" for l in sessions), sessions)
+finally:
+    r.close()
+
+# ---- 10: the config is the front door's, and it reloads
+r = Rook(tag="reload")
+try:
+    r.keys("`o")  # into main
+    mode = lambda: r.state()["focus"]["mode"]
+    r.keys("`e", settle=0.5)
+    check("before: e is unbound", mode() == "pane", mode())
+    r.write_conf('[keys]\ne = "popup 40x40 cat"\n[home]\ncolor = "#00ff00"\n')
+    code, out = r.front("reload")
+    check("rook reload hands the running engine the new file", code == 0 and "reloaded" in out, out)
+    r.keys("`e", settle=0.8)
+    check("after: the new row is live, no restart", mode() == "popup", mode())
+    r.keys("\x04", settle=0.8)
+    r.keys("`o", settle=0.6)
+    r.snap("10-reload-home")
+    check("home wears the colour the reload gave it", r.screen.buffer[0][1].bg == "00ff00", r.screen.buffer[0][1].bg)
+    r.write_conf('[keys]\ne = "popop cat"\n')
+    code, out = r.front("reload")
+    check("a file that does not load is refused, and says why", code != 0 and "popop" in out, out)
+    r.keys("`o", settle=0.5)
+    r.keys("`e", settle=0.8)
+    check("and the config that was running stays", mode() == "popup", mode())
+    r.keys("\x04", settle=0.8)
+    code, out = r.front("config", "check")
+    check("rook config check says the same, without a server", code != 0 and "popop" in out, out)
+finally:
+    r.close()
+
+# ---- 11: no front door: the defaults, and the calm bar says so
+r = Rook(tag="nofront", conf='[keys]\ne = "popup 40x40 cat"\n', front="/nonexistent/rook")
+try:
+    r.snap("11-no-front-door")
+    check("with no rook to compile the file, the engine boots on its defaults", r.state()["scope"] == "home")
+    check("and the calm bar says why", "config:" in r.lines()[-1], repr(r.lines()[-1][:60]))
 finally:
     r.close()
 

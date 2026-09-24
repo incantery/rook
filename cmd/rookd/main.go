@@ -7,10 +7,12 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 
@@ -42,6 +44,7 @@ func superviseMux(sock string) {
 		}
 		log.Printf("mux server not answering on %s; starting one", sock)
 		cmd := exec.Command(mux.EnginePath(), "server")
+		cmd.Env = mux.Env()
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 		started := time.Now()
 		if err := cmd.Start(); err != nil {
@@ -93,6 +96,60 @@ func nameTabs(sock string) {
 	n.Run(context.Background(), 4*time.Second)
 }
 
+// watchConfig reloads the engine when rook.toml changes: saved and
+// good, the running server takes it (`rook reload`); saved and not, the
+// calm bar says why and the config that is running stays. Polled —
+// once a second is plenty for a file a person saves, and it survives
+// editors that replace the file rather than write it.
+func watchConfig(sock string) {
+	path, err := config.Path()
+	if err != nil {
+		return
+	}
+	stamp := func() string {
+		fi, err := os.Stat(path)
+		if err != nil {
+			return ""
+		}
+		return fmt.Sprintf("%d/%d", fi.ModTime().UnixNano(), fi.Size())
+	}
+	engine := func(stdin string, args ...string) error {
+		cmd := exec.Command(mux.EnginePath(), args...)
+		cmd.Env = append(os.Environ(), "ROOK_MUX_SOCK="+sock)
+		cmd.Stdin = strings.NewReader(stdin)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+	last := stamp()
+	for {
+		time.Sleep(time.Second)
+		now := stamp()
+		if now == last || now == "" {
+			continue
+		}
+		last = now
+		c, err := config.Load(path)
+		if err != nil {
+			log.Printf("config: not reloaded: %v", err)
+			// the reason, after the path the person already knows
+			why := err.Error()
+			if i := strings.Index(why, ": "); i >= 0 && strings.HasPrefix(why, path) {
+				why = why[i+2:]
+			}
+			_ = engine("", "notify", "--mark", "failed", "rook.toml: "+why)
+			continue
+		}
+		if err := engine(string(c.Compile().JSON()), "reload"); err != nil {
+			log.Printf("config: reload failed: %v", err)
+			continue
+		}
+		log.Printf("config: reloaded %s", path)
+	}
+}
+
 func main() {
 	addr := flag.String("addr", "0.0.0.0:7673", "web bridge listen address")
 	sock := flag.String("sock", webd.DefaultSock(), "engine unix socket")
@@ -102,5 +159,6 @@ func main() {
 
 	go superviseMux(*sock)
 	go nameTabs(*sock)
+	go watchConfig(*sock)
 	log.Fatal(webd.Serve(webd.Options{Addr: *addr, Sock: *sock, Dir: *dir, Token: *token}))
 }

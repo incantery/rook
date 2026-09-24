@@ -485,6 +485,12 @@ pub fn main(init: std.process.Init) !void {
         try client.notify(path, mark, joined.items);
         return;
     }
+    if (std.mem.eql(u8, cmd, "reload")) {
+        // engine reload < compiled.json — `rook reload` compiles
+        // rook.toml and pipes it here
+        try client.reload(churn_gpa, path);
+        return;
+    }
     if (std.mem.eql(u8, cmd, "nav")) {
         // rook nav h|j|k|l (or left/down/up/right)
         const arg: []const u8 = if (argv.len > 2) std.mem.span(argv[2]) else "";

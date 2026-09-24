@@ -57,6 +57,8 @@ const usage = `rook — the multiplexer, owned
   rook home               home, said outright
   rook attach [--root | --space <name> [--cwd DIR]]   the exact form of the three above
   rook ls                 list workspaces
+  rook config [check|json|path]  is rook.toml good; the engine's half, compiled; where it is
+  rook reload             hand the running server rook.toml as it is now (rookd does this on save)
   rook new [-q] <name> [cwd] [-- cmd...]
                           create/switch workspace; -q makes it without moving you;
                           after -- is what its first pane is born running
@@ -150,6 +152,10 @@ func main() {
 		err = runCompanion(args[1:])
 	case args[0] == "url":
 		err = runURL()
+	case args[0] == "config":
+		err = runConfig(args[1:])
+	case args[0] == "reload":
+		err = runReload()
 	case muxVerbs[args[0]]:
 		execMux(args)
 	default:
@@ -197,7 +203,7 @@ func attachArgs(flags []string) []string {
 func execMux(args []string) {
 	bin := mux.EnginePath()
 	argv := append([]string{filepath.Base(bin)}, args...)
-	if err := syscall.Exec(bin, argv, os.Environ()); err != nil {
+	if err := syscall.Exec(bin, argv, mux.Env()); err != nil {
 		fmt.Fprintf(os.Stderr, "rook: cannot exec the engine at %s: %v\n"+
 			"    install it with `make -C mux install`, or point %s at a build\n", bin, err, mux.EngineEnv)
 		os.Exit(1)

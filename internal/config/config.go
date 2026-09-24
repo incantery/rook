@@ -23,12 +23,10 @@ type Config struct {
 	Tmux      Tmux      `toml:"tmux"`
 	Companion Companion `toml:"companion"`
 	Worktree  Worktree  `toml:"worktree"`
-	// Mux is the [mux] table: the engine's half of this file, which it
-	// parses for itself (mux/README.md). Nothing here reads it — but an
-	// unrecognized key refuses to boot, and one file with two readers
-	// must not mean that either reader's keys break the other's.
-	Mux   map[string]any `toml:"mux"`
-	Namer Namer          `toml:"namer"`
+	// Mux is the [mux] table: the engine's knobs, handed to it compiled
+	// (engine.go, `rook config json`).
+	Mux   Mux   `toml:"mux"`
+	Namer Namer `toml:"namer"`
 	// Keys is the [keys] table: what each key after the prefix does,
 	// "key" = "verb [arg]". The engine reads it (mux/src/keys.zig);
 	// Load only refuses what the engine would skip (keys.go).
@@ -88,6 +86,14 @@ type Companion struct {
 	// declared here because this loader refuses keys it has not heard
 	// of and one file cannot have two ideas of what is valid.
 	Program string `toml:"program"`
+	// Ask and Chat are accepted and ignored: the ask door and the
+	// hosted chat went with the root (docs/home.md).
+	Ask  string `toml:"ask"`
+	Chat string `toml:"chat"`
+
+	// programSet is whether `program` was said at all: `program = ""`
+	// turns the slot off, which the zero value cannot say.
+	programSet bool
 }
 
 // Home is the [home] table: what the one workspace outside the list
@@ -121,11 +127,11 @@ type HomeWindow struct {
 
 // HomePane is one [[home.window.pane]]. An empty command is a shell.
 type HomePane struct {
-	Command string `toml:"command"`
-	Dir     string `toml:"dir"`
+	Command string `toml:"command" json:"command,omitempty"`
+	Dir     string `toml:"dir" json:"dir,omitempty"`
 	// Split is how it sits against the pane before it: "right" (the
 	// default) or "down".
-	Split string `toml:"split"`
+	Split string `toml:"split" json:"split,omitempty"`
 }
 
 // checkHome refuses what the engine would quietly misread.
@@ -193,6 +199,10 @@ func Load(path string) (Config, error) {
 		}
 		return Config{}, fmt.Errorf("%s: unrecognized keys: %s (typo, or a newer rook?)",
 			path, strings.Join(keys, ", "))
+	}
+	c.Companion.programSet = md.IsDefined("companion", "program")
+	if err := checkMux(c.Mux); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
 	if err := checkKeys(c.Keys); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)

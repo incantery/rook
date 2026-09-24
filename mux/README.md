@@ -19,6 +19,14 @@ through the front door; the engine's own argv is identical.
     ./zig-out/bin/engine       # a build you have not installed…
     ROOK_ENGINE=$PWD/zig-out/bin/engine rook ls   # …behind the front door
 
+The engine does not parse `rook.toml`. The front door does: at boot
+the engine runs `$ROOK_FRONT_DOOR config json` (else the `bin/rook` of
+its own install, else `rook` on PATH) and reads the JSON it prints
+(`src/config.zig`, over its own defaults); `rook reload` sends a fresh
+one over the socket (`c2s.config`, answered `ok` or why not), and rookd
+sends one whenever the file is saved. With no front door to ask, the
+engine boots on its defaults and the calm bar says so.
+
 The prefix comes from `~/.config/rook/rook.toml` (`[tmux] prefix`),
 C-b when unset; double-tap types it literally. A `[mux]` section adds
 `nav_owners = ["nvim", "fzf"]` (programs that keep bare Ctrl-hjkl),

@@ -271,6 +271,42 @@ pub fn capture(gpa: std.mem.Allocator, sock_path: []const u8, id: u32, lines: u3
     _ = ptypkg.writeAllFd(1, text);
 }
 
+/// `rook reload`'s engine half: a compiled config on stdin, handed to
+/// the running server, and its answer — `ok`, or why not — printed.
+pub fn reload(gpa: std.mem.Allocator, sock_path: []const u8) !void {
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(gpa);
+    var chunk: [64 * 1024]u8 = undefined;
+    while (true) {
+        const n = ptypkg.readNb(0, &chunk); // stdin is blocking: this waits
+        if (n <= 0) break;
+        try doc.appendSlice(gpa, chunk[0..@intCast(n)]);
+    }
+    const sock = ptypkg.unixConnect(sock_path);
+    if (sock < 0) return error.ConnectFailed;
+    defer ptypkg.closeFd(sock);
+    try proto.write(sock, @intFromEnum(proto.c2s.config), doc.items);
+    _ = ptypkg.setNonblockFd(sock);
+    var reader = proto.Reader.init(gpa);
+    defer reader.deinit();
+    var fds = [1]ptypkg.Pollfd{.{ .fd = sock, .events = ptypkg.POLLIN }};
+    var waited: usize = 0;
+    while (waited < 2000) : (waited += 100) {
+        _ = ptypkg.pollMany(&fds, 1, 100);
+        if (!reader.fill(sock)) return error.ServerGone;
+        while (reader.next()) |msg| {
+            defer reader.consume();
+            if (msg.kind != @intFromEnum(proto.s2c.text)) continue;
+            if (std.mem.eql(u8, msg.payload, "ok")) return;
+            _ = ptypkg.writeAllFd(2, "rook: reload: ");
+            _ = ptypkg.writeAllFd(2, msg.payload);
+            _ = ptypkg.writeAllFd(2, "\n");
+            return error.ReloadRefused;
+        }
+    }
+    return error.Timeout;
+}
+
 /// One capture request on an open socket; the text comes back
 /// allocated with the reader's allocator. `exit` from the server is
 /// its way of saying "no such pane", printed and turned into an error.

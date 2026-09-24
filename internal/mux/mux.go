@@ -67,6 +67,52 @@ func exists(path string) bool {
 	return err == nil && !st.IsDir()
 }
 
+// FrontDoorEnv names the `rook` binary to an engine it launches: the
+// engine runs `$ROOK_FRONT_DOOR config json` at boot for its config
+// (mux/src/config.zig). Unset, it looks beside itself and on PATH.
+const FrontDoorEnv = "ROOK_FRONT_DOOR"
+
+// FrontDoor is the `rook` binary for this install: this one, when this
+// is rook, else the `rook` beside this binary (rookd). Empty when
+// there is none to point at.
+func FrontDoor() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	if filepath.Base(exe) == "rook" {
+		return exe
+	}
+	if cand := filepath.Join(filepath.Dir(exe), "rook"); exists(cand) {
+		return cand
+	}
+	return ""
+}
+
+// Env is this process's environment with the front door named, for
+// launching an engine.
+func Env() []string {
+	env := os.Environ()
+	if os.Getenv(FrontDoorEnv) != "" {
+		return env
+	}
+	if fd := FrontDoor(); fd != "" {
+		env = append(env, FrontDoorEnv+"="+fd)
+	}
+	return env
+}
+
+// Reload hands a compiled config to the running engine.
+func Reload(doc []byte) error {
+	cmd := exec.Command(EnginePath(), "reload")
+	cmd.Stdin = strings.NewReader(string(doc))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 func run(args ...string) (string, error) {
 	out, err := exec.Command(EnginePath(), args...).CombinedOutput()
 	if err != nil {
