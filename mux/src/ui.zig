@@ -32,6 +32,30 @@ pub const subtext0: Rgb = .{ .r = 0xa6, .g = 0xad, .b = 0xc8 };
 /// glass that cannot show them. The hierarchy survives either way.
 pub const Glyphs = enum { unicode, ascii };
 
+/// The ends of a chip or a tab. The last three are Nerd Font glyphs.
+pub const Cap = enum {
+    plain,
+    bracket,
+    powerline,
+    round,
+    slant,
+
+    pub fn parse(s: []const u8) Cap {
+        return std.meta.stringToEnum(Cap, s) orelse .plain;
+    }
+
+    /// The left and right ends, or null for plain padding.
+    pub fn ends(self: Cap) ?[2][]const u8 {
+        return switch (self) {
+            .plain => null,
+            .bracket => .{ "[", "]" },
+            .powerline => .{ "\u{e0b2}", "\u{e0b0}" },
+            .round => .{ "\u{e0b6}", "\u{e0b4}" },
+            .slant => .{ "\u{e0ba}", "\u{e0bc}" },
+        };
+    }
+};
+
 /// The semantic roles. One instance per server, built from the
 /// palette and the configured accent; every chrome painter reads it.
 pub const Theme = struct {
@@ -80,26 +104,20 @@ pub const Theme = struct {
 
     glyphs: Glyphs = .unicode,
 
+    // ---- shape (style.zig sets these from the stylesheet)
+    /// the scope chip's fill and ink
+    chip_bg: Rgb = chromepkg.surface0,
+    chip_fg: Rgb = chromepkg.text,
+    /// the caps on the scope chip and on the selected tab
+    chip_cap: Cap = .plain,
+    tab_cap: Cap = .plain,
+    /// between the chip and the tabs; "" is none (null: the glyph's)
+    separator: ?[]const u8 = null,
+    /// what the bars' empty cells are drawn with
+    fill: []const u8 = " ",
+
     pub fn init(accent: Rgb, glyphs: Glyphs) Theme {
         return .{ .accent = accent, .border_focused = accent, .glyphs = glyphs };
-    }
-
-    /// The same theme at home: home's colour is the accent — the chip,
-    /// focus, the selected tab — and the chrome grounds and edges are
-    /// pulled toward it, so both bars and every seam say you are in
-    /// another room. Nothing moves and no pane changes size; only the
-    /// chrome's colour does. With `color` the accent itself, only the
-    /// grounds shift.
-    pub fn home(self: Theme, color: Rgb) Theme {
-        var t = self;
-        t.accent = color;
-        t.border_focused = color;
-        t.chrome = toward(self.chrome, color, 26);
-        t.raised = toward(self.raised, color, 32);
-        t.selection = toward(self.selection, color, 32);
-        t.border_subtle = toward(self.border_subtle, color, 30);
-        t.border = toward(self.border, color, 40);
-        return t;
     }
 
     /// The same theme under a scrim: every ink and every fill pulled
@@ -267,24 +285,25 @@ pub const Buf = struct {
 
 // ---- the scope chip ----
 
-pub const Scope = enum {
-    /// the system: rook's outermost scope, at altitude
-    global,
-    /// a space: the one you are in, or one named in a figure
-    space,
-};
-
 /// The scope chip. The system's is the one place the accent is a
 /// fill — confident, bounded, and only at altitude. A space's is the
 /// same shape one step up from the chrome: bounded, quiet, never the
 /// accent, so a space named `rook` and the system never look alike.
 /// Returns the columns spent.
-pub fn scopeChip(out: anytype, t: *const Theme, name: []const u8, scope: Scope) u16 {
-    const st: Style = switch (scope) {
-        .global => .{ .fg = t.on_accent, .bg = t.accent, .bold = true },
-        .space => .{ .fg = t.primary, .bg = t.raised, .bold = true },
-    };
+pub fn scopeChip(out: anytype, t: *const Theme, name: []const u8) u16 {
+    const st: Style = .{ .fg = t.chip_fg, .bg = t.chip_bg, .bold = true };
     var n: u16 = 0;
+    if (t.chip_cap.ends()) |e| {
+        // a cap is the chip's fill on the bar's ground; a bracket is
+        // the accent's, around a padded chip
+        const cap: Style = if (t.chip_cap == .bracket) .{ .fg = t.accent, .bg = t.chrome } else .{ .fg = t.chip_bg, .bg = t.chrome };
+        n += ink(out, cap, e[0]);
+        n += ink(out, st, " ");
+        n += ink(out, st, name);
+        n += ink(out, st, " ");
+        n += ink(out, cap, e[1]);
+        return n;
+    }
     n += ink(out, st, " ");
     n += ink(out, st, name);
     n += ink(out, st, " ");
@@ -294,10 +313,13 @@ pub fn scopeChip(out: anytype, t: *const Theme, name: []const u8, scope: Scope) 
 /// The separator between the scope and what it holds: ` │ ` in the
 /// muted ink on the chrome.
 pub fn separator(out: anytype, t: *const Theme, on: Rgb) u16 {
+    const g = t.separator orelse glyph(t, .separator);
     var n: u16 = 0;
     n += ink(out, .{ .fg = t.muted, .bg = on }, " ");
-    n += ink(out, .{ .fg = t.muted, .bg = on }, glyph(t, .separator));
-    n += ink(out, .{ .fg = t.muted, .bg = on }, " ");
+    if (g.len > 0) {
+        n += ink(out, .{ .fg = t.muted, .bg = on }, g);
+        n += ink(out, .{ .fg = t.muted, .bg = on }, " ");
+    }
     return n;
 }
 
@@ -332,6 +354,7 @@ pub const short_label: u16 = 8;
 /// Columns a tab takes at a fit, without drawing it.
 pub fn tabWidth(t: *const Theme, tb: Tab, fit: Fit) u16 {
     var n: u16 = 2; // the padding either side
+    if (tb.selected and t.tab_cap.ends() != null) n += 2;
     if (tb.index != null) n += 2; // "1 "
     const collapsed = fit == .collapsed and !tb.selected;
     if (!collapsed) {
@@ -353,6 +376,9 @@ pub fn tab(out: anytype, t: *const Theme, tb: Tab, fit: Fit) u16 {
     const edge: ?Rgb = if (tb.selected) t.accent else null;
     const pad: Style = .{ .bg = bg, .underline = edge };
     var n: u16 = 0;
+    const caps = if (tb.selected) t.tab_cap.ends() else null;
+    const cap_st: Style = if (t.tab_cap == .bracket) .{ .fg = t.accent, .bg = t.chrome } else .{ .fg = bg, .bg = t.chrome };
+    if (caps) |e| n += ink(out, cap_st, e[0]);
     n += ink(out, pad, " ");
     if (tb.index) |i| {
         var ib: [2]u8 = .{ '0' + i, ' ' };
@@ -372,6 +398,7 @@ pub fn tab(out: anytype, t: *const Theme, tb: Tab, fit: Fit) u16 {
         n += ink(out, .{ .fg = markInk(t, tb.mark), .bg = bg, .bold = tb.mark == .attention, .underline = edge }, markGlyph(t, tb.mark));
     }
     n += ink(out, pad, " ");
+    if (caps) |e| n += ink(out, cap_st, e[1]);
     return n;
 }
 
@@ -440,6 +467,15 @@ pub fn padTo(out: anytype, t: *const Theme, vis: u16, cols: u16) void {
     out.put("\x1b[0m");
 }
 
+/// The bar's ground from here to `to`: the fill, in the border's ink.
+pub fn fillTo(out: anytype, t: *const Theme, vis: u16, to: u16) u16 {
+    var b: [64]u8 = undefined;
+    out.put((Style{ .fg = t.border, .bg = t.chrome }).sgr(&b));
+    var i = vis;
+    while (i < to) : (i += 1) out.put(t.fill);
+    return to -| vis;
+}
+
 // ---- boxes and rows, for frames ----
 
 /// The edge a box wears.
@@ -501,8 +537,8 @@ test "marks: attention outranks work outranks unread, and ascii has a glyph for 
     try std.testing.expectEqualStrings("", markGlyph(&a, .none));
 }
 
-test "the global chip is the accent fill and a space's chip is not" {
-    const t = Theme.init(chromepkg.mauve, .unicode);
+test "the chip wears the theme's chip colours, and its caps" {
+    var t = Theme.init(chromepkg.mauve, .unicode);
     const L = struct {
         list: std.ArrayList(u8),
         fn put(self: *@This(), s: []const u8) void {
@@ -510,11 +546,14 @@ test "the global chip is the accent fill and a space's chip is not" {
         }
     };
     var b1: [256]u8 = undefined;
-    var g: L = .{ .list = .initBuffer(&b1) };
-    _ = scopeChip(&g, &t, "rook", .global);
+    var plain: L = .{ .list = .initBuffer(&b1) };
+    try std.testing.expectEqual(@as(u16, 6), scopeChip(&plain, &t, "rook"));
+    try std.testing.expect(std.mem.indexOf(u8, plain.list.items, "48;2;203;166;247") == null);
+    t.chip_bg = t.accent;
+    t.chip_cap = .powerline;
     var b2: [256]u8 = undefined;
-    var s: L = .{ .list = .initBuffer(&b2) };
-    _ = scopeChip(&s, &t, "rook", .space);
-    try std.testing.expect(std.mem.indexOf(u8, g.list.items, "48;2;203;166;247") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s.list.items, "48;2;203;166;247") == null);
+    var capped: L = .{ .list = .initBuffer(&b2) };
+    try std.testing.expectEqual(@as(u16, 8), scopeChip(&capped, &t, "rook"));
+    try std.testing.expect(std.mem.indexOf(u8, capped.list.items, "48;2;203;166;247") != null);
+    try std.testing.expect(std.mem.indexOf(u8, capped.list.items, "\u{e0b0}") != null);
 }

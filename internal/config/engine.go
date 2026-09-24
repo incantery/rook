@@ -48,6 +48,7 @@ type Engine struct {
 	Companion string            `json:"companion,omitempty"`
 	Keys      map[string]string `json:"keys,omitempty"`
 	Home      EngineHome        `json:"home"`
+	Style     EngineStyle       `json:"style"`
 }
 
 // EngineHome is [home] with its short and long pane forms made one.
@@ -79,6 +80,7 @@ func (c Config) Compile() Engine {
 		Mux:       m,
 		Companion: c.Companion.program(),
 		Keys:      c.Keys,
+		Style:     c.compileStyle(),
 		Home: EngineHome{
 			OnEmpty: c.Home.OnEmpty,
 			Color:   c.Home.Color,

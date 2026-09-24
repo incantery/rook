@@ -109,7 +109,9 @@ it, what is exceptional here.
 - In a space: the space's chip (`raised`, `primary`, bold), the
   separator, the tabs, `+`, and the corner: the home key and `home`
   (or `copy`, `zoom` while those are on).
-- At home: the same bar in another room's colours (`Theme.home`):
+- Every role and the chip's shape below is a default a stylesheet
+  rule may say otherwise (docs/style.md); these are rook's own.
+- At home: the same bar in another room's colours (`style.builtin`):
   home's colour (`[home] color`, else the accent) is the accent, and
   `chrome`, `raised`, `selection` and the edges are pulled toward it —
   26%, 32%, 32%, 30–40% — so both bars and every seam change together.

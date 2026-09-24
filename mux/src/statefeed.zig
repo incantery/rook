@@ -11,6 +11,7 @@
 //! `sv` is a *server.Server; taken as anytype so the server that
 //! imports this file does not have to be imported back.
 const std = @import("std");
+const stylepkg = @import("style.zig");
 
 /// Schema version. Readers accept newer and skip what they don't know.
 pub const version: u32 = 1;
@@ -71,6 +72,65 @@ fn foundRow(gpa: std.mem.Allocator, out: *std.ArrayList(u8), it: anytype, origin
 }
 
 /// Build the snapshot into `out` (cleared first).
+fn styleJson(sv: anytype, out: *std.ArrayList(u8)) void {
+    const gpa = sv.gpa;
+    _ = sv.refreshFacts();
+    const f = sv.facts();
+    const r = stylepkg.resolve(&sv.sheet, f);
+    out.print(gpa, ",\"style\":{{\"facts\":{{\"home\":{s},\"workspace\":", .{boolStr(f.home)}) catch return;
+    str(gpa, out, f.workspace);
+    inline for (.{ "dir", "repo", "branch", "program" }) |k| {
+        out.appendSlice(gpa, ",\"" ++ k ++ "\":") catch return;
+        str(gpa, out, @field(f, k));
+    }
+    out.appendSlice(gpa, "},\"rules\":[") catch return;
+    var i: usize = 0;
+    while (i < r.n_rules) : (i += 1) {
+        if (i > 0) out.append(gpa, ',') catch return;
+        const rook = i < stylepkg.builtin.len;
+        out.print(gpa, "{{\"source\":\"{s}\",\"index\":{d},\"matched\":{s}}}", .{
+            if (rook) "rook" else "config",
+            if (rook) i else i - stylepkg.builtin.len,
+            boolStr(r.matched[i]),
+        }) catch return;
+    }
+    out.appendSlice(gpa, "],\"computed\":{") catch return;
+    var first = true;
+    inline for (std.meta.fields(stylepkg.Props)) |fld| {
+        if (@field(r.props, fld.name)) |v| {
+            if (!first) out.append(gpa, ',') catch return;
+            first = false;
+            out.appendSlice(gpa, "\"" ++ fld.name ++ "\":") catch return;
+            if (@TypeOf(v) == u8) {
+                out.print(gpa, "{d}", .{v}) catch return;
+            } else if (comptime std.mem.eql(u8, fld.name, "label") or std.mem.eql(u8, fld.name, "bar_label")) {
+                var lb: [128]u8 = undefined;
+                str(gpa, out, stylepkg.render(&lb, v, f, r.props.icon orelse ""));
+            } else str(gpa, out, v);
+        }
+    }
+    // and where each came from: "rook:N", "config:N", "style"
+    out.appendSlice(gpa, "},\"from\":{") catch return;
+    first = true;
+    inline for (std.meta.fields(stylepkg.Props), 0..) |fld, fi| {
+        const src = r.from[fi];
+        if (src != .none) {
+            if (!first) out.append(gpa, ',') catch return;
+            first = false;
+            out.appendSlice(gpa, "\"" ++ fld.name ++ "\":") catch return;
+            switch (src) {
+                .base => out.appendSlice(gpa, "\"style\"") catch return,
+                .rule => |ri| {
+                    const rook = ri < stylepkg.builtin.len;
+                    out.print(gpa, "\"{s}:{d}\"", .{ if (rook) "rook" else "config", if (rook) ri else ri - stylepkg.builtin.len }) catch return;
+                },
+                .none => {},
+            }
+        }
+    }
+    out.appendSlice(gpa, "}}") catch return;
+}
+
 pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
     const gpa = sv.gpa;
     out.clearRetainingCapacity();
@@ -94,6 +154,11 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
     }) catch return;
     // The scope: home, the one workspace outside the list, or a space.
     out.print(gpa, ",\"scope\":\"{s}\"", .{if (sv.atHome()) "home" else "space"}) catch return;
+    // The stylesheet's working (docs/style.md): the facts it sees for
+    // the workspace on the glass, which rules held — rook's own first,
+    // then the config's, in order — and what won. Drift: the facts move
+    // with the focused pane's directory and program.
+    if (form.drift) styleJson(sv, out);
     // The calm bar, so a second glass lays its rows out the same way.
     out.print(gpa, ",\"bar\":{s}", .{boolStr(sv.barOn())}) catch return;
 

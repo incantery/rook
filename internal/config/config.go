@@ -32,6 +32,14 @@ type Config struct {
 	// Load only refuses what the engine would skip (keys.go).
 	Keys map[string]string `toml:"keys"`
 	Home Home              `toml:"home"`
+	// Style is [style] and its [[style.match]] rules (style.go).
+	Style StyleTable `toml:"style"`
+}
+
+// StyleTable is [style]: the looks everywhere, and the rules over them.
+type StyleTable struct {
+	Style
+	Match []Match `toml:"match"`
 }
 
 // Namer is the [namer] table: what gives tabs their names once the
@@ -205,6 +213,9 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
 	if err := checkKeys(c.Keys); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", path, err)
+	}
+	if err := checkStyle(c.Style.Style, c.Style.Match); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
 	if err := checkHome(c.Home); err != nil {

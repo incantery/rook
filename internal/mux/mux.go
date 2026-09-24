@@ -113,6 +113,11 @@ func Reload(doc []byte) error {
 	return nil
 }
 
+// State is one state-feed snapshot, as the engine printed it.
+func State() (string, error) {
+	return run("state")
+}
+
 func run(args ...string) (string, error) {
 	out, err := exec.Command(EnginePath(), args...).CombinedOutput()
 	if err != nil {

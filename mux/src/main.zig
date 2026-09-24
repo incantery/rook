@@ -86,6 +86,7 @@ test {
     _ = @import("config.zig");
     _ = @import("keys.zig");
     _ = @import("sheet.zig");
+    _ = @import("style.zig");
     _ = @import("chrome.zig");
     _ = @import("companion.zig");
     _ = @import("ui.zig");

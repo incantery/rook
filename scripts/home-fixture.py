@@ -390,6 +390,50 @@ try:
 finally:
     r.close()
 
+# ---- 12: the stylesheet: rook's rules, then [style], then matches
+STYLE = """[style]
+fill = "╌"
+[[style.match]]
+repo = "github.com/acme/*"
+bar = "#302030"
+chip = "bracket"
+label = "{REPO}:{branch}"
+[[style.match]]
+home = true
+label = "{icon} HOME"
+"""
+r = Rook(tag="style", conf=STYLE, dirs=("app/.git", "app/src"), cols=100, rows=16)
+try:
+    with open(r.root + "/app/.git/HEAD", "w") as f:
+        f.write("ref: refs/heads/trunk\n")
+    with open(r.root + "/app/.git/config", "w") as f:
+        f.write('[remote "origin"]\n\turl = git@github.com:acme/app.git\n')
+    check("home keeps rook's own look, under a file rule's label", top(r).strip().startswith("⌂ HOME"), repr(top(r)[:20]))
+    r.rook("new", "-q", "app", r.root + "/app/src")
+    r.rook("switch", "app")
+    r.settle(1.0)
+    r.snap("12-style-repo")
+    t0 = top(r)
+    check("a repo rule's label, over the facts: {REPO}:{branch}", t0.strip().startswith("[ APP:trunk ]"), repr(t0[:24]))
+    check("its bar colour is the bar's ground", r.screen.buffer[0][40].bg == "302030", r.screen.buffer[0][40].bg)
+    check("[style] fill draws the bar's empty cells", "╌" in t0, repr(t0))
+    code, out = r.front("style", "--json")
+    ex = json.loads(out) if code == 0 else {}
+    facts = ex.get("facts", {})
+    check("rook style sees the repo and branch from .git, no git process", facts.get("repo") == "github.com/acme/app" and facts.get("branch") == "trunk", facts)
+    matched = [(x["source"], x["index"], x["matched"]) for x in ex.get("rules", [])]
+    check("and says which rules held", matched == [("rook", 0, False), ("config", 0, True), ("config", 1, False)], matched)
+    check("and where each property came from", ex.get("from", {}).get("bar") == "config:0" and ex.get("from", {}).get("fill") == "style", ex.get("from"))
+    code, out = r.front("style")
+    check("the human form lists the rules with their conditions", "✓ config:0   repo = \"github.com/acme/*\"" in out, out)
+    r.rook("switch", "main")
+    r.settle(0.8)
+    t1 = top(r)
+    check("a space no rule matches keeps rook's own chip", t1.strip().startswith("main "), repr(t1[:12]))
+    check("…and the ground", r.screen.buffer[0][40].bg != "302030")
+finally:
+    r.close()
+
 # ---- 09: the prefix table is the config's
 r = Rook(tag="keys", conf='[keys]\ne = "popup 50x50 cat"\n"=" = "split-right"\nx = ""\n')
 try:

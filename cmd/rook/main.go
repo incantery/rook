@@ -59,6 +59,7 @@ const usage = `rook — the multiplexer, owned
   rook ls                 list workspaces
   rook config [check|json|path]  is rook.toml good; the engine's half, compiled; where it is
   rook reload             hand the running server rook.toml as it is now (rookd does this on save)
+  rook style [--json]     the stylesheet explained: the facts, which rules held, what won and why
   rook new [-q] <name> [cwd] [-- cmd...]
                           create/switch workspace; -q makes it without moving you;
                           after -- is what its first pane is born running
@@ -156,6 +157,8 @@ func main() {
 		err = runConfig(args[1:])
 	case args[0] == "reload":
 		err = runReload()
+	case args[0] == "style":
+		err = runStyle(args[1:])
 	case muxVerbs[args[0]]:
 		execMux(args)
 	default:

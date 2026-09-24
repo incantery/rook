@@ -14,6 +14,7 @@ const std = @import("std");
 const chrome = @import("chrome.zig");
 const keyspkg = @import("keys.zig");
 const ptypkg = @import("pty.zig");
+const stylepkg = @import("style.zig");
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 extern "c" fn pipe(fds: *[2]ptypkg.fd_t) c_int;
@@ -108,9 +109,6 @@ pub const Home = struct {
     };
 
     stay: bool = false,
-    /// Home's colour: its accent, and what its chrome is tinted
-    /// toward. Null is the config's accent.
-    color: ?chrome.Rgb = null,
     dir: Str = .{},
     windows: [max_windows]Window = @splat(.{}),
     windows_n: usize = 0,
@@ -168,7 +166,6 @@ const Doc = struct {
     keys: ?std.json.ArrayHashMap([]const u8) = null,
     home: struct {
         on_empty: []const u8 = "",
-        color: []const u8 = "",
         dir: []const u8 = "",
         windows: []const struct {
             name: []const u8 = "",
@@ -223,7 +220,6 @@ pub fn fromJson(gpa: std.mem.Allocator, bytes: []const u8) !Config {
 
     const h = &out.home;
     h.stay = std.mem.eql(u8, d.home.on_empty, "stay");
-    if (d.home.color.len > 0) h.color = chrome.Rgb.parse(d.home.color) orelse chrome.named(d.home.color);
     h.dir = h.keep(d.home.dir);
     for (d.home.windows) |w| {
         if (h.windows_n == Home.max_windows) break;
@@ -256,7 +252,7 @@ fn joinInto(names: []const []const u8, buf: []u8) usize {
 
 /// The config at boot: the front door's compiled document, or the
 /// defaults and the reason there is none, for the calm bar to say.
-pub const Loaded = struct { config: Config, err: []const u8 = "" };
+pub const Loaded = struct { config: Config, sheet: stylepkg.Sheet = .{}, err: []const u8 = "" };
 
 pub fn load(gpa: std.mem.Allocator) Loaded {
     const bytes = fetch(gpa) catch |e| return .{ .config = Config.defaults(), .err = switch (e) {
@@ -265,7 +261,8 @@ pub fn load(gpa: std.mem.Allocator) Loaded {
     } };
     defer gpa.free(bytes);
     const c = fromJson(gpa, bytes) catch return .{ .config = Config.defaults(), .err = "config: unreadable (rook config json); defaults" };
-    return .{ .config = c };
+    const sheet = stylepkg.Sheet.parse(gpa, bytes) catch return .{ .config = c, .err = "config: [style] unreadable; rook's own looks" };
+    return .{ .config = c, .sheet = sheet };
 }
 
 /// Run `rook config json` and keep its stdout. The front door is
@@ -385,7 +382,6 @@ test "a compiled document, read" {
     try std.testing.expectEqual(keyspkg.Verb.split_right, c.keys.get('v').verb); // defaults stay under
     const h = c.home;
     try std.testing.expect(h.stay);
-    try std.testing.expectEqual(chrome.Rgb{ .r = 0x11, .g = 0x22, .b = 0x33 }, h.color.?);
     try eq("~/work", h.str(h.dir));
     try std.testing.expectEqual(@as(usize, 2), h.windows_n);
     try eq("me", h.str(h.windows[0].name));

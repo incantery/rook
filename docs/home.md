@@ -43,11 +43,11 @@ a workspace makes that question the config's.
   feed lists it among `workspaces` with `"home": true` and says
   `"scope": "home"` while it is showing; `mux.Current()` reports no
   space from home.
-- **It looks like another room.** The chrome wears home's colour —
-  `[home] color`, a hex colour or an ANSI name, the accent when unset
-  (`ui.Theme.home`): both bars stand on a ground pulled toward it, the
-  seams and the focused edge are in it, and it is the accent while
-  home is showing. The chip reads `⌂ home` in its fill, the calm bar
+- **It looks like another room.** Rook's one style rule of its own
+  (`style.builtin`, docs/style.md) is home's: the chip in the accent,
+  both bars and the seams tinted toward it, `⌂ home` at both edges.
+  `[home] color` sets that accent (a rule `home = true, accent = …`);
+  any `[[style.match]]` with `home = true` says more, later. The chip reads `⌂ home` in its fill, the calm bar
   leads with `⌂ home`, and the corner names where the home key goes:
   `` `o main `` at home, `` `o home `` in a space. Only colour changes:
   no row appears and no pane is resized on the way in or out. The

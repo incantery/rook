@@ -57,6 +57,16 @@ was not the shell, or `rook rename` — and rook never renames it; the
 actor that claimed a pane in it rides after the name, `deploy · main ◐`;
 the tool is the bar's word, never the tab's.
 
+**Style.** The chrome is a stylesheet: `[style]` everywhere, then
+`[[style.match]]` rules on the workspace on the glass — `home`,
+`workspace`, `dir`, `repo` (the origin, `github.com/grafana/*`),
+`branch`, `program` — each setting any of the theme's colours, the
+chip's and tabs' caps (`round`, `powerline`, …), the separator, a fill
+pattern for the bars, and the chip's and calm bar's words as templates
+(`label = "{REPO}:{branch}"`). A later rule wins, property by property;
+rook's only rule of its own is home's look. `rook style` explains it —
+the facts, which rules held, what won and from where. `docs/style.md`.
+
 **The frame.** One tab bar across the top — the space's name in the
 scope slot, then its tabs — the work at full width under it, and one
 calm bar across the bottom. No sidebar: the legacy spaces/agents

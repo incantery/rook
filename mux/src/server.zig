@@ -16,10 +16,13 @@ const proto = @import("proto.zig");
 const config = @import("config.zig");
 const keyspkg = @import("keys.zig");
 const sheet = @import("sheet.zig");
+const stylepkg = @import("style.zig");
 const ui = @import("ui.zig");
 
 // CLOCK_UPTIME_RAW = 8 on macOS; libc-only monotonic clock.
 extern "c" fn clock_gettime_nsec_np(clock_id: c_int) u64;
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+
 fn nowUs() i64 {
     return @intCast(clock_gettime_nsec_np(8) / 1_000);
 }
@@ -424,6 +427,27 @@ pub const Server = struct {
     /// `home`: it is made when it is gone to, and left out of every
     /// list of spaces.
     home_conf: config.Home = .{},
+    /// The config's stylesheet, and the look it resolves to for the
+    /// workspace on the glass, this frame (style.zig).
+    sheet: stylepkg.Sheet = .{},
+    resolved: stylepkg.Resolved = .{},
+    /// The facts the stylesheet asks about, kept between frames: the
+    /// focused pane's program and directory, and the repository that
+    /// directory is in — read from its .git when the directory changes,
+    /// and again every couple of seconds for a branch that moved.
+    fact_ws: [64]u8 = undefined,
+    fact_ws_len: usize = 0,
+    fact_prog: [64]u8 = undefined,
+    fact_prog_len: usize = 0,
+    fact_dir: [1024]u8 = undefined,
+    fact_dir_len: usize = 0,
+    fact_git: stylepkg.Git = .{},
+    fact_git_dir: [1024]u8 = undefined,
+    fact_git_dir_len: usize = 0,
+    fact_git_ms: i64 = 0,
+    fact_home: bool = false,
+    fact_key: u64 = std.math.maxInt(u64),
+    fact_ms: i64 = 0,
     /// A second frame builder for what the server paints over the
     /// panes itself: the altitude view, the ownership gate, the
     /// inspector. Its bytes ride the main frame as `Chrome.overlay`.
@@ -516,6 +540,7 @@ pub const Server = struct {
             .keys = loaded.config.keys,
             .conf = loaded.config.mux,
             .home_conf = loaded.config.home,
+            .sheet = loaded.sheet,
             .wake_r = pipefds[0],
             .wake_w = pipefds[1],
             .frame = renderpkg.Frame.init(gpa),
@@ -580,6 +605,7 @@ pub const Server = struct {
         self.pin_origins.deinit(self.gpa);
         self.frame.deinit();
         self.over.deinit();
+        self.sheet.deinit();
         self.side.deinit();
         self.agents_merge.deinit(self.gpa);
         self.spaces_merge.deinit(self.gpa);
@@ -835,6 +861,14 @@ pub const Server = struct {
             self.sendTo(c, @intFromEnum(proto.s2c.text), why);
             return;
         };
+        const new_sheet = stylepkg.Sheet.parse(self.gpa, payload) catch {
+            self.sendTo(c, @intFromEnum(proto.s2c.text), "error: [style] unreadable");
+            return;
+        };
+        self.sheet.deinit();
+        self.sheet = new_sheet;
+        self.fact_git_ms = 0;
+        self.fact_key = std.math.maxInt(u64);
         self.prefix_key = cfg.prefix;
         self.keys = cfg.keys;
         self.conf = cfg.mux;
@@ -1098,10 +1132,12 @@ pub const Server = struct {
                 if (pn.pendingIn()) try fds.append(self.gpa, .{ .fd = pn.pty.master, .events = ptypkg.POLLOUT });
             }
             const job_fds_at = fds.items.len;
+            // idle, the loop still wakes twice a second: the stylesheet's
+            // facts are looked at on that beat
             var timeout: c_int = if (self.pending)
                 @intCast(@max(0, frame_gap_ms - (nowMs() - last_frame)))
             else
-                1000;
+                500;
             // wake in time to fire a pending post-resize refresh
             if (self.refresh_at != 0) {
                 const dt = self.refresh_at - nowMs();
@@ -1161,6 +1197,11 @@ pub const Server = struct {
                 if (p.bootIfReady(nowMs())) self.pending = true;
             }
             if (self.sessions.items.len == 0 or self.shutdown) return;
+
+            // The stylesheet's facts move without output: a shell that
+            // cd'd, a branch checked out elsewhere. Looked at twice a
+            // second; only a change earns a frame.
+            if (nowMs() - self.fact_ms > 250) _ = self.refreshFacts();
 
             // a resize's SIGWINCH repaint has had time to arrive: force
             // one clean full frame so the settled result is always shown
@@ -3354,9 +3395,12 @@ pub const Server = struct {
         // frame, so the popup is the one lit plane, bars included.
         const lit = self.ui;
         defer self.ui = lit;
-        // Home is another room: its chrome, seams and accent wear home's
-        // colour (ui.Theme.home), and nothing else about the frame moves.
-        const room = if (self.atHome()) lit.home(self.home_conf.color orelse lit.accent) else lit;
+        // The stylesheet's look for the workspace on the glass (style.zig):
+        // rook's own rules — home's room — then the config's. Only
+        // colour, glyphs and words change; nothing is resized.
+        _ = self.refreshFacts();
+        self.resolved = stylepkg.resolve(&self.sheet, self.facts());
+        const room = stylepkg.theme(self.resolved.props, lit);
         self.frame.accent = room.border_focused;
         self.frame.border = room.border;
         self.over.accent = room.border_focused;
@@ -3881,11 +3925,11 @@ pub const Server = struct {
         const corner_cols = chromepkg.cols(corner) + 1;
 
         {
-            // home wears its colour, and its mark: it is not one of
-            // the spaces, and a space named `home` never looks like it
-            var hb: [24]u8 = undefined;
-            const chip = if (at_home) (std.fmt.bufPrint(&hb, "{s} home", .{ui.glyph(t, .home)}) catch "home") else sc;
-            vis += ui.scopeChip(out, t, chip, if (at_home) .global else .space);
+            // the chip says the style's label — `{name}` unless a rule
+            // says otherwise; home's own rule says `{icon} home`
+            var hb: [64]u8 = undefined;
+            const chip = if (self.resolved.props.label) |tmpl| stylepkg.render(&hb, tmpl, self.facts(), self.resolved.props.icon orelse "") else sc;
+            vis += ui.scopeChip(out, t, if (chip.len > 0) chip[0..@min(chip.len, 40)] else sc);
             vis += ui.separator(out, t, t.chrome);
 
             // the tabs, as components
@@ -3975,9 +4019,7 @@ pub const Server = struct {
 
         // the corner, right-aligned, muted
         if (vis + corner_cols + 1 <= avail) {
-            var b: [64]u8 = undefined;
-            out.put((ui.Style{ .bg = t.chrome }).sgr(&b));
-            while (vis < avail - corner_cols) : (vis += 1) out.put(" ");
+            vis += gap(out, t, vis, avail - corner_cols);
             vis += ui.ink(out, .{ .fg = t.muted, .bg = t.chrome }, corner);
         }
         ui.padTo(out, t, vis, avail);
@@ -4172,13 +4214,17 @@ pub const Server = struct {
         var vis: u16 = 0;
         vis += ui.ink(out, .{ .bg = t.chrome }, " ");
 
-        // At home the bar says so first, in home's colour: the bottom
-        // edge of the glass is as sure where you are as the top.
+        // The style's bar label first, in the accent: home's own rule
+        // says `{icon} home`, so the bottom edge of the glass is as sure
+        // where you are as the top.
         var left_n: usize = 0;
-        if (self.atHome()) {
-            var hb: [24]u8 = undefined;
-            vis += ui.module(out, t, std.fmt.bufPrint(&hb, "{s} home", .{ui.glyph(t, .home)}) catch "home", t.accent, true);
-            left_n += 1;
+        if (self.resolved.props.bar_label) |tmpl| {
+            var hb: [64]u8 = undefined;
+            const said = stylepkg.render(&hb, tmpl, self.facts(), self.resolved.props.icon orelse "");
+            if (said.len > 0) {
+                vis += ui.module(out, t, said, t.accent, true);
+                left_n += 1;
+            }
         }
 
         var right_buf: [768]u8 = undefined;
@@ -4252,9 +4298,7 @@ pub const Server = struct {
         }
 
         if (right_w > 0 and vis + right_w + 2 <= cols) {
-            var b: [64]u8 = undefined;
-            out.put((ui.Style{ .bg = t.chrome }).sgr(&b));
-            while (vis < cols - right_w - 1) : (vis += 1) out.put(" ");
+            vis += gap(out, t, vis, cols - right_w - 1);
             out.put(right_list.items);
             vis += right_w;
         }
@@ -4666,6 +4710,81 @@ pub const Server = struct {
         f.put("\x1b[0m");
     }
 
+    // ---- the stylesheet's facts ----
+
+    /// What the stylesheet asks about, for the workspace on the glass.
+    pub fn facts(self: *Server) stylepkg.Facts {
+        return .{
+            .home = self.fact_home,
+            .workspace = self.fact_ws[0..self.fact_ws_len],
+            .dir = self.fact_dir[0..self.fact_dir_len],
+            .repo = self.fact_git.repoSlice(),
+            .branch = self.fact_git.branchSlice(),
+            .program = self.fact_prog[0..self.fact_prog_len],
+            .home_dir = if (getenv("HOME")) |h| std.mem.span(h) else "",
+        };
+    }
+
+    /// Bring the facts up to date: the workspace, and the focused
+    /// pane's program and directory, each frame (two syscalls); the
+    /// repository when the directory changed, or every 2s.
+    /// True when a fact changed, so the loop's own look can ask for a
+    /// frame the output never would.
+    pub fn refreshFacts(self: *Server) bool {
+        if (self.sessions.items.len == 0) return false;
+        // a frame every 8ms under heavy output must not cost two
+        // syscalls each: the same pane in the same workspace is looked
+        // at again after 250ms, a move of focus at once
+        const key = (@as(u64, self.cur_sess) << 32) | self.focusedId();
+        if (key == self.fact_key and nowMs() - self.fact_ms < 250) return false;
+        self.fact_key = key;
+        self.fact_ms = nowMs();
+        var before: [1400]u8 = undefined;
+        const was = self.factSig(&before);
+        const sn = self.sess();
+        self.fact_home = sn.home;
+        const label = sn.label();
+        self.fact_ws_len = @min(label.len, self.fact_ws.len);
+        @memcpy(self.fact_ws[0..self.fact_ws_len], label[0..self.fact_ws_len]);
+        self.fact_prog_len = 0;
+        self.fact_dir_len = 0;
+        if (self.focusedPane()) |p| {
+            var nb: [64]u8 = undefined;
+            if (p.fgName(&nb)) |n| {
+                self.fact_prog_len = @min(n.len, self.fact_prog.len);
+                @memcpy(self.fact_prog[0..self.fact_prog_len], n[0..self.fact_prog_len]);
+            }
+            var cb: [1024]u8 = undefined;
+            if (p.fgCwd(&cb)) |d| {
+                self.fact_dir_len = @min(d.len, self.fact_dir.len);
+                @memcpy(self.fact_dir[0..self.fact_dir_len], d[0..self.fact_dir_len]);
+            }
+        }
+        const dir = self.fact_dir[0..self.fact_dir_len];
+        const moved = !std.mem.eql(u8, dir, self.fact_git_dir[0..self.fact_git_dir_len]);
+        if (moved or nowMs() - self.fact_git_ms > 2000) {
+            self.fact_git = if (dir.len > 0) stylepkg.gitOf(dir) else .{};
+            @memcpy(self.fact_git_dir[0..dir.len], dir);
+            self.fact_git_dir_len = dir.len;
+            self.fact_git_ms = nowMs();
+        }
+        var after: [1400]u8 = undefined;
+        const moved_any = !std.mem.eql(u8, was, self.factSig(&after));
+        // whoever looked — a frame, the feed, the loop — the look may
+        // have changed with the facts, and the glass should show it
+        if (moved_any) {
+            self.full = true;
+            self.pending = true;
+        }
+        return moved_any;
+    }
+
+    /// The facts as one string, to tell whether they moved.
+    fn factSig(self: *Server, buf: []u8) []const u8 {
+        const f = self.facts();
+        return std.fmt.bufPrint(buf, "{}\x00{s}\x00{s}\x00{s}\x00{s}\x00{s}", .{ f.home, f.workspace, f.dir, f.repo, f.branch, f.program }) catch "";
+    }
+
     // ---- home ----
     //
     // One workspace outside the list of spaces: a Session flagged
@@ -4845,6 +4964,23 @@ fn fmtCents(a: std.mem.Allocator, cents: u64) []const u8 {
 
 /// The prefix key as a person types it: the character itself, or
 /// `C-x` for a control key.
+/// The bar's ground between what it says: the style's fill, kept a
+/// cell clear of the words either side so a pattern never touches one.
+fn gap(out: ui.Buf, t: *const ui.Theme, from: u16, to: u16) u16 {
+    if (to <= from) return 0;
+    if (std.mem.eql(u8, t.fill, " ") or to - from < 3) {
+        var b: [64]u8 = undefined;
+        out.put((ui.Style{ .bg = t.chrome }).sgr(&b));
+        var i = from;
+        while (i < to) : (i += 1) out.put(" ");
+        return to - from;
+    }
+    var n: u16 = ui.ink(out, .{ .bg = t.chrome }, " ");
+    n += ui.fillTo(out, t, from + 1, to - 1);
+    n += ui.ink(out, .{ .bg = t.chrome }, " ");
+    return n;
+}
+
 fn prefixName(key: u8, buf: []u8) []const u8 {
     if (key >= 1 and key <= 26) return std.fmt.bufPrint(buf, "C-{c} ", .{key - 1 + 'a'}) catch "C-? ";
     if (key >= 0x20 and key < 0x7f) {
