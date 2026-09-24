@@ -125,14 +125,16 @@ func currentFrom(snapshot string) string {
 	var s struct {
 		Workspaces []struct {
 			Name    string `json:"name"`
+			Home    bool   `json:"home"`
 			Current bool   `json:"current"`
 		} `json:"workspaces"`
 	}
 	if json.Unmarshal([]byte(snapshot), &s) != nil {
 		return ""
 	}
+	// Home is not one of the spaces: from home, no space is current.
 	for _, w := range s.Workspaces {
-		if w.Current {
+		if w.Current && !w.Home {
 			return w.Name
 		}
 	}

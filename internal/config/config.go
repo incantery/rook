@@ -33,6 +33,7 @@ type Config struct {
 	// "key" = "verb [arg]". The engine reads it (mux/src/keys.zig);
 	// Load only refuses what the engine would skip (keys.go).
 	Keys map[string]string `toml:"keys"`
+	Home Home              `toml:"home"`
 }
 
 // Namer is the [namer] table: what gives tabs their names once the
@@ -69,35 +70,83 @@ type Worktree struct {
 }
 
 // Companion is the resident rook knows by name, so it can say when
-// and where it is open. Rook ships the slot; only the config names an
-// occupant, and without this table there is none. Which key opens its
-// panel is the [keys] table's (`t = "companion"`).
+// and where it is open (`rook companion`, the state feed's
+// `companion`). Rook ships the slot; only the config names an
+// occupant, and without this table there is none.
 type Companion struct {
-	// Command runs inside the popup. Required for the slot to exist.
+	// Command is what summons it; its first word names the program.
 	Command string `toml:"command"`
-	// Name labels the popup; defaults to the command's first word.
+	// Name labels it; the program when nothing better does.
 	Name string `toml:"name"`
 	// Key is accepted and ignored: nothing has read it since the tmux
-	// front door went. Bind the companion in [keys] instead.
+	// front door went. Bind keys in [keys].
 	Key string `toml:"key"`
 	// Program is the foreground program that means "the companion is
-	// open in this pane" — what the engine watches for so `rook
-	// companion` and the state feed can say when and where she is.
-	// Empty means the first word of Command (its basename), which is
-	// right whenever the command is her binary; set it when that word
+	// open in this pane" — what the engine watches for. Empty means
+	// the first word of Command (its basename); set it when that word
 	// is a wrapper, or to "" to turn the slot off. Read by the engine,
 	// declared here because this loader refuses keys it has not heard
 	// of and one file cannot have two ideas of what is valid.
 	Program string `toml:"program"`
-	// Ask is the intent door: what bare text typed at rook's home
-	// runs, with the text as its one argument. Engine-only, like
-	// Program, and declared here for the same reason.
-	Ask string `toml:"ask"`
-	// Chat is the companion's own terminal, which the engine runs in
-	// a pty inside vera's panel rather than imitating. Empty keeps
-	// rook's own one-shot surface. Engine-only, declared here so a
-	// config that uses it still loads.
-	Chat string `toml:"chat"`
+}
+
+// Home is the [home] table: what the one workspace outside the list
+// of spaces is seeded with, and what closing its last pane does. The
+// engine reads it (mux/src/config.zig, Home); it is declared here so a
+// file that uses it loads, and checked here so a typo refuses to boot.
+type Home struct {
+	// OnEmpty is what its last pane closing does: "return" (the
+	// default) goes back to the space you came from and seeds home
+	// fresh next time; "stay" seeds it again in place.
+	OnEmpty string `toml:"on_empty"`
+	// Color is home's accent, and what its chrome is tinted toward:
+	// a hex colour or an ANSI name. The config's accent when unset.
+	Color string `toml:"color"`
+	// Dir is where its panes start unless they say; "~" when unset.
+	Dir string `toml:"dir"`
+	// Window is its windows in order; none is one shell.
+	Window []HomeWindow `toml:"window"`
+}
+
+// HomeWindow is one [[home.window]].
+type HomeWindow struct {
+	Name string `toml:"name"`
+	Dir  string `toml:"dir"`
+	// Panes is the short form: a command per pane, side by side.
+	Panes []string `toml:"panes"`
+	// Pane is the long form, after any Panes: each its own command,
+	// dir and split.
+	Pane []HomePane `toml:"pane"`
+}
+
+// HomePane is one [[home.window.pane]]. An empty command is a shell.
+type HomePane struct {
+	Command string `toml:"command"`
+	Dir     string `toml:"dir"`
+	// Split is how it sits against the pane before it: "right" (the
+	// default) or "down".
+	Split string `toml:"split"`
+}
+
+// checkHome refuses what the engine would quietly misread.
+func checkHome(h Home) error {
+	if h.OnEmpty != "" && h.OnEmpty != "return" && h.OnEmpty != "stay" {
+		return fmt.Errorf("[home] on_empty = %q: \"return\" or \"stay\"", h.OnEmpty)
+	}
+	if len(h.Window) > 8 {
+		return fmt.Errorf("[home]: %d windows, at most 8", len(h.Window))
+	}
+	for i, w := range h.Window {
+		if n := len(w.Panes) + len(w.Pane); n > 8 {
+			return fmt.Errorf("[[home.window]] %d: %d panes, at most 8", i+1, n)
+		}
+		for _, p := range w.Pane {
+			if p.Split != "" && p.Split != "right" && p.Split != "down" {
+				return fmt.Errorf("[[home.window.pane]] split = %q: \"right\" or \"down\"", p.Split)
+			}
+		}
+	}
+	return nil
 }
 
 // Tmux is the [tmux] table: the slice of rook settings that proxy into
@@ -146,6 +195,9 @@ func Load(path string) (Config, error) {
 			path, strings.Join(keys, ", "))
 	}
 	if err := checkKeys(c.Keys); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", path, err)
+	}
+	if err := checkHome(c.Home); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
 	return c, nil

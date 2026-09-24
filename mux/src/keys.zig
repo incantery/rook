@@ -7,7 +7,6 @@
 //!   [keys]
 //!   g = "popup 72x86@124x48 grim"    # a program in a popup, sized
 //!   s = "popup rook pick"
-//!   t = "companion"
 //!   "C-o" = "last-space"
 //!   x = ""                           # unbound
 //!
@@ -43,13 +42,7 @@ pub const Verb = enum {
     next_unread,
     inspect,
     home,
-    home_running,
-    home_needs,
-    home_find,
-    home_command,
     last_space,
-    companion,
-    companion_pin,
     sidebar,
     pin,
     pin_global,
@@ -64,15 +57,6 @@ pub const Verb = enum {
         for (word, 0..) |ch, i| buf[i] = if (ch == '-') '_' else ch;
         const v = std.meta.stringToEnum(Verb, buf[0..word.len]) orelse return null;
         return if (v == .none) null else v;
-    }
-
-    /// Whether the verb means something at the root, where no space is
-    /// on the glass: the ways around rook, the popups, and detach.
-    pub fn atRoot(self: Verb) bool {
-        return switch (self) {
-            .home, .home_running, .home_needs, .home_find, .home_command, .last_space, .companion, .companion_pin, .sidebar, .next_unread, .popup, .detach => true,
-            else => false,
-        };
     }
 };
 
@@ -217,10 +201,6 @@ pub fn defaults() Keys {
         .{ 'u', "next-unread" },
         .{ 'i', "inspect" },
         .{ 'o', "home" },
-        .{ 'a', "home-running" },
-        .{ '!', "home-needs" },
-        .{ '/', "home-find" },
-        .{ ':', "home-command" },
         .{ 0x0f, "last-space" },
         .{ 'A', "sidebar" },
         .{ 'P', "pin" },
@@ -273,7 +253,8 @@ pub fn load(toml: []const u8) Keys {
 
 test "defaults carry no program" {
     const k = defaults();
-    for (k.slots) |b| try std.testing.expect(b.verb != .popup and b.verb != .companion and b.verb != .companion_pin);
+    for (k.slots) |b| try std.testing.expect(b.verb != .popup);
+    try std.testing.expectEqual(Verb.home, k.get('o').verb);
     try std.testing.expectEqual(Verb.split_right, k.get('v').verb);
     try std.testing.expectEqual(Verb.last_space, k.get(0x0f).verb);
     try std.testing.expectEqualStrings("3", k.arg(k.get('3')));
@@ -289,7 +270,7 @@ test "a [keys] table binds, rebinds, and unbinds" {
         \\s = "popup rook pick"
         \\"C-o" = "home"
         \\"=" = 'split-down'
-        \\t = "companion"
+        \\t = "zoom"
         \\x = ""
         \\q = "no-such-verb"
         \\[other]
@@ -300,12 +281,14 @@ test "a [keys] table binds, rebinds, and unbinds" {
     try std.testing.expectEqualStrings("rook pick", k.arg(k.get('s')));
     try std.testing.expectEqual(Verb.home, k.get(0x0f).verb);
     try std.testing.expectEqual(Verb.split_down, k.get('=').verb);
-    try std.testing.expectEqual(Verb.companion, k.get('t').verb);
+    try std.testing.expectEqual(Verb.zoom, k.get('t').verb);
     try std.testing.expectEqual(Verb.none, k.get('x').verb);
     try std.testing.expectEqual(Verb.none, k.get('q').verb);
     try std.testing.expectEqual(Verb.none, k.get('w').verb);
-    try std.testing.expectEqual(@as(?u8, 't'), k.keyFor(.companion));
-    try std.testing.expectEqual(@as(?u8, null), k.keyFor(.companion_pin));
+    // the first key bound to it, in byte order
+    try std.testing.expectEqual(@as(?u8, 't'), k.keyFor(.zoom));
+    // x was kill-pane's only key, and it is unbound
+    try std.testing.expectEqual(@as(?u8, null), k.keyFor(.kill_pane));
 }
 
 test "a popup whose first word is not a size keeps it" {

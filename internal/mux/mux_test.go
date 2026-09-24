@@ -73,6 +73,7 @@ func TestCurrentFrom(t *testing.T) {
 		{"a snapshot with one workspace", `{"workspaces":[{"name":"rook","current":true}]}`, "rook"},
 		{"no workspace is current", `{"workspaces":[{"name":"rook","current":false}]}`, ""},
 		{"no workspaces at all", `{"workspaces":[]}`, ""},
+		{"at home, no space is current", `{"workspaces":[{"name":"rook","current":false},{"name":"home","home":true,"current":true}]}`, ""},
 		{"a field this reader does not know", `{"workspaces":[{"name":"rook","current":true,"mood":"new"}],"mood":"new"}`, "rook"},
 		{"not a snapshot", "engine: connection refused\n", ""},
 		{"nothing", "", ""},

@@ -555,23 +555,12 @@ still exact. Deltas would force unbounded buffering or a disconnect.
 }
 ```
 
-`focus.mode` is `pane`, `copy`, `popup`, `root`, `gate` or
-`inspect` — a replica needs to know when the mux itself is holding the
-keyboard (`docs/altitude.md` for the last three). `scope` is `root`
-or `space`, and `root` is the root's own state — `{"view": "home",
-"mode": "ask", "ask": "none", "region": "composer", "wide": true,
-"turns": 0, "draft": false}`: which view (`home`, `orbit`, `ledger`),
-what the draft's first character makes of it (`ask`, `find`,
-`command`), where the request to the companion stands (`none`,
-`running`, `replied`, `failed`, `offline`), which region of the
-cockpit has focus (`composer`, `thread`, `dash`), whether the glass
-shows both regions, how many turns the thread holds, and whether a
-draft is typed (never the draft itself). `bar` says
-whether the calm bar is on. `root` also carries `detail` (the narrow
-stack's detail is up), `selected` (the navigator's selection, by
-identity: `t:<rail id>` or `s:<index>`) and `vera` (`open`,
-`pinned`, `keys` — her pane holds the keyboard — and `about`, the
-task id the next request is about).
+`focus.mode` is `pane`, `copy`, `popup`, `gate` or `inspect` — a
+replica needs to know when the mux itself is holding the keyboard.
+`scope` is `home` or `space`: home is the one workspace outside the
+list of spaces (`docs/home.md`), and it is in `workspaces` like any
+other, with `"home": true` — a reader that lists spaces leaves it out.
+`bar` says whether the calm bar is on.
 
 An `agents` item may carry, beside its rail fields, the detail rook's
 inspector shows when it is there and never invents: `goal`,
@@ -621,8 +610,8 @@ row and shortened on a found one.
 Rook holds one opinion about what an *agent* is, so a session somebody
 started by hand is not invisible to the rail. `companion` is the same
 shape for the other question: the resident you summon rather than an
-agent working somewhere. The config names the occupant — vera first,
-and the default when nothing says otherwise:
+agent working somewhere. Only the config names an occupant; without
+the table there is none and `companion` publishes as `null`:
 
 ```toml
 [companion]
@@ -632,8 +621,7 @@ program = "vera"       # …or say it outright, when that first word is a
                        # `companion` publishes as `null`.
 ```
 
-The same `[companion]` table the Go half already reads for the summon
-key; the engine takes only the program name out of it, in the order
+The same `[companion]` table the Go half already reads; the engine takes only the program name out of it, in the order
 `program`, then `command`'s first word, then `name`. `name` last on
 purpose: over there it labels the popup rather than naming the binary,
 and a shared file where one key means two things is how `lsp` once
@@ -648,11 +636,7 @@ Everything under `companion` answers one of two questions:
 - **where** — `workspace`, `window` (1-based, `null` when the pane is
   not in a window at all), and `place`: `window`, `pin` (docked to the
   rail; `workspace` is empty for a global pin, which belongs to every
-  workspace), `popup`, or `vera` — her own terminal, hosted in her
-  panel (`[companion] chat`). That one belongs to no window and to no
-  space: `workspace` is empty at home and the space you are in
-  otherwise, `visible` is whether her panel is up, and `focused` is
-  whether she is holding the keyboard. `visible` is on the glass now,
+  workspace), or `popup`. `visible` is on the glass now,
   `focused` is holding the keyboard now. The three top-level flags are
   the rollups — is any of her open, on the glass, in front of you.
 
@@ -759,7 +743,7 @@ Honest inventory, so this document is not mistaken for a description.
 | a pane by id from the front door: `read` / `send` / `run` / `key` / `wait` / `split` / `window` / `focus` / `close-pane`, `$ROOK_MUX_PANE` as the caller's id, `rook --skill` | **built** (`c2s.input`, `c2s.pane_cmd`) |
 | resume: `panes[].resume`, kept while its program is in front, saved in the restore file, typed into the rebuilt shell on boot; `[mux] restore` on by default | **built** (`c2s.resume`, state file v2) |
 | `companion.zig` + `Server.scanCompanion` | **built** — the one resident rook watches for by name, published as `companion` and read out loud by `rook companion` |
-| the root (`altitude.zig`, `ask.zig`): home as the default scope, its sections, one input (ask / find / command), the request to the companion and her reflection, orbit and ledger as subviews; the calm bar; minted tab names (`windows[].name/named/program`, `rook rename`); input ownership (`panes[].input`, `rook own`, the gate, prefix-i) | **built** — `docs/altitude.md`, which also lists what that design still owes (a reflection from the real vera, the shelf, folds) |
+| home (`Server.ensureHome`, `config.Home`): a workspace outside the list of spaces, seeded from `[home]`, `prefix-o` and back, closing its last pane returns; the calm bar; minted tab names (`windows[].name/named/program`, `rook rename`); input ownership (`panes[].input`, `rook own`, the gate, prefix-i) | **built** — `docs/home.md` |
 | `s2c.ack`, quiet `session 'N'`, `block_created` on new | **built** |
 | plugin protocol v1 | specified in `rook-plugin(7)` at `425c0f8^`; `items.push` implemented, the rest not |
 | surfaces (declared, placed, focusable), plugin processes | none of it |

@@ -213,7 +213,7 @@ pub const Pane = struct {
     /// claims it through the front door (`rook own`), and it goes
     /// back the same way — a release, or the person taking it. While
     /// an actor owns it the glass gates printable keys instead of
-    /// forwarding them (docs/altitude.md, resolution 5). `owner` is
+    /// forwarding them (docs/altitude.md at 8a9daf9, resolution 5). `owner` is
     /// the actor's own word for itself — `claude·main` — and the bar
     /// repeats it.
     own: Own = .human,

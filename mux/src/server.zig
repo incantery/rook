@@ -15,9 +15,7 @@ const statefeed = @import("statefeed.zig");
 const proto = @import("proto.zig");
 const config = @import("config.zig");
 const keyspkg = @import("keys.zig");
-const altpkg = @import("altitude.zig");
-const askpkg = @import("ask.zig");
-const homepkg = @import("home.zig");
+const sheet = @import("sheet.zig");
 const ui = @import("ui.zig");
 
 // CLOCK_UPTIME_RAW = 8 on macOS; libc-only monotonic clock.
@@ -179,7 +177,7 @@ const Window = struct {
     /// the window is current, so "seen" tracks looking rather than
     /// switching.
     seen_ms: i64 = 0,
-    /// The tab's name, minted once (docs/altitude.md, resolution 6):
+    /// The tab's name, minted once (docs/altitude.md at 8a9daf9, resolution 6):
     /// a name a person gave, else the first program in it that was
     /// not the shell. The engine never changes a minted name for
     /// itself; a namer may offer a better one (`suggestName`), and
@@ -220,6 +218,8 @@ pub const NameBy = enum {
 /// attached clients view the server's current session — the one-glass
 /// model; per-client views arrive with the structured cell protocol.
 const Session = struct {
+    /// The one workspace outside the list of spaces (Server.ensureHome).
+    home: bool = false,
     name: [32]u8 = @splat(0),
     name_len: usize = 0,
     windows: std.ArrayList(*Window) = .empty,
@@ -415,41 +415,15 @@ pub const Server = struct {
     bar_last_len: usize = 0,
     /// The workspace before the last switch — prefix-C-o goes back
     /// after any cross-space hop, from wherever the hop was made.
+    /// Never home itself.
     last_sess: ?usize = null,
-    /// The scope: rook's home (the root, where a glass lands) or a
-    /// space. At the root the canvas is painted over the window
-    /// region while the panes keep running underneath. `alt` is the
-    /// root's own state — view, draft, cursor, request — and it
-    /// outlives a visit to a space; `alt_placed` is the rects still
-    /// drawn live at the root: the global pins, which do not move.
-    at_root: bool = false,
-    alt: altpkg.State = .{},
-    /// Whether the ask command can be found, as of the last look.
-    ask_on: bool = false,
-    /// Vera's pane holds the keyboard inside a space.
-    vera_keys: bool = false,
-    /// The companion's own terminal, hosted in her panel: a real pty
-    /// running `[companion] chat`, sized to the panel and nothing
-    /// else. It is not in any window's layout and never takes the
-    /// window focus — it is rook's, the way the popup is. Null when
-    /// no chat is configured, the command is not on PATH, or the
-    /// program has quit; the panel then keeps rook's own surface.
-    /// Started on her first summoning and kept alive after: the
-    /// thread, the scroll and the draft are the program's, and a
-    /// program that is still running has not lost them.
-    vera_pane: ?u32 = null,
-    /// Whether the chat command can be found, as of the last look.
-    chat_on: bool = false,
-    /// Her terminal quit, and rook does not start another on its own.
-    /// A command that fails the moment it starts — a verad that is not
-    /// there, a binary half-installed — would otherwise be restarted
-    /// on every frame forever, and the panel would show a program
-    /// dying too fast to read. The panel falls back to rook's own
-    /// surface with what the program last said, and prefix-t at her
-    /// is the person asking for another try.
-    vera_dead: bool = false,
-    prefix_name_buf: [8]u8 = undefined,
-    alt_placed: std.ArrayList(layoutpkg.Placed) = .empty,
+    /// The space home was gone to from: where leaving it lands.
+    home_back: ?usize = null,
+    /// What home is seeded with, and what closing its last pane does
+    /// (config.Home). Home itself is a Session like any other, flagged
+    /// `home`: it is made when it is gone to, and left out of every
+    /// list of spaces.
+    home_conf: config.Home = .{},
     /// A second frame builder for what the server paints over the
     /// panes itself: the altitude view, the ownership gate, the
     /// inspector. Its bytes ride the main frame as `Chrome.overlay`.
@@ -570,13 +544,14 @@ pub const Server = struct {
         // splits. The state file is still saved, so opting in restores.
         const restored = self.conf.restore and try self.restoreState();
         if (!restored) _ = try self.newSession("main", null, null, true);
-        // Rook lands at home. The spaces are restored underneath it,
-        // running; `startup = "last-space"` is the opt-in that lands
-        // in the space the server was showing instead.
-        self.at_root = !self.conf.startup_last_space;
-        self.alt.view = .home;
-        self.ask_on = askpkg.available(self.conf.askSlice());
-        self.chat_on = askpkg.available(self.conf.chatSlice());
+        // Rook lands at home, seeded fresh, with the spaces restored
+        // underneath it and the one it was showing next in line for
+        // when home is left; `startup = "last-space"` is the opt-in
+        // that lands in that space instead.
+        self.home_conf = config.homeConfig();
+        if (!self.conf.startup_last_space) {
+            if (self.ensureHome()) |i| self.switchSession(i) else |_| {}
+        }
         try self.loop();
     }
 
@@ -605,8 +580,6 @@ pub const Server = struct {
         self.pin_origins.deinit(self.gpa);
         self.frame.deinit();
         self.over.deinit();
-        self.alt.rows.deinit(self.gpa);
-        self.alt_placed.deinit(self.gpa);
         self.side.deinit();
         self.agents_merge.deinit(self.gpa);
         self.spaces_merge.deinit(self.gpa);
@@ -641,7 +614,7 @@ pub const Server = struct {
     /// way back after a restart until the program says better.
     fn newSession(self: *Server, name: []const u8, cwd: ?[*:0]const u8, cmd: ?[*:0]const u8, show: bool) !*Session {
         for (self.sessions.items, 0..) |sn, i| {
-            if (std.mem.eql(u8, sn.label(), name)) {
+            if (!sn.home and std.mem.eql(u8, sn.label(), name)) {
                 if (show) self.switchSession(i);
                 return sn;
             }
@@ -671,7 +644,7 @@ pub const Server = struct {
     /// the accounting and the view falls back if it was current.
     fn closeSession(self: *Server, name: []const u8) void {
         for (self.sessions.items) |sn| {
-            if (!std.mem.eql(u8, sn.label(), name)) continue;
+            if (sn.home or !std.mem.eql(u8, sn.label(), name)) continue;
             for (sn.windows.items) |w| {
                 for (self.panes.items) |p| {
                     if (w.layout.contains(p.id)) p.hangup();
@@ -684,13 +657,20 @@ pub const Server = struct {
     fn switchSession(self: *Server, i: usize) void {
         if (i == self.cur_sess or i >= self.sessions.items.len) return;
         const old_focused = self.focusedId();
-        self.last_sess = self.cur_sess;
+        // Home is not a hop C-o comes back to: it is a key of its own.
+        // Going there remembers the space it goes back to; leaving it
+        // for another space makes that one the space before.
+        const from_home = self.sess().home;
+        if (self.sessions.items[i].home) {
+            if (!from_home) self.home_back = self.cur_sess;
+        } else if (from_home) {
+            if (self.home_back) |hb| {
+                if (hb != i) self.last_sess = hb;
+            }
+        } else self.last_sess = self.cur_sess;
         self.cur_sess = i;
         self.scrolling = false;
         self.selecting = false;
-        // Switching to a space by name is going there: from home,
-        // the picker's choice lands in the space, not on a row.
-        self.enterSpace();
         // a workspace pin that no longer exists can't hold focus
         if (self.sess().focus_pin) |fp| {
             if (self.pane(fp) == null) self.sess().focus_pin = null;
@@ -707,7 +687,7 @@ pub const Server = struct {
     fn sessionNamed(self: *Server, name: []const u8) ?usize {
         if (name.len == 0) return null;
         for (self.sessions.items, 0..) |sn, i| {
-            if (std.mem.eql(u8, sn.label(), name)) return i;
+            if (!sn.home and std.mem.eql(u8, sn.label(), name)) return i;
         }
         return null;
     }
@@ -868,171 +848,11 @@ pub const Server = struct {
         return self.pane(id);
     }
 
-    // ---- the companion's own terminal ----
-
-    /// The hosted chat, when there is one. Every reader goes through
-    /// here, so a program that quit is a null and not a dangling id.
-    pub fn veraChatPane(self: *Server) ?*panepkg.Pane {
-        const id = self.vera_pane orelse return null;
-        return self.pane(id);
-    }
-
-    /// A pane rook owns rather than a person's: the popup, and the
-    /// companion's terminal. Neither is somewhere focus can be sent,
-    /// neither is work, and neither belongs in a count of what is
-    /// running or unread.
+    /// A pane rook owns rather than a person's: the popup. It is not
+    /// somewhere focus can be sent, it is not work, and it does not
+    /// belong in a count of what is running or unread.
     fn ownPane(self: *Server, id: u32) bool {
-        return self.popup == id or self.vera_pane == id;
-    }
-
-    /// Where vera's panel is this frame, whichever scope we are in.
-    /// Null when she is not on the glass.
-    fn veraPanel(self: *Server) ?homepkg.Panel {
-        const h = &self.alt.home;
-        if (!h.veraShown()) return null;
-        if (self.at_root) {
-            if (self.alt.mode() != .intent or self.alt.view != .home) return null;
-            return homepkg.veraPanel(self.altRegion(), h.vera_pinned, true, h.focus == .vera);
-        }
-        return homepkg.veraPanelOver(self.altRegion());
-    }
-
-    /// Start the chat if it should be running, and keep its pty the
-    /// size of the panel it is drawn in. Called before every frame
-    /// that could show her, and after every relayout: the one motion
-    /// a hosted TUI cannot recover from is being told a geometry it
-    /// was not given, so the resize goes through `homepkg.veraBody`,
-    /// which is also what the painter draws into.
-    /// True when something changed — the program was started, or its
-    /// geometry moved — so the frame that follows is not skipped for
-    /// want of a dirty cell.
-    fn tendVera(self: *Server) bool {
-        const panel = self.veraPanel() orelse return false;
-        const body = homepkg.veraBody(panel.r, self.alt.home.about_title_len > 0);
-        if (!homepkg.chatFits(body)) return false;
-        var started = false;
-        const p = self.veraChatPane() orelse blk: {
-            const fresh = (self.startVeraPane(body) catch return false) orelse return false;
-            started = true;
-            break :blk fresh;
-        };
-        if (p.cols != body.w or p.rows != body.h) {
-            p.resize(body.w, body.h);
-            return true;
-        }
-        return started;
-    }
-
-    /// The chat, started the first time she is summoned. Nothing is
-    /// started when the config turned the chat off or the command is
-    /// not on PATH: the panel keeps rook's own surface, and says so.
-    fn startVeraPane(self: *Server, body: layoutpkg.Rect) !?*panepkg.Pane {
-        const cmd = self.conf.chatSlice();
-        if (cmd.len == 0 or !self.chat_on or self.vera_dead) return null;
-        const cmd_z = try self.gpa.dupeZ(u8, cmd);
-        defer self.gpa.free(cmd_z);
-        const p = try panepkg.Pane.start(
-            self.gpa,
-            self.io,
-            self.shell.ptr,
-            if (self.cwd) |c| c.ptr else null,
-            body.w,
-            body.h,
-            self.wake_w,
-            self.next_id,
-            cmd_z.ptr,
-            self.conf.scrollback_bytes,
-        );
-        try self.panes.append(self.gpa, p);
-        self.next_id += 1;
-        self.vera_pane = p.id;
-        self.full = true;
-        self.pending = true;
-        return p;
-    }
-
-    /// What her terminal left on the glass, as one turn of the thread
-    /// rook's own surface shows. `frame` is free here: reaping runs
-    /// between frames, and the builder is refilled from nothing on
-    /// the next one.
-    fn noteVeraQuit(self: *Server, p: *panepkg.Pane) void {
-        p.snapshot() catch {};
-        const text = self.frame.plainText(p);
-        // The last thing on the screen, and the rows above it that
-        // are the same sentence: a terminal hard-wraps, so a line
-        // that filled the width is continued by the one below it,
-        // and taking only the bottom row would report the tail of a
-        // message as the message.
-        var rows: [64][]const u8 = undefined;
-        var n: usize = 0;
-        var it = std.mem.splitScalar(u8, text, '\n');
-        while (it.next()) |ln| {
-            if (n == rows.len) {
-                std.mem.copyForwards([]const u8, rows[0 .. rows.len - 1], rows[1..]);
-                n -= 1;
-            }
-            rows[n] = std.mem.trimEnd(u8, ln, " \t\r");
-            n += 1;
-        }
-        var end = n;
-        while (end > 0 and std.mem.trim(u8, rows[end - 1], " ").len == 0) end -= 1;
-        var start = end;
-        while (start > 0) {
-            start -= 1;
-            if (start == 0) break;
-            if (rows[start - 1].len < p.cols) break;
-        }
-        var said: [homepkg.max_turn]u8 = undefined;
-        var len: usize = 0;
-        const head = std.fmt.bufPrint(&said, "{s} quit", .{self.askName()}) catch "quit";
-        len = head.len;
-        var first = true;
-        for (rows[start..end]) |ln| {
-            const t = std.mem.trim(u8, ln, " ");
-            if (t.len == 0) continue;
-            const sep: []const u8 = if (first) " — " else " ";
-            if (len + sep.len + t.len > said.len) break;
-            @memcpy(said[len..][0..sep.len], sep);
-            len += sep.len;
-            @memcpy(said[len..][0..t.len], t);
-            len += t.len;
-            first = false;
-        }
-        _ = self.alt.home.thread.push(.err, said[0..len], "", "", panepkg.epochMs());
-    }
-
-    /// She is being asked for. A terminal that quit is started again
-    /// only here — by the asking, never by a frame.
-    fn showVera(self: *Server) void {
-        const h = &self.alt.home;
-        if (!h.veraShown()) {
-            h.vera_open = true;
-            self.vera_dead = false;
-        }
-        h.focus = .vera;
-    }
-
-    /// Does vera hold the keyboard? At home that is the focused
-    /// region; in a space it is the flag prefix-t sets. Only true
-    /// while there is a program to hold it for.
-    /// Hand a run of keys to the hosted chat. The run ends where the
-    /// server wants a byte for itself — the prefix, a mouse report,
-    /// the end of a paste's opening marker — so an escape sequence is
-    /// never cut in half and a paste opens the same way it does for
-    /// any other pane.
-    fn toVera(self: *Server, c: *Client, vp: *panepkg.Pane, bytes: []const u8) usize {
-        const end = runEnd(&c.paste, bytes, self.prefix_key);
-        vp.write(bytes[0..end]);
-        self.full = true;
-        self.pending = true;
-        return end;
-    }
-
-    fn veraHoldsKeys(self: *Server) bool {
-        if (self.vera_pane == null) return false;
-        if (!self.at_root) return self.vera_keys;
-        const h = &self.alt.home;
-        return self.alt.mode() == .intent and self.alt.view == .home and h.veraShown() and h.focus == .vera;
+        return self.popup == id;
     }
 
     fn leasedBy(self: *Server, pane_id: u32) ?*Client {
@@ -1206,7 +1026,6 @@ pub const Server = struct {
             const r = self.popupRect();
             if (p.cols != r.w -| 2 or p.rows != r.h -| 2) p.resize(r.w -| 2, r.h -| 2);
         }
-        _ = self.tendVera();
         self.full = true;
         self.pending = true;
         self.state_dirty = true;
@@ -1235,13 +1054,7 @@ pub const Server = struct {
             for (self.panes.items) |pn| {
                 if (pn.pendingIn()) try fds.append(self.gpa, .{ .fd = pn.pty.master, .events = ptypkg.POLLOUT });
             }
-            // the request in flight at the root: its pipes wake the
-            // loop, and its reply is a frame
             const job_fds_at = fds.items.len;
-            var job_fds: [2]ptypkg.Pollfd = undefined;
-            for (job_fds[0..self.alt.req.fds(&job_fds)]) |jf| try fds.append(self.gpa, jf);
-            var run_fds: [2]ptypkg.Pollfd = undefined;
-            for (run_fds[0..self.alt.home.runner.fds(&run_fds)]) |jf| try fds.append(self.gpa, jf);
             var timeout: c_int = if (self.pending)
                 @intCast(@max(0, frame_gap_ms - (nowMs() - last_frame)))
             else
@@ -1276,21 +1089,6 @@ pub const Server = struct {
                 }
             }
 
-            if (self.alt.req.busy()) {
-                const ev = self.alt.req.pump();
-                if (ev != .none) {
-                    self.absorbRequest(ev);
-                    _ = self.touch();
-                    self.full = true;
-                    self.pending = true;
-                }
-            }
-            if (self.alt.home.runner.busy() and self.alt.home.runner.pump()) {
-                self.absorbRunner();
-                _ = self.touch();
-                self.full = true;
-                self.pending = true;
-            }
             // drain pane stdin queues that got room
             for (fds.items[pane_fds_at..job_fds_at]) |pfd| {
                 if (pfd.revents & ptypkg.POLLOUT == 0) continue;
@@ -1560,6 +1358,7 @@ pub const Server = struct {
                                 var lb: [1024]u8 = undefined;
                                 var lw: std.ArrayList(u8) = .initBuffer(&lb);
                                 for (self.sessions.items) |sn| {
+                                    if (sn.home) continue;
                                     lw.appendSliceBounded(sn.label()) catch break;
                                     lw.appendSliceBounded("\n") catch break;
                                 }
@@ -1808,6 +1607,7 @@ pub const Server = struct {
         var n: usize = 0;
         for (self.sessions.items) |sn| {
             if (n == max_found) break;
+            if (sn.home) continue;
             const repo = chromepkg.spaceRepo(sn.label());
             const wins = sn.windows.items.len;
             const buf = &self.found_ws_sub[n];
@@ -1901,22 +1701,6 @@ pub const Server = struct {
                 out.workspace = if (cur) |sn| sn.label() else "";
                 out.visible = true;
                 out.focused = true;
-                return out;
-            }
-        }
-        if (self.vera_pane) |pid| {
-            if (pid == id) {
-                // The companion's own terminal belongs to no window
-                // and no space: it is the same pane from home and
-                // from every space, drawn in her panel, and it holds
-                // the keyboard whenever she has the focus. Without
-                // this the one question the companion slot exists to
-                // answer — is she open in rook — would be answered
-                // "no" with her terminal on the glass.
-                out.place = "vera";
-                out.workspace = if (self.at_root) "" else (if (cur) |sn| sn.label() else "");
-                out.visible = self.alt.home.veraShown();
-                out.focused = self.veraHoldsKeys();
                 return out;
             }
         }
@@ -2081,9 +1865,8 @@ pub const Server = struct {
         // Chrome only repaints on a full frame, and nothing else about
         // this change dirties a row — but a rail that is folded away
         // is not on the glass, and a producer pushing at its own
-        // cadence must not cost a full repaint each time. Home is
-        // painted from the rail, so there a push is a frame.
-        if (self.side_w != null or self.at_root) {
+        // cadence must not cost a full repaint each time.
+        if (self.side_w != null) {
             self.full = true;
             self.pending = true;
         }
@@ -2524,23 +2307,6 @@ pub const Server = struct {
                 self.pending = true;
                 continue;
             }
-            // At the root the keys are the view's: the input, the
-            // cursor, ↵. The prefix still arms above, so prefix-o
-            // and prefix-s work from here — and a popup floated over
-            // home (the picker) takes the keys while it is up.
-            if (self.at_root and self.popup == null) {
-                if (!self.veraHoldsKeys()) c.paste.reset();
-                const used = self.altKey(c, rest);
-                rest = rest[used..];
-                continue;
-            }
-            // Vera's pane over a space holds the keyboard while it has it.
-            if (self.vera_keys) {
-                if (!self.veraHoldsKeys()) c.paste.reset();
-                const used = self.veraKey(c, rest);
-                rest = rest[used..];
-                continue;
-            }
             // The ownership gate holds the keyboard while it is up.
             if (self.gate) {
                 c.paste.reset();
@@ -2676,68 +2442,6 @@ pub const Server = struct {
         }
         // The calm bar is not a target: nothing on it is a control.
         if (self.barOn() and cy >= self.bodyRows()) return;
-        // The companion's panel is over both the root's rows and a
-        // space's panes, so it is asked first: a click in it takes
-        // the keyboard and then belongs to the program, and the
-        // wheel scrolls her transcript, not what is behind her.
-        if (self.veraChatPane()) |vp| {
-            if (self.veraPanel()) |panel| {
-                const body = homepkg.veraBody(panel.r, self.alt.home.about_title_len > 0);
-                if (homepkg.chatFits(body) and cx >= body.x and cx < body.x + body.w and cy >= body.y and cy < body.y + body.h) {
-                    if (ev.btn < 3 and !ev.release and !self.veraHoldsKeys()) {
-                        self.alt.home.focus = .vera;
-                        if (!self.at_root) self.vera_keys = true;
-                        self.full = true;
-                        self.pending = true;
-                    }
-                    if (vp.wantsMouse()) {
-                        var mb: [32]u8 = undefined;
-                        const ms = std.fmt.bufPrint(&mb, "\x1b[<{d};{d};{d}{c}", .{
-                            ev.btn,
-                            cx - body.x + 1,
-                            cy - body.y + 1,
-                            @as(u8, if (ev.release) 'm' else 'M'),
-                        }) catch return;
-                        vp.write(ms);
-                    } else if (ev.btn == 64) {
-                        vp.scroll(-3);
-                    } else if (ev.btn == 65) {
-                        vp.scroll(3);
-                    }
-                    self.full = true;
-                    self.pending = true;
-                    return;
-                }
-            }
-        }
-        // At the root a click lands on a row, or on the global pins,
-        // which are live; anywhere else on the view is the view's.
-        // Nothing on the glass is a way back into a space but a row.
-        if (self.at_root) {
-            const r = self.altRegion();
-            if (cx >= r.x and cy >= r.y and cy < r.y + r.h) {
-                if (ev.btn == 0 and !ev.release) {
-                    if (self.alt.rowAt(cy)) |i| {
-                        self.alt.cur = i;
-                        self.altAct();
-                    }
-                } else if (ev.btn == 64) {
-                    self.alt.move(-1);
-                    self.full = true;
-                    self.pending = true;
-                } else if (ev.btn == 65) {
-                    self.alt.move(1);
-                    self.full = true;
-                    self.pending = true;
-                }
-                return;
-            }
-            var on_pin = false;
-            for (self.alt_placed.items) |pl| {
-                if (cx >= pl.rect.x and cx < pl.rect.x + pl.rect.w and cy >= pl.rect.y and cy < pl.rect.y + pl.rect.h) on_pin = true;
-            }
-            if (!on_pin) return;
-        }
         // the side panel eats clicks before any pane sees them
         if (self.side_w) |sw| {
             if (cx <= sw) {
@@ -2981,9 +2685,8 @@ pub const Server = struct {
     /// happened; one that arrives otherwise is unread until it is.
     fn isSeen(self: *Server, id: u32) bool {
         if (self.popup != null) return false;
-        // focus is observing, but at the root nobody is on the pane,
-        // and under the inspector the pane is covered
-        if (self.at_root or self.inspect) return false;
+        // focus is observing, but under the inspector the pane is covered
+        if (self.inspect) return false;
         if (self.focusedId() != id) return false;
         var placed = false;
         for (self.placed.items) |pl| {
@@ -3129,18 +2832,6 @@ pub const Server = struct {
             p.write(bytes);
             return;
         }
-        // A paste is content, and it belongs to whoever is holding
-        // the keyboard: while the companion's terminal has it, a
-        // pasted stack trace goes into her box and not into the pane
-        // behind her.
-        if (self.veraHoldsKeys()) {
-            if (self.veraChatPane()) |p| {
-                p.write(bytes);
-                self.full = true;
-                self.pending = true;
-                return;
-            }
-        }
         if (self.focusedPane()) |p| {
             // typing returns the view to now — a wheel-scrolled pane
             // must not eat keystrokes into an old screen silently
@@ -3179,9 +2870,6 @@ pub const Server = struct {
             }
             return;
         }
-        // At the root the space is not on the glass, so the verbs that
-        // act on it are not taken: only the root's own, and detach.
-        if (self.at_root and !b.verb.atRoot()) return;
         self.runVerb(c, b.verb, self.keys.arg(b));
     }
 
@@ -3223,29 +2911,12 @@ pub const Server = struct {
             .kill_pane => if (self.focusedPane()) |p| p.hangup(),
             .detach => self.detach(c),
             .next_unread => _ = self.jumpUnread(),
-            .inspect => if (!self.at_root) {
-                self.inspect = !self.inspect;
-            },
-            // Out, to rook: home. The panes never pause. From the root
-            // it is idempotent — home again, whatever subview was up.
-            .home => self.goHome(),
-            // The root, with the cursor on a section: running work,
-            // or what needs you.
-            .home_running => self.goHomeAt(.running),
-            .home_needs => self.goHomeAt(.needs),
-            // The root in a mode: find, command.
-            .home_find => self.goHomeTyping("/"),
-            .home_command => self.goHomeTyping(":"),
+            .inspect => self.inspect = !self.inspect,
+            // Home and back: the one workspace outside the list.
+            .home => self.toggleHome(),
             // Return jump: back to the space before the last hop.
             .last_space => if (self.last_sess) |ls| {
                 if (ls < self.sessions.items.len) self.switchSession(ls);
-            },
-            // The companion's panel, from anywhere; pinned, it stays.
-            .companion => self.toggleVera(),
-            .companion_pin => {
-                self.alt.home.vera_pinned = !self.alt.home.vera_pinned;
-                if (self.alt.home.vera_pinned) self.alt.home.vera_open = true;
-                if (!self.at_root) self.vera_keys = self.alt.home.veraShown() and self.alt.home.focus == .vera;
             },
             // The legacy side panel, away and back.
             .sidebar => {
@@ -3493,18 +3164,6 @@ pub const Server = struct {
     /// spaces, how many agents producing, how many things need you
     /// (panes unread, and what a producer said is waiting). Only the
     /// nonzero parts; a quiet world says so.
-    fn altSummary(self: *Server, buf: []u8) []const u8 {
-        const spaces = self.sessions.items.len;
-        const working = self.countWorking();
-        const needs = self.countUnread() + self.countAsks();
-        var w: std.Io.Writer = .fixed(buf);
-        w.print("{d} space{s}", .{ spaces, plural(spaces) }) catch {};
-        if (working > 0) w.print(" · {d} agent{s} working", .{ working, plural(working) }) catch {};
-        if (needs > 0) w.print(" · {d} need{s} you", .{ needs, if (needs == 1) "s" else "" }) catch {};
-        if (working == 0 and needs == 0) w.writeAll(" · all quiet") catch {};
-        return w.buffered();
-    }
-
     /// Rows a producer pushed saying an agent in a space rook holds
     /// is waiting on you, or failed.
     fn countAsks(self: *Server) usize {
@@ -3549,6 +3208,7 @@ pub const Server = struct {
     fn reap(self: *Server) !void {
         var i: usize = 0;
         var removed = false;
+        var home_left = false;
         while (i < self.panes.items.len) {
             const p = self.panes.items[i];
             if (!p.exited.load(.acquire)) {
@@ -3558,28 +3218,6 @@ pub const Server = struct {
             if (self.popup == p.id) {
                 self.popup = null;
                 self.full = true;
-                p.deinit();
-                _ = self.panes.swapRemove(i);
-                removed = true;
-                continue;
-            }
-            // The chat quit — `/quit`, a crash, `vera` upgraded out
-            // from under it. The panel falls back to rook's own
-            // surface, and the next summoning starts a fresh one
-            // rather than leaving a dead rectangle on the glass.
-            if (self.vera_pane == p.id) {
-                // The chat quit — `/quit`, a crash, a verad it could
-                // not reach. The panel falls back to rook's own
-                // surface, and the last thing the program managed to
-                // say goes into the thread, because a terminal that
-                // died with an error on it is the one place the
-                // reason is written down.
-                self.noteVeraQuit(p);
-                self.vera_pane = null;
-                self.vera_dead = true;
-                self.vera_keys = false;
-                self.full = true;
-                self.pending = true;
                 p.deinit();
                 _ = self.panes.swapRemove(i);
                 removed = true;
@@ -3606,10 +3244,29 @@ pub const Server = struct {
                         _ = sn.windows.orderedRemove(wi);
                         if (sn.cur >= sn.windows.items.len and sn.cur > 0) sn.cur -= 1;
                         if (sn.windows.items.len == 0) {
+                            const was_home = sn.home;
+                            const was_cur = si == self.cur_sess;
                             sn.windows.deinit(self.gpa);
+                            sn.pins.deinit(self.gpa);
                             self.gpa.destroy(sn);
                             _ = self.sessions.orderedRemove(si);
+                            // indices past the gap move down one
+                            if (self.last_sess) |ls| {
+                                self.last_sess = if (ls == si) null else if (ls > si) ls - 1 else ls;
+                            }
+                            if (self.home_back) |hb| {
+                                self.home_back = if (hb == si) null else if (hb > si) hb - 1 else hb;
+                            }
+                            if (self.cur_sess > si) self.cur_sess -= 1;
                             if (self.cur_sess >= self.sessions.items.len and self.cur_sess > 0) self.cur_sess -= 1;
+                            // Home's last pane closed while you were in
+                            // it: back to the space you came from, and
+                            // home starts over the next time — or, with
+                            // `on_empty = "stay"`, it starts over now.
+                            // With no space to go back to, it starts
+                            // over either way: rook does not end
+                            // because the scratch pad was cleared.
+                            if (was_home and was_cur) home_left = true;
                         }
                     } else {
                         w.zoomed = false;
@@ -3631,6 +3288,18 @@ pub const Server = struct {
             removed = true;
         }
         if (removed) self.updateTees();
+        if (home_left) {
+            const back = if (self.home_conf.stay) null else self.awayFromHome();
+            if (back) |b| {
+                self.cur_sess = b;
+            } else if (self.ensureHome()) |h| {
+                self.cur_sess = h;
+            } else |_| {}
+            self.scrolling = false;
+            self.selecting = false;
+            self.focusEvents(0, self.focusedId());
+            _ = self.touch();
+        }
         if (removed and self.sessions.items.len > 0) try self.relayout();
     }
 
@@ -3641,7 +3310,14 @@ pub const Server = struct {
         // frame, so the popup is the one lit plane, bars included.
         const lit = self.ui;
         defer self.ui = lit;
-        if (self.popup != null) self.ui = lit.under();
+        // Home is another room: its chrome, seams and accent wear home's
+        // colour (ui.Theme.home), and nothing else about the frame moves.
+        const room = if (self.atHome()) lit.home(self.home_conf.color orelse lit.accent) else lit;
+        self.frame.accent = room.border_focused;
+        self.frame.border = room.border;
+        self.over.accent = room.border_focused;
+        self.over.border = room.border;
+        self.ui = if (self.popup != null) room.under() else room;
         // Looking at the focused pane reads it; the dot it wore on
         // the tab and the rail goes with this frame.
         if (self.markSeen()) self.full = true;
@@ -3654,15 +3330,6 @@ pub const Server = struct {
         }
         if (self.popupPane()) |p| {
             p.snapshot() catch {};
-            p.rs.dirty = .false;
-        }
-        // The hosted chat is not in `placed`, so nothing above has
-        // looked at it: a token streaming in dirties no window pane
-        // and would otherwise never earn a frame.
-        if (self.tendVera()) any_dirty = true;
-        if (self.veraChatPane()) |p| {
-            p.snapshot() catch {};
-            if (p.rs.dirty != .false) any_dirty = true;
             p.rs.dirty = .false;
         }
         // A bare cursor move dirties no cell (zsh emits a lone \b when
@@ -3688,13 +3355,6 @@ pub const Server = struct {
 
         const g = self.geometry();
         const body = self.bodyRows();
-        // The root's rows are built first: the bars read them (the
-        // corner's counts, the bar's view word).
-        if (self.at_root) {
-            self.full = true;
-            self.altBuild();
-            altpkg.chooseFidelity(&self.alt, self.altRegion());
-        }
         var tab_buf: [2048]u8 = undefined;
         const tabbar = self.tabBar(&tab_buf, g.cols -| self.tab_x);
         var bar_buf: [2048]u8 = undefined;
@@ -3721,33 +3381,12 @@ pub const Server = struct {
         // each frame it is needed: all three are human-rate views.
         self.over.buf.clearRetainingCapacity();
         var cur_over: ?renderpkg.CursorOverride = null;
-        var placed = self.placed.items;
-        var dock_x = self.dock_x;
-        if (self.at_root) {
-            // only the global pins stay live on the glass; every
-            // other rect belongs to the space and contracts with it
-            self.alt_placed.clearRetainingCapacity();
-            for (self.placed.items) |pl| {
-                if (containsId(self.global_pins.items, pl.pane)) {
-                    self.alt_placed.append(self.gpa, pl) catch {};
-                } else {
-                    altpkg.clearRect(&self.over, &self.ui, pl.rect);
-                }
-            }
-            placed = self.alt_placed.items;
-            if (self.global_pins.items.len == 0) dock_x = null;
-            cur_over = altpkg.draw(&self.over, &self.alt, self.altRegion(), .{ .t = &self.ui, .ask_name = self.askName(), .ask_on = self.ask_on, .prefix = prefixName(self.prefix_key, &self.prefix_name_buf), .chat = self.veraChatPane() });
-        }
-        // vera's pane inside a space: over the panes, the same pane
-        if (!self.at_root and self.alt.home.veraShown()) {
-            var pk: [8]u8 = undefined;
-            const c = homepkg.drawVeraOver(&self.over, &self.alt, self.altRegion(), .{ .t = &self.ui, .ask_name = self.askName(), .ask_on = self.ask_on, .now = panepkg.epochMs(), .prefix = prefixName(self.prefix_key, &pk), .chat = self.veraChatPane() });
-            if (self.vera_keys) cur_over = c;
-        }
-        if (self.gate and !self.at_root) self.gateRow();
-        if (self.inspect and !self.at_root) self.inspectorSheet();
+        const placed = self.placed.items;
+        const dock_x = self.dock_x;
+        if (self.gate) self.gateRow();
+        if (self.inspect) self.inspectorSheet();
 
-        if (self.scrolling and !self.at_root) {
+        if (self.scrolling) {
             for (self.placed.items) |pl| {
                 if (pl.pane == self.focusedId()) {
                     cur_over = .{
@@ -3766,13 +3405,13 @@ pub const Server = struct {
             .bar = bar,
             .overlay = self.over.buf.items,
         };
-        // the root's cursor is the input's; the inspector and the
-        // gate hide the pane's cursor, since the keys are not its
-        const cur: ?renderpkg.CursorOverride = if (self.at_root or self.gate or self.inspect or self.vera_keys)
+        // the inspector and the gate hide the pane's cursor, since the
+        // keys are not its
+        const cur: ?renderpkg.CursorOverride = if (self.gate or self.inspect)
             (cur_over orelse renderpkg.CursorOverride{ .x = 0, .y = 0, .hidden = true })
         else
             cur_over;
-        const bytes = self.frame.build(self.panes.items, placed, if (self.at_root) 0 else self.focusedId(), g.cols, body, chrome, self.full, cur, if (self.popup) |id| .{ .pane = id, .rect = self.popupRect() } else null);
+        const bytes = self.frame.build(self.panes.items, placed, self.focusedId(), g.cols, body, chrome, self.full, cur, if (self.popup) |id| .{ .pane = id, .rect = self.popupRect() } else null);
         self.full = false;
         var shipped = false;
         for (self.clients.items) |c| {
@@ -3806,9 +3445,7 @@ pub const Server = struct {
     /// Put a newly attached glass where it asked to be.
     fn landGlass(self: *Server, dest: []const u8, first: bool) void {
         if (dest.len == 0) {
-            if (first) {
-                if (self.conf.startup_last_space) self.enterSpace() else self.goHome();
-            }
+            if (first and !self.conf.startup_last_space) self.goHome();
             return;
         }
         switch (dest[0]) {
@@ -3829,7 +3466,6 @@ pub const Server = struct {
                 }
                 if (name.len == 0) return;
                 _ = self.newSession(name, cwd, null, true) catch return;
-                self.enterSpace();
             },
             else => {},
         }
@@ -3870,18 +3506,11 @@ pub const Server = struct {
     fn mirrorKitty(self: *Server) void {
         var buf: [256]u8 = undefined;
         var out: std.ArrayList(u8) = .initBuffer(&buf);
-        // While the mux itself holds the keyboard — the root, the
-        // gate, the inspector — the glass encodes legacy bytes, so
-        // the view reads plain keys whatever the pane under it asked.
-        // …unless the companion's own terminal is holding it. It is a
-        // real program with a real box: it asked for bracketed paste
-        // and for the kitty protocol, and a glass that answers in
-        // legacy bytes turns a pasted stack trace into a run of
-        // Enters and drops shift+enter — the two keys its multiline
-        // input is built on.
-        const held = if (self.veraHoldsKeys()) self.veraChatPane() else null;
-        const mux_keys = held == null and (self.at_root or self.gate or self.inspect or self.vera_keys);
-        const fp = held orelse (if (mux_keys) null else (self.popupPane() orelse self.focusedPane()));
+        // While the mux itself holds the keyboard — the gate, the
+        // inspector — the glass encodes legacy bytes, so the sheet
+        // reads plain keys whatever the pane under it asked.
+        const mux_keys = self.gate or self.inspect;
+        const fp = if (mux_keys) null else (self.popupPane() orelse self.focusedPane());
         const kf: u8 = if (fp) |p| p.kittyFlags() else 0;
         if (kf != self.glass_kitty) {
             self.glass_kitty = kf;
@@ -3968,10 +3597,14 @@ pub const Server = struct {
                 out.append(self.gpa, '\n') catch return;
             }
         }
+        // Home is never saved: a boot seeds it fresh. When it is the
+        // one showing, the star goes on the space it goes back to.
+        const star = if (self.atHome()) self.awayFromHome() else self.cur_sess;
         for (self.sessions.items, 0..) |sn, si| {
+            if (sn.home) continue;
             out.appendSlice(self.gpa, "session ") catch return;
             out.appendSlice(self.gpa, sn.label()) catch return;
-            if (si == self.cur_sess) out.appendSlice(self.gpa, " *") catch return;
+            if (star != null and si == star.?) out.appendSlice(self.gpa, " *") catch return;
             out.append(self.gpa, '\n') catch return;
             for (sn.pins.items) |id| {
                 self.savePane(&out, "pin ", id, false) catch return;
@@ -4182,39 +3815,33 @@ pub const Server = struct {
         const sc = scope[0..@min(scope.len, 20)];
 
         // the corner is measured first: the bar lays out into what
-        // is left of it. At home there is no corner: nothing is
-        // above it. In a subview, esc is the way home; in a space,
-        // The way out to rook, by whatever key the table gives it.
+        // is left of it. It says where the home key goes: home from a
+        // space, and back to the space from home.
         var corner_buf: [48]u8 = undefined;
         var hk: [24]u8 = undefined;
-        const corner: []const u8 = if (self.at_root)
-            (if (self.alt.view == .home) "" else "esc rook")
-        else if (self.scrolling)
+        const at_home = sn.home;
+        const away: []const u8 = if (at_home)
+            (if (self.awayFromHome()) |i| chromepkg.shortSpace(self.sessions.items[i].label()) else "")
+        else
+            "home";
+        const corner: []const u8 = if (self.scrolling)
             (if (self.selecting) "copy · VISUAL" else "copy · hjkl v y q")
         else if (self.window().zoomed)
             "zoom"
+        else if (away.len == 0)
+            ""
+        else if (self.chord(.home, &hk)) |ch|
+            (std.fmt.bufPrint(&corner_buf, "{s} {s}", .{ ch, away[0..@min(away.len, 20)] }) catch "")
         else
-            (if (self.chord(.home, &hk)) |ch| (std.fmt.bufPrint(&corner_buf, "{s} rook", .{ch}) catch "rook") else "rook");
+            "";
         const corner_cols = chromepkg.cols(corner) + 1;
 
-        if (self.at_root) {
-            vis += ui.scopeChip(out, t, "rook", .global);
-            vis += ui.separator(out, t, t.chrome);
-            // a subview is named where the tabs would be, as the tab
-            // component, selected: orbit and ledger are places within
-            // the root, and home is the root itself
-            vis += ui.tab(out, t, .{ .index = null, .label = self.alt.painted.word(), .selected = true }, .full);
-            vis += ui.ink(out, on, "  ");
-            // the context: what is selected, muted, never a count
-            if (self.alt.painted == .home and self.alt.len == 0) {
-                if (self.alt.home.selectedTask()) |tk| {
-                    vis += ui.ink(out, .{ .fg = t.muted, .bg = t.chrome }, chromepkg.clip(tk.title, avail -| vis -| corner_cols -| 1));
-                } else if (self.alt.home.selectedRow()) |r| {
-                    if (r.space) |si| vis += ui.ink(out, .{ .fg = t.muted, .bg = t.chrome }, chromepkg.clip(self.alt.spaces[si].name, avail -| vis -| corner_cols -| 1));
-                }
-            }
-        } else {
-            vis += ui.scopeChip(out, t, sc, .space);
+        {
+            // home wears its colour, and its mark: it is not one of
+            // the spaces, and a space named `home` never looks like it
+            var hb: [24]u8 = undefined;
+            const chip = if (at_home) (std.fmt.bufPrint(&hb, "{s} home", .{ui.glyph(t, .home)}) catch "home") else sc;
+            vis += ui.scopeChip(out, t, chip, if (at_home) .global else .space);
             vis += ui.separator(out, t, t.chrome);
 
             // the tabs, as components
@@ -4501,14 +4128,22 @@ pub const Server = struct {
         var vis: u16 = 0;
         vis += ui.ink(out, .{ .bg = t.chrome }, " ");
 
+        // At home the bar says so first, in home's colour: the bottom
+        // edge of the glass is as sure where you are as the top.
+        var left_n: usize = 0;
+        if (self.atHome()) {
+            var hb: [24]u8 = undefined;
+            vis += ui.module(out, t, std.fmt.bufPrint(&hb, "{s} home", .{ui.glyph(t, .home)}) catch "home", t.accent, true);
+            left_n += 1;
+        }
+
         var right_buf: [768]u8 = undefined;
         var right_list: std.ArrayList(u8) = .initBuffer(&right_buf);
         const right: ui.Buf = .{ .list = &right_list };
         var right_w: u16 = 0;
         var on_right = false;
-        var left_n: usize = 0;
         var right_n: usize = 0;
-        var it = std.mem.splitScalar(u8, if (self.at_root) self.conf.statusHome() else self.conf.statusSpace(), '\n');
+        var it = std.mem.splitScalar(u8, self.conf.statusSpace(), '\n');
         while (it.next()) |name| {
             if (name.len == 0) continue;
             if (std.mem.eql(u8, name, "-")) {
@@ -4567,11 +4202,9 @@ pub const Server = struct {
         if (armed) {
             vis += ui.module(out, t, "   ", t.muted, false);
             vis += ui.chip(out, t, "prefix", t.accent);
-            const hint: []const u8 = if (self.at_root)
-                "  t vera · T pin · s pick · / find · : command · a in progress · ! needs you · d detach"
-            else
-                "  o rook · t vera · s pick · c new · v - split · z zoom · u unread · i inspect";
-            if (vis + chromepkg.cols(hint) + 14 <= cols) vis += ui.module(out, t, hint, t.muted, false);
+            var hb: [160]u8 = undefined;
+            const hint = self.prefixHint(&hb);
+            if (hint.len > 0 and vis + chromepkg.cols(hint) + 14 <= cols) vis += ui.module(out, t, hint, t.muted, false);
         }
 
         if (right_w > 0 and vis + right_w + 2 <= cols) {
@@ -4585,6 +4218,31 @@ pub const Server = struct {
         return list.items;
     }
 
+    /// The chords a hand may be reaching for, from the table as it is
+    /// bound: `  o home · c new · v split …`. A verb nothing is bound
+    /// to is left out.
+    fn prefixHint(self: *Server, buf: []u8) []const u8 {
+        const verbs = [_]struct { keyspkg.Verb, []const u8 }{
+            .{ .home, if (self.atHome()) "back" else "home" },
+            .{ .new_window, "new" },
+            .{ .split_right, "split" },
+            .{ .split_down, "split down" },
+            .{ .zoom, "zoom" },
+            .{ .next_unread, "unread" },
+            .{ .copy_mode, "copy" },
+            .{ .detach, "detach" },
+        };
+        var w: std.Io.Writer = .fixed(buf);
+        w.writeAll(" ") catch {};
+        for (verbs) |v| {
+            const k = self.keys.keyFor(v[0]) orelse continue;
+            var kb: [8]u8 = undefined;
+            w.print(" {s} {s} ·", .{ keyspkg.keyName(k, &kb), v[1] }) catch break;
+        }
+        const out = w.buffered();
+        return if (out.len > 1) out[0 .. out.len - 2] else "";
+    }
+
     /// One module of the calm bar by name; the columns it took, 0
     /// when it has nothing to say. Every count says what it counts;
     /// spend says its period.
@@ -4593,24 +4251,7 @@ pub const Server = struct {
         var vis: u16 = 0;
         var ab: [8]u8 = undefined;
         const arrow = std.fmt.bufPrint(&ab, " {s} ", .{ui.glyph(t, .marker)}) catch " > ";
-        if (std.mem.eql(u8, name, "view")) {
-            const st = &self.alt;
-            vis += ui.module(out, t, "rook", t.primary, true);
-            vis += ui.moduleSep(out, t);
-            const what: []const u8 = if (st.len > 0) st.mode().word() else st.painted.word();
-            vis += ui.module(out, t, what, t.muted, false);
-            if (st.len == 0 and st.painted == .home) {
-                vis += ui.moduleSep(out, t);
-                vis += ui.module(out, t, switch (st.home.focus) {
-                    .nav => "navigator",
-                    .insp => "inspector",
-                    .vera => self.askName(),
-                }, t.muted, false);
-            }
-            return vis;
-        }
         if (std.mem.eql(u8, name, "input")) {
-            if (self.at_root) return 0;
             if (self.popupPane()) |pp| {
                 var nb: [64]u8 = undefined;
                 const fg = pp.fgName(&nb) orelse "popup";
@@ -4622,12 +4263,6 @@ pub const Server = struct {
             const fp = self.focusedPane() orelse return 0;
             var nb: [64]u8 = undefined;
             const fg = fp.fgName(&nb) orelse "shell";
-            if (self.vera_keys) {
-                vis += ui.module(out, t, "you", t.primary, true);
-                vis += ui.module(out, t, arrow, t.muted, false);
-                vis += ui.module(out, t, self.askName(), t.accent, false);
-                return vis;
-            }
             switch (fp.own) {
                 .human => {
                     vis += ui.module(out, t, "you", t.primary, true);
@@ -4698,7 +4333,7 @@ pub const Server = struct {
             return vis;
         }
         if (std.mem.eql(u8, name, "attention")) {
-            const n = self.countUnread() + self.countAsks() + self.countApprovals();
+            const n = self.countUnread() + self.countAsks();
             if (n == 0) return 0;
             var b: [32]u8 = undefined;
             vis += ui.module(out, t, ui.markGlyph(t, .attention), t.attention, true);
@@ -4745,37 +4380,6 @@ pub const Server = struct {
             vis += ui.module(out, t, std.fmt.bufPrint(&b, " · {s} tokens", .{fmtTokens(a, u.tokens)}) catch "", t.muted, false);
             return vis;
         }
-        // The companion's module ("vera", its first name, still reads
-        // as it): nothing when the config names no companion.
-        if (std.mem.eql(u8, name, "companion") or std.mem.eql(u8, name, "vera")) {
-            if (self.conf.companionSlice().len == 0) return vis;
-            const st = &self.alt;
-            const name_c = self.askName();
-            // Hosting her own terminal, rook does not have an opinion
-            // about what she is doing — her screen says that, in her
-            // words. What rook knows is whether the program is up and
-            // whether it is writing, so that is all the bar claims.
-            if (self.veraChatPane()) |vp| {
-                const lo = vp.last_output_ms.load(.acquire);
-                const producing = lo != 0 and panepkg.epochMs() - lo < chromepkg.working_ms;
-                const mark: ui.Mark = if (producing) .working else .none;
-                vis += ui.module(out, t, name_c, if (producing) ui.markInk(t, mark) else t.secondary, producing);
-                vis += ui.module(out, t, " ", t.muted, false);
-                vis += ui.module(out, t, if (producing) "working" else "open", if (producing) ui.markInk(t, mark) else t.muted, false);
-                return vis;
-            }
-            const status = homepkg.askStatus(st, .{ .t = t, .ask_name = name_c, .ask_on = self.ask_on });
-            const word: []const u8 = switch (st.req.state) {
-                .running => "thinking",
-                .offline => "offline",
-                .failed => "failed",
-                else => if (!self.ask_on) "offline" else if (status.mark == .attention) "waiting for you" else "ready",
-            };
-            vis += ui.module(out, t, name_c, if (status.mark == .none) t.secondary else ui.markInk(t, status.mark), status.mark != .none);
-            vis += ui.module(out, t, " ", t.muted, false);
-            vis += ui.module(out, t, word, if (status.mark == .none) t.muted else ui.markInk(t, status.mark), false);
-            return vis;
-        }
         if (std.mem.eql(u8, name, "working")) {
             const n = self.countWorking();
             if (n == 0) return 0;
@@ -4792,12 +4396,6 @@ pub const Server = struct {
             var b: [16]u8 = undefined;
             return ui.module(out, t, std.fmt.bufPrint(&b, "{s}g {d}", .{ ui.glyph(t, .pin), n }) catch "?", t.muted, false);
         }
-        return 0;
-    }
-
-    /// Actions the companion proposed that nobody ran: they need you.
-    fn countApprovals(self: *Server) usize {
-        if (self.alt.req.ref) |*r| return r.pending();
         return 0;
     }
 
@@ -4975,8 +4573,8 @@ pub const Server = struct {
         const r: layoutpkg.Rect = .{ .x = (g.cols -| w) / 2, .y = 1 + (body -| 1 -| h) / 2, .w = w, .h = h };
         const f = &self.over;
         var b: [64]u8 = undefined;
-        altpkg.fillRect(f, r, t.raised);
-        altpkg.box(f, r, t.border, t.raised);
+        sheet.fillRect(f, r, t.raised);
+        sheet.box(f, r, t.border, t.raised);
         f.cup(r.x + 1, r.y);
         f.put((ui.Style{ .fg = t.border, .bg = t.raised }).sgr(&b));
         f.put("┤ ");
@@ -5005,7 +4603,7 @@ pub const Server = struct {
                 .yielded => "agent yielded — ⏎ takes",
                 .paused => "you ▸ agent attached, paused",
             } },
-            .{ .k = "since", .v = if (p.own_since_ms != 0) altpkg.age(&ab, panepkg.epochMs() - p.own_since_ms) else "—" },
+            .{ .k = "since", .v = if (p.own_since_ms != 0) sheet.age(&ab, panepkg.epochMs() - p.own_since_ms) else "—" },
             .{ .k = "cwd", .v = p.fgCwd(&cb) orelse "" },
             .{ .k = "title", .v = p.title(&tb) },
             .{ .k = "resume", .v = if (p.resumeLive().len > 0) p.resumeLive() else "— (rook resume . <cmd>)" },
@@ -5019,1681 +4617,137 @@ pub const Server = struct {
             f.put(row.k);
             f.cup(r.x + 12, ry);
             f.put((ui.Style{ .fg = t.primary, .bg = t.raised }).sgr(&b));
-            _ = altpkg.putW(f, row.v, r.w -| 14);
+            _ = sheet.putW(f, row.v, r.w -| 14);
         }
         f.put("\x1b[0m");
     }
 
-    // ---- the root ----
+    // ---- home ----
+    //
+    // One workspace outside the list of spaces: a Session flagged
+    // `home`, a key away from any of them (docs/home.md). It is made
+    // when it is gone to and is not there, from the config's [home];
+    // closing its last pane goes back to the space you came from, and
+    // it starts over the next time. It is never saved: a boot seeds it
+    // fresh.
 
-    /// Out, to rook: home. Moving nothing — the panes keep their
-    /// geometry and keep running — so entering a space again is the
-    /// exact frame you left. From the root it lands on home whatever
-    /// subview was up; the draft, the cursor and the receipt stay.
+    fn homeIndex(self: *Server) ?usize {
+        for (self.sessions.items, 0..) |sn, i| {
+            if (sn.home) return i;
+        }
+        return null;
+    }
+
+    pub fn atHome(self: *Server) bool {
+        return self.sessions.items.len > 0 and self.sess().home;
+    }
+
+    /// A space to go back to from home: the one you came from, else
+    /// any. Null when home is all there is.
+    fn awayFromHome(self: *Server) ?usize {
+        for ([_]?usize{ self.home_back, self.last_sess }) |cand| {
+            const ls = cand orelse continue;
+            if (ls < self.sessions.items.len and !self.sessions.items[ls].home) return ls;
+        }
+        for (self.sessions.items, 0..) |sn, i| {
+            if (!sn.home) return i;
+        }
+        return null;
+    }
+
+    /// Go home, made if it is not there.
     fn goHome(self: *Server) void {
-        if (self.popup != null) return;
-        self.at_root = true;
-        self.vera_keys = false;
-        self.alt.view = .home;
-        self.scrolling = false;
-        self.selecting = false;
-        self.gate = false;
-        self.inspect = false;
-        self.ask_on = askpkg.available(self.conf.askSlice());
-        self.chat_on = askpkg.available(self.conf.chatSlice());
-        _ = self.touch();
-        self.full = true;
-        self.pending = true;
+        const i = self.ensureHome() catch return;
+        self.switchSession(i);
     }
 
-    /// Home, with the cursor on a section.
-    fn goHomeAt(self: *Server, land: altpkg.Land) void {
-        self.goHome();
-        self.alt.clear();
-        self.alt.land = land;
-        self.alt.home.focus = .nav;
-        self.alt.home.detail = false;
-    }
-
-    /// Home, in a mode: the field holds the mode's leading character
-    /// (or nothing, for intent), the cursor in it.
-    fn goHomeTyping(self: *Server, lead: []const u8) void {
-        self.goHome();
-        self.alt.clear();
-        if (lead.len == 0) {
-            self.showVera();
-            _ = self.tendVera();
-        }
-        for (lead) |ch| self.alt.push(ch);
-    }
-
-    /// A subview of the root: orbit, or ledger.
-    fn openView(self: *Server, v: altpkg.View) void {
-        if (self.popup != null) return;
-        const was = self.at_root;
-        self.goHome();
-        self.alt.view = v;
-        if (!was) self.alt.cur = 0;
-    }
-
-    /// Into the space the server is showing. The root's state stays
-    /// as it was, for the next visit.
-    fn enterSpace(self: *Server) void {
-        if (!self.at_root) return;
-        self.at_root = false;
-        self.alt.land = .none;
-        _ = self.touch();
-        self.full = true;
-        self.pending = true;
-    }
-
-    /// The region the view paints: everything right of the global
-    /// pin dock (which does not move), under the tab bar, above the
-    /// calm bar. Workspace-local pins are inside it — they belong to
-    /// the space and contract with it.
-    fn altRegion(self: *Server) layoutpkg.Rect {
-        const g = self.geometry();
-        const body = self.bodyRows();
-        const base_x: u16 = if (self.side_w) |sw| sw + 1 else 0;
-        const x0: u16 = if (self.global_pins.items.len > 0 and self.dock_x != null) self.dock_x.? + 1 else base_x;
-        return .{ .x = x0, .y = 1, .w = g.cols -| x0, .h = body -| 1 };
-    }
-
-    /// The companion's name, for the field and the bar.
-    fn askName(self: *Server) []const u8 {
-        const c = self.conf.companionSlice();
-        return if (c.len > 0) c else "companion";
-    }
-
-    /// Keys at the root. The navigator and the inspector take j/k
-    /// and h/l as motion; every other printable letter is for vera
-    /// and summons her with the letter in the composer; the arrows,
-    /// ⇥ and C-n C-p walk whatever has focus. Returns the bytes
-    /// spent, so a run of keystrokes is walked one key at a time and
-    /// an escape sequence is taken whole.
-    fn altKey(self: *Server, c: *Client, bytes: []const u8) usize {
-        const st = &self.alt;
-        const h = &st.home;
-        defer {
-            self.full = true;
-            self.pending = true;
-        }
-        const home = st.mode() == .intent and st.view == .home;
-        const b = bytes[0];
-        // Ctrl-h/l walk the regions the way they walk panes; at an
-        // edge the byte is the view's again (Ctrl-H in vera's
-        // composer is still a backspace).
-        if (home and (b == 0x08 or b == 0x0c)) {
-            if (h.navFocus(if (b == 0x08) 'h' else 'l')) return 1;
-        }
-        // The companion's own terminal has the keyboard while it has
-        // the focus, and everything rook did not spend above is the
-        // program's: Esc and the arrows it opens, Ctrl-j for a
-        // newline, its own history, its own paste. Rook keeps only
-        // the prefix (armed above) and the four motions — and of
-        // those, only the ones with somewhere to go, which is the
-        // same bargain every pane in a space makes.
-        if (home and h.focus == .vera) {
-            if (self.veraChatPane()) |vp| return self.toVera(c, vp, bytes);
-        }
-        if (b == 0x1b) {
-            if (bytes.len >= 3 and (bytes[1] == '[' or bytes[1] == 'O')) {
-                var i: usize = 2;
-                while (i < bytes.len and !(bytes[i] >= 0x40 and bytes[i] <= 0x7e)) i += 1;
-                const fin: u8 = if (i < bytes.len) bytes[i] else 0;
-                switch (fin) {
-                    'A' => self.rootMove(-1),
-                    'B' => self.rootMove(1),
-                    'C' => if (home) {
-                        _ = h.navFocus('l');
-                    },
-                    'D' => if (home) {
-                        _ = h.navFocus('h');
-                    },
-                    'Z' => if (home) self.cycleFocus(-1) else st.move(-1),
-                    '5' => if (home and h.focus == .vera) {
-                        h.thread_scroll += 4;
-                    } else if (home and h.focus == .insp) {
-                        h.insp.scroll -|= 8;
-                    },
-                    '6' => if (home and h.focus == .vera) {
-                        h.thread_scroll -|= 4;
-                    } else if (home and h.focus == .insp) {
-                        h.insp.scroll += 8;
-                    },
-                    else => {},
-                }
-                return @min(i + 1, bytes.len);
-            }
-            _ = st.escape();
-            return 1;
-        }
-        switch (b) {
-            '\r', '\n' => self.altAct(),
-            0x7f, 0x08 => if (h.focus == .vera or !home) st.pop(),
-            '\t' => if (home) self.cycleFocus(1) else st.move(1),
-            0x0e => self.rootMove(1), // C-n
-            0x10 => self.rootMove(-1), // C-p
-            0x15 => st.clear(), // C-u
-            0x03 => _ = st.escape(), // C-c
-            else => {
-                if (b < 0x20) return 1;
-                const len = std.unicode.utf8ByteSequenceLength(b) catch 1;
-                const end = @min(len, bytes.len);
-                // motion in the navigator and the inspector: j k h l,
-                // o to open the workspace, g G to the ends; anything
-                // else is for vera
-                if (home and h.focus != .vera and st.len == 0 and len == 1) {
-                    switch (b) {
-                        'j' => {
-                            self.rootMove(1);
-                            return 1;
-                        },
-                        'k' => {
-                            self.rootMove(-1);
-                            return 1;
-                        },
-                        'h' => {
-                            _ = h.navFocus('h');
-                            return 1;
-                        },
-                        'l' => {
-                            _ = h.navFocus('l');
-                            return 1;
-                        },
-                        'o' => {
-                            self.openSelected();
-                            return 1;
-                        },
-                        'g' => {
-                            if (h.focus == .nav) {
-                                h.nav_cur = 0;
-                                h.clampNav();
-                                h.nav_touched = true;
-                                h.noteSelection();
-                            } else h.insp.scroll = 0;
-                            return 1;
-                        },
-                        'G' => {
-                            if (h.focus == .nav) {
-                                h.nav_cur = h.rows_n -| 1;
-                                h.clampNav();
-                                h.nav_touched = true;
-                                h.noteSelection();
-                            }
-                            return 1;
-                        },
-                        else => {},
-                    }
-                }
-                // typing is for vera: summoned, with the letter
-                if (home and h.focus != .vera and (st.len > 0 or (b != '/' and b != ':'))) {
-                    self.showVera();
-                    // her own terminal owns its box: the letter is
-                    // typed into it, not into a draft rook keeps.
-                    _ = self.tendVera();
-                    if (self.veraChatPane()) |vp| return self.toVera(c, vp, bytes);
-                }
-                for (bytes[0..end]) |ch| st.push(ch);
-                if (st.mode() != .intent) st.cur = 0;
-                return end;
-            },
-        }
-        return 1;
-    }
-
-    /// ↑ ↓ (j k, C-p C-n): the rows while finding or commanding; at
-    /// home, whatever has focus — the navigator's rows, the
-    /// inspector's controls (or its scroll, when it has none), vera's
-    /// thread.
-    fn rootMove(self: *Server, d: i32) void {
-        const st = &self.alt;
-        const h = &st.home;
-        if (st.mode() != .intent or st.view != .home) {
-            st.move(d);
+    /// Home and back: from a space it goes home, made if it is not
+    /// there; from home it goes back to the space you came from.
+    fn toggleHome(self: *Server) void {
+        if (self.atHome()) {
+            if (self.awayFromHome()) |i| self.switchSession(i);
             return;
         }
-        switch (h.focus) {
-            .nav => h.moveNav(d),
-            .insp => if (h.insp.acts_n > 0) h.insp.moveAct(d) else {
-                if (d > 0) h.insp.scroll += 1 else h.insp.scroll -|= 1;
-            },
-            .vera => if (d < 0) {
-                h.thread_scroll += 1;
-            } else {
-                h.thread_scroll -|= 1;
-            },
-        }
+        const i = self.ensureHome() catch return;
+        self.switchSession(i);
     }
 
-    /// ⇥: navigator, inspector, vera (when she is up), and around.
-    fn cycleFocus(self: *Server, d: i32) void {
-        const h = &self.alt.home;
-        const order = [_]homepkg.Region{ .nav, .insp, .vera };
-        var i: usize = 0;
-        for (order, 0..) |r, k| {
-            if (r == h.focus) i = k;
+    /// Home's index, seeding it first when it is not there. The view
+    /// stays where it was: going there is the caller's.
+    fn ensureHome(self: *Server) !usize {
+        if (self.homeIndex()) |i| return i;
+        const sn = try self.gpa.create(Session);
+        sn.* = .{ .home = true };
+        sn.setName("home");
+        try self.sessions.append(self.gpa, sn);
+        const idx = self.sessions.items.len - 1;
+        const was = self.cur_sess;
+        const alone = self.sessions.items.len == 1;
+        // newWindow builds into the current session
+        self.cur_sess = idx;
+        const wins = self.home_conf.windows[0..self.home_conf.windows_n];
+        if (wins.len == 0) {
+            self.homeWindow(null) catch {};
+        } else for (wins) |*w| self.homeWindow(w) catch {};
+        if (sn.windows.items.len == 0) {
+            // nothing would start: no home rather than an empty one
+            _ = self.sessions.orderedRemove(idx);
+            sn.windows.deinit(self.gpa);
+            self.gpa.destroy(sn);
+            self.cur_sess = if (alone) 0 else was;
+            return error.HomeFailed;
         }
-        const n: i32 = if (h.veraShown()) 3 else 2;
-        i = @intCast(@mod(@as(i32, @intCast(i)) + d, n));
-        h.focus = order[i];
-        h.detail = h.focus != .nav;
-    }
-
-    /// ↵ at the root: whatever has focus acts — the navigator opens
-    /// the inspector, the inspector runs its selected control, vera
-    /// sends the draft.
-    fn altAct(self: *Server) void {
-        const st = &self.alt;
-        const h = &st.home;
-        if (st.mode() == .intent and st.view == .home) {
-            switch (h.focus) {
-                .nav => _ = h.navFocus('l'),
-                .insp => self.inspAct(),
-                .vera => if (st.len > 0) self.sendAsk(),
-            }
-            self.full = true;
-            self.pending = true;
-            return;
-        }
-        self.altBuild();
-        const row = st.selected() orelse return;
-        switch (row.kind) {
-            .attention, .pane => {
-                self.enterSpace();
-                self.focusPane(row.pane);
-            },
-            .ask => {
-                self.enterSpace();
-                self.jumpToAgent(row.arg);
-            },
-            .work => {
-                self.enterSpace();
-                if (row.pane != 0 and self.pane(row.pane) != null) {
-                    self.focusPane(row.pane);
-                } else if (row.arg.len > 0) {
-                    self.jumpToAgent(row.arg);
-                } else if (row.ws < self.sessions.items.len) {
-                    self.switchSession(row.ws);
-                }
-            },
-            .space => {
-                self.enterSpace();
-                self.switchSession(row.ws);
-            },
-            .tab => {
-                self.enterSpace();
-                self.switchSession(row.ws);
-                if (row.win < self.sess().windows.items.len) self.selectWindow(row.win);
-            },
-            .pin => {
-                self.enterSpace();
-                if (self.pane(row.pane) != null) self.setFocus(row.pane);
-            },
-            .action => st.req.confirm(row.action),
-            .command => self.altCommand(row.cmd, row.arg),
-            .header, .note => {},
-        }
+        sn.cur = 0;
+        if (!alone) self.cur_sess = was;
+        try self.relayout();
         _ = self.touch();
-        self.full = true;
-        self.pending = true;
+        return idx;
     }
 
-    /// The draft goes to the companion, as typed, about whatever is
-    /// attached. The one door to interpretation: nothing else changes
-    /// until she answers, and what she proposes is shown before it
-    /// runs.
-    fn sendAsk(self: *Server) void {
-        const st = &self.alt;
-        const h = &st.home;
-        var text_buf: [askpkg.max_text]u8 = undefined;
-        const n = @min(st.len, text_buf.len);
-        @memcpy(text_buf[0..n], st.text[0..n]);
-        _ = h.thread.push(.you, text_buf[0..n], h.aboutTask(), h.aboutSpace(), panepkg.epochMs());
-        h.thread_scroll = 0;
-        st.req.send(self.conf.askSlice(), text_buf[0..n], h.aboutTask(), h.aboutSpace());
-        self.ask_on = st.req.state != .offline;
-        if (st.req.state == .offline) {
-            var b: [160]u8 = undefined;
-            _ = h.thread.push(.err, std.fmt.bufPrint(&b, "{s} is not on PATH — nothing was sent · the navigator, / and : still work", .{self.askName()}) catch "not on PATH", "", "", panepkg.epochMs());
-        } else if (st.req.state == .failed) {
-            _ = h.thread.push(.err, "could not start the command", "", "", panepkg.epochMs());
+    /// One window of home: its panes, each a login shell in its
+    /// directory with its command typed in once the prompt is up — so
+    /// a program that quits leaves the shell, not a closed pane.
+    fn homeWindow(self: *Server, w: ?*const config.Home.Window) !void {
+        const h = &self.home_conf;
+        const one = [1]config.Home.Pane{.{}};
+        const panes: []const config.Home.Pane = if (w) |ww| (if (ww.panes_n > 0) ww.panes[0..ww.panes_n] else &one) else &one;
+        const wdir = if (w) |ww| h.str(ww.dir) else "";
+        var db: [1024]u8 = undefined;
+        try self.newWindow(self.homeDir(panes[0], wdir, &db), null);
+        const win = self.window();
+        self.homeBoot(win.focused, panes[0]);
+        if (w) |ww| {
+            const name = h.str(ww.name);
+            if (name.len > 0) {
+                win.setName(name);
+                win.named = true;
+                win.name_by = .hand;
+            }
         }
-        st.clear();
-        _ = self.touch();
+        var prev = win.focused;
+        for (panes[1..]) |hp| {
+            const p = try self.startPane(self.homeDir(hp, wdir, &db), null);
+            try win.layout.split(prev, p.id, !hp.down);
+            self.homeBoot(p.id, hp);
+            prev = p.id;
+        }
+        win.focused = win.layout.firstLeaf() orelse win.focused;
     }
 
-    /// ↵ in the inspector: the selected control.
-    fn inspAct(self: *Server) void {
-        const st = &self.alt;
-        const h = &st.home;
-        const a = h.insp.selected() orelse return;
-        const tk = h.selectedTask();
-        switch (a.kind) {
-            .approval => st.req.confirm(a.action),
-            .answer, .control => {
-                const task: []const u8 = if (tk) |k| k.id else "";
-                if (!h.runner.start(a.label, a.run, task)) {
-                    _ = h.thread.push(.err, "one thing at a time: something is still running", task, "", panepkg.epochMs());
-                }
-            },
-            .open, .enter, .go_see => self.openSelected(),
-            .ask => self.askAbout(),
-        }
-        _ = self.touch();
+    fn homeBoot(self: *Server, id: u32, hp: config.Home.Pane) void {
+        const cmd = self.home_conf.str(hp.cmd);
+        if (cmd.len == 0) return;
+        if (self.pane(id)) |p| p.setBoot(cmd, nowMs() + 2000);
     }
 
-    /// `o`: the exact destination of what is selected — the pane
-    /// that signalled, the agent's pane, the space.
-    fn openSelected(self: *Server) void {
-        const st = &self.alt;
-        const h = &st.home;
-        const r = h.selectedRow() orelse return;
-        if (r.task) |ti| {
-            const tk = h.tasks[ti];
-            switch (tk.kind) {
-                .approval => return,
-                .signal, .found => {
-                    self.enterSpace();
-                    self.focusPane(tk.pane);
-                },
-                .producer => {
-                    if (tk.ws == null) return;
-                    self.enterSpace();
-                    if (tk.pane != 0 and self.pane(tk.pane) != null) {
-                        self.focusPane(tk.pane);
-                    } else {
-                        self.switchSession(tk.ws.?);
-                    }
-                },
-            }
-            _ = self.touch();
-            return;
-        }
-        if (r.space) |si| {
-            self.enterSpace();
-            self.switchSession(st.spaces[si].ws);
-            _ = self.touch();
-        }
-    }
-
-    /// "Ask vera about this": her pane, with the selected thing
-    /// attached as a reference the request carries.
-    fn askAbout(self: *Server) void {
-        const h = &self.alt.home;
-        const r = h.selectedRow() orelse return;
-        if (r.task) |ti| {
-            const tk = h.tasks[ti];
-            h.setAbout(tk.id, tk.full, tk.title);
-        } else if (r.space) |si| {
-            const sp = self.alt.spaces[si];
-            h.setAbout("", sp.full, sp.name);
-        }
-        self.showVera();
-        // Rook's own surface carries the reference in the request's
-        // environment (ROOK_ABOUT_TASK). A hosted chat is a program
-        // already running, with no such door: what rook can give it
-        // is the id, typed into its box as text the person edits or
-        // deletes. The chip above says what the id names, and a
-        // structured attachment waits on a seam mote does not have.
-        _ = self.tendVera();
-        if (self.veraChatPane()) |vp| {
-            if (r.task) |ti| {
-                const id = h.tasks[ti].id;
-                if (id.len > 0) {
-                    vp.write(id);
-                    vp.write(" ");
-                }
-            }
-        }
-    }
-
-    /// prefix-t: vera, or not. From a space the pane opens over the
-    /// panes and takes the keys; the panes keep their geometry.
-    fn toggleVera(self: *Server) void {
-        const h = &self.alt.home;
-        h.toggleVera();
-        if (h.focus == .vera) self.vera_dead = false;
-        if (!self.at_root) self.vera_keys = h.veraShown() and h.focus == .vera;
-        // Summoned for the first time, she is started here rather
-        // than a frame later: the keystroke after prefix-t is meant
-        // for her box.
-        _ = self.tendVera();
-        self.ask_on = askpkg.available(self.conf.askSlice());
-        self.chat_on = askpkg.available(self.conf.chatSlice());
-        _ = self.touch();
-        self.full = true;
-        self.pending = true;
-    }
-
-    /// Keys into vera's pane inside a space: the hosted chat's own,
-    /// or — when rook is drawing the surface itself — the composer's
-    /// and Esc.
-    fn veraKey(self: *Server, c: *Client, bytes: []const u8) usize {
-        const st = &self.alt;
-        const h = &st.home;
-        defer {
-            self.full = true;
-            self.pending = true;
-        }
-        const b = bytes[0];
-        if (self.veraChatPane()) |vp| {
-            // Ctrl-h is the way back to the panes, the same motion
-            // that walks out of any pane on the right edge of a
-            // space. The other three have nowhere to go from here
-            // and are the program's — Ctrl-j is its newline.
-            if (b == 0x08) {
-                self.vera_keys = false;
-                h.focus = .nav;
-                return 1;
-            }
-            return self.toVera(c, vp, bytes);
-        }
-        if (b == 0x1b) {
-            if (bytes.len >= 3 and (bytes[1] == '[' or bytes[1] == 'O')) {
-                var i: usize = 2;
-                while (i < bytes.len and !(bytes[i] >= 0x40 and bytes[i] <= 0x7e)) i += 1;
-                const fin: u8 = if (i < bytes.len) bytes[i] else 0;
-                switch (fin) {
-                    'A' => h.thread_scroll += 1,
-                    'B' => h.thread_scroll -|= 1,
-                    else => {},
-                }
-                return @min(i + 1, bytes.len);
-            }
-            // Esc: a running request, the draft, the attachment, then
-            // the pane (pinned: only the keys)
-            if (st.req.busy()) {
-                st.req.cancel();
-            } else if (st.len > 0) {
-                st.clear();
-            } else if (h.about_title_len > 0) {
-                h.clearAbout();
-            } else if (h.vera_pinned) {
-                self.vera_keys = false;
-                h.focus = .nav;
-            } else {
-                h.vera_open = false;
-                h.focus = .nav;
-                self.vera_keys = false;
-            }
-            return 1;
-        }
-        switch (b) {
-            '\r', '\n' => if (st.len > 0) self.sendAsk(),
-            0x7f, 0x08 => st.pop(),
-            0x15 => st.clear(),
-            0x03 => _ = st.escape(),
-            else => {
-                if (b < 0x20) return 1;
-                const len = std.unicode.utf8ByteSequenceLength(b) catch 1;
-                const end = @min(len, bytes.len);
-                for (bytes[0..end]) |ch| st.push(ch);
-                return end;
-            },
-        }
-        return 1;
-    }
-
-    fn altCommand(self: *Server, cmd: altpkg.Command, arg: []const u8) void {
-        switch (cmd) {
-            .go => if (self.sessionNamed(arg)) |i| {
-                self.alt.clear();
-                self.enterSpace();
-                self.switchSession(i);
-            },
-            .new => if (arg.len > 0) {
-                self.alt.clear();
-                self.enterSpace();
-                _ = self.newSession(arg, null, null, true) catch {};
-            },
-            .rename => if (arg.len > 0) {
-                self.renameWindow(arg);
-                self.alt.clear();
-            },
-            .close => if (arg.len > 0) {
-                self.closeSession(arg);
-                self.alt.clear();
-            },
-            .ledger => {
-                self.alt.view = .ledger;
-                self.conf.zoom_ledger = true;
-                self.alt.clear();
-            },
-            .orbit => {
-                self.alt.view = .orbit;
-                self.conf.zoom_ledger = false;
-                self.alt.clear();
-            },
-            .home => {
-                self.alt.view = .home;
-                self.alt.clear();
-            },
-            .now => {
-                self.alt.view = .home;
-                self.alt.clear();
-                self.alt.home.focus = .nav;
-                self.alt.home.detail = false;
-            },
-            .vera => {
-                self.alt.view = .home;
-                self.alt.clear();
-                self.showVera();
-                _ = self.tendVera();
-            },
-            .none => {},
-        }
-    }
-
-    /// Fill the model from rook's own tables — nothing here is
-    /// inferred and nothing is summarised: a space's name, the tabs
-    /// in it and who claimed them, who is unread, what a program said
-    /// in its notification, how long since anything was written, the
-    /// words a producer already spent on the space and on its work,
-    /// and for the space you left, the last lines of the pane you
-    /// were in. Home lays it out as sections: what the companion
-    /// proposed, what needs you, what is running, what finished,
-    /// then the spaces. Orbit and ledger lay the same facts out
-    /// spatially. Finding ranks everything as one list.
-    fn altBuild(self: *Server) void {
-        const st = &self.alt;
-        st.reset();
-        var fba = std.heap.FixedBufferAllocator.init(&st.buf);
-        const a = fba.allocator();
-        const now = panepkg.epochMs();
-
-        if (st.isCommand()) {
-            self.altCommandRows(a);
-            st.clampCursor();
-            return;
-        }
-        const text = st.query();
-        const finding = st.finding();
-        const home = st.view == .home and !finding;
-        if (home and st.mode() == .intent) {
-            self.homeBuild(a, now);
-            return;
-        }
-        var land_needs: ?usize = null;
-        var land_running: ?usize = null;
-
-        // What the companion proposed: actions are rows, first, so
-        // ↵ reaches them; each with the command it would run.
-        if (home and st.mode() == .intent) {
-            if (st.req.ref) |*r| {
-                if (r.actions_n > 0) {
-                    st.rows.append(self.gpa, .{ .kind = .header, .name = "proposed", .line = "↵ runs one, by hand · esc dismisses" }) catch {};
-                }
-                for (r.actions[0..r.actions_n], 0..) |*act, i| {
-                    const mark: ui.Mark = if (act.running) .working else if (!act.ran) .waiting else if (act.code == 0) .success else .failed;
-                    const line = if (act.ran)
-                        (std.fmt.allocPrint(a, "ran ({d}) · {s}", .{ act.code, askpkg.firstLine(act.receiptSlice()) }) catch "")
-                    else
-                        (std.fmt.allocPrint(a, "$ {s}", .{act.runSlice()}) catch "");
-                    st.rows.append(self.gpa, .{ .kind = .action, .glyph = ui.markGlyph(&self.ui, mark), .ink = ui.markInk(&self.ui, mark), .name = act.labelSlice(), .line = line, .line_ink = if (act.ran) self.ui.secondary else self.ui.muted, .hint = if (act.ran) "" else "↵ run", .action = i }) catch {};
-                }
-            }
-        }
-
-        // Attention first: the unread channel, oldest first — panes a
-        // program signalled while nobody looked.
-        var attn: [64]*panepkg.Pane = undefined;
-        var an: usize = 0;
-        for (self.panes.items) |p| {
-            if (p.unread_ms == 0 or self.ownPane(p.id)) continue;
-            if (an == attn.len) break;
-            var i = an;
-            while (i > 0 and attn[i - 1].unread_ms > p.unread_ms) : (i -= 1) attn[i] = attn[i - 1];
-            attn[i] = p;
-            an += 1;
-        }
-        const claims = if (self.side.agents.panel) |pnl| pnl.items else &.{};
-        var asks: usize = 0;
-        for (claims) |it| {
-            if ((it.state == .blocked or it.state == .failed) and self.sessionNamed(it.workspace()) != null) asks += 1;
-        }
-        if (home) {
-            var hb: [32]u8 = undefined;
-            const count = std.fmt.bufPrint(&hb, "{d}", .{an + asks}) catch "";
-            st.rows.append(self.gpa, .{ .kind = .header, .name = "needs you", .line = if (an + asks > 0) (a.dupe(u8, count) catch "") else "nothing — no pane asked, no task is waiting" }) catch {};
-            land_needs = st.rows.items.len;
-        }
-        for (attn[0..an]) |p| {
-            const at = self.placeOf(p.id) orelse continue;
-            var tab: []const u8 = "";
-            if (at.window) |wi| {
-                if (self.sessionNamed(at.workspace)) |si| {
-                    const sn = self.sessions.items[si];
-                    if (wi - 1 < sn.windows.items.len) {
-                        var nb: [48]u8 = undefined;
-                        tab = a.dupe(u8, self.tabName(sn, sn.windows.items[wi - 1], &nb)) catch "";
-                    }
-                }
-            } else if (std.mem.eql(u8, at.place, "pin")) {
-                tab = "pin";
-            }
-            var nb: [64]u8 = undefined;
-            const prog = p.fgName(&nb) orelse "shell";
-            // the row is the place; the actor rides after it when one
-            // claimed the pane, and the tool speaks in the line
-            const name = if (p.owner_len > 0 and !std.mem.eql(u8, p.ownerName(), tab))
-                std.fmt.allocPrint(a, "{s} › {s} · {s}", .{ chromepkg.shortSpace(at.workspace), tab, p.ownerName() }) catch continue
-            else
-                std.fmt.allocPrint(a, "{s} › {s}", .{ chromepkg.shortSpace(at.workspace), tab }) catch continue;
-            const said: []const u8 = if (p.notif_ms != 0 and p.notif_ms >= p.unread_ms and p.notif_title_len > 0)
-                a.dupe(u8, p.notif_title[0..p.notif_title_len]) catch ""
-            else if (p.bell_ms != 0 and p.bell_ms >= p.unread_ms)
-                "rang the bell"
-            else if (p.progress_done_ms != 0 and p.progress_done_ms >= p.unread_ms)
-                "finished its progress bar"
-            else
-                "signalled";
-            var ab: [16]u8 = undefined;
-            const line = std.fmt.allocPrint(a, "{s} {s} · {s} ago", .{ prog, said, altpkg.age(&ab, now - p.unread_ms) }) catch said;
-            var row: altpkg.Row = .{ .kind = .attention, .glyph = ui.markGlyph(&self.ui, .attention), .ink = self.ui.attention, .name = name, .line = line, .line_ink = self.ui.secondary, .hint = "↵ go", .pane = p.id };
-            if (finding) row.score = altpkg.fuzzy(name, text) orelse (altpkg.fuzzy(line, text) orelse continue) + 20;
-            st.rows.append(self.gpa, row) catch {};
-        }
-        // …and what a producer said needs you: an agents row pushed
-        // with `waiting` (or `failed`) for a space rook holds.
-        for (claims) |it| {
-            if (it.state != .blocked and it.state != .failed) continue;
-            const ws = it.workspace();
-            if (self.sessionNamed(ws) == null) continue;
-            const name = std.fmt.allocPrint(a, "{s} — {s}", .{ chromepkg.shortSpace(ws), it.name }) catch continue;
-            const detail = if (it.event.len > 0) it.event else it.sub;
-            const line = std.fmt.allocPrint(a, "{s}{s}{s}", .{ it.state.word(), if (detail.len > 0) " · " else "", detail }) catch it.state.word();
-            const argd = a.dupe(u8, ws) catch continue;
-            var row: altpkg.Row = .{ .kind = .ask, .glyph = ui.markGlyph(&self.ui, if (it.state == .failed) .failed else .waiting), .ink = if (it.state == .failed) self.ui.err else self.ui.waiting, .name = name, .line = line, .line_ink = self.ui.secondary, .hint = "↵ go", .arg = argd };
-            if (finding) row.score = altpkg.fuzzy(name, text) orelse (altpkg.fuzzy(line, text) orelse continue) + 20;
-            st.rows.append(self.gpa, row) catch {};
-        }
-
-        // Work: a producer's open tasks (its words: the goal, the
-        // state, the space, and whatever else it said), then the
-        // agents rook can see running that no producer claimed.
-        // Home lists them; orbit reads them off the figures instead.
-        if (home or finding) {
-            var running: usize = 0;
-            var recent: usize = 0;
-            for (claims) |it| {
-                switch (it.state) {
-                    .working, .idle, .none => running += 1,
-                    .done => recent += 1,
-                    else => {},
-                }
-            }
-            var found_n: usize = 0;
-            for (self.sessions.items) |sn| {
-                if (chromepkg.claimedIn(claims, sn.label())) continue;
-                for (self.panes.items) |p| {
-                    if (p.is_agent and self.paneIn(sn, p.id)) found_n += 1;
-                }
-            }
-            if (home) {
-                var hb: [32]u8 = undefined;
-                const count = std.fmt.bufPrint(&hb, "{d}", .{running + found_n}) catch "";
-                st.rows.append(self.gpa, .{ .kind = .header, .name = "running", .line = if (running + found_n > 0) (a.dupe(u8, count) catch "") else "nothing — no task is open, no agent is running" }) catch {};
-                land_running = st.rows.items.len;
-            }
-            for (claims) |it| {
-                if (it.state == .blocked or it.state == .failed or it.state == .done) continue;
-                self.workRow(a, it, text, finding);
-            }
-            for (self.sessions.items, 0..) |sn, si| {
-                if (chromepkg.claimedIn(claims, sn.label())) continue;
-                for (self.panes.items) |p| {
-                    if (!p.is_agent or !self.paneIn(sn, p.id)) continue;
-                    var nb: [64]u8 = undefined;
-                    const prog = p.fgName(&nb) orelse "agent";
-                    const at = self.placeOf(p.id) orelse continue;
-                    var tab: []const u8 = "";
-                    if (at.window) |wi| {
-                        if (wi - 1 < sn.windows.items.len) {
-                            var tb: [48]u8 = undefined;
-                            tab = a.dupe(u8, self.tabName(sn, sn.windows.items[wi - 1], &tb)) catch "";
-                        }
-                    }
-                    const lo = p.last_output_ms.load(.acquire);
-                    const producing = lo != 0 and now - lo < chromepkg.working_ms;
-                    var ab: [16]u8 = undefined;
-                    // rook can say a program is here and whether it is
-                    // producing; what it is doing is not rook's to say
-                    const who: []const u8 = if (p.owner_len > 0) p.ownerName() else prog;
-                    const name = std.fmt.allocPrint(a, "{s} in {s} › {s}", .{ who, chromepkg.shortSpace(sn.label()), tab }) catch continue;
-                    const line = if (producing)
-                        (std.fmt.allocPrint(a, "{s} producing · goal unknown — nobody pushed a task for it", .{prog}) catch "")
-                    else
-                        (std.fmt.allocPrint(a, "{s} idle · {s} since output · goal unknown", .{ prog, altpkg.age(&ab, now - lo) }) catch "");
-                    const mark: ui.Mark = if (producing) .working else .waiting;
-                    var row: altpkg.Row = .{ .kind = .work, .glyph = ui.markGlyph(&self.ui, mark), .ink = ui.markInk(&self.ui, mark), .name = name, .line = line, .line_ink = self.ui.muted, .hint = "↵ go", .pane = p.id, .ws = si };
-                    if (finding) row.score = (altpkg.fuzzy(name, text) orelse continue) + 3;
-                    st.rows.append(self.gpa, row) catch {};
-                }
-            }
-            if (home) {
-                var hb: [32]u8 = undefined;
-                const count = std.fmt.bufPrint(&hb, "{d}", .{recent}) catch "";
-                st.rows.append(self.gpa, .{ .kind = .header, .name = "recent", .line = if (recent > 0) (a.dupe(u8, count) catch "") else "nothing finished yet" }) catch {};
-            }
-            for (claims) |it| {
-                if (it.state != .done) continue;
-                self.workRow(a, it, text, finding);
-            }
-        }
-
-        // Spaces, in workspace order — always the same order, so a
-        // space is where it was last time whatever changed in it.
-        if (home) {
-            var hb: [32]u8 = undefined;
-            const count = std.fmt.bufPrint(&hb, "{d}", .{self.sessions.items.len}) catch "";
-            st.rows.append(self.gpa, .{ .kind = .header, .name = "spaces", .line = a.dupe(u8, count) catch "" }) catch {};
-        }
-        for (self.sessions.items, 0..) |sn, si| {
-            if (st.spaces_n == st.spaces.len) break;
-            const sp = &st.spaces[st.spaces_n];
-            self.spaceInfo(a, sn, si, sp);
-            const idx = st.spaces_n;
-            st.spaces_n += 1;
-            // the tabs as one line, for ledger and the compact row
-            var tl: std.ArrayList(u8) = .empty;
-            for (sp.tabs, 0..) |t, ti| {
-                if (ti > 0) tl.appendSlice(a, " · ") catch {};
-                var lb: [64]u8 = undefined;
-                tl.appendSlice(a, altpkg.tabLabel(&lb, t.name, t.actor)) catch {};
-                const mg = ui.markGlyph(&self.ui, altpkg.markOf(t.mark));
-                if (mg.len > 0) {
-                    tl.appendSlice(a, " ") catch {};
-                    tl.appendSlice(a, mg) catch {};
-                }
-            }
-            if (!finding) {
-                st.rows.append(self.gpa, .{
-                    .kind = .space,
-                    .name = sp.name,
-                    .line = sp.event,
-                    .second = tl.items,
-                    .hint = "↵ enter",
-                    .ws = si,
-                    .space = idx,
-                }) catch {};
-                continue;
-            }
-            // Finding: spaces, tabs and panes as one-line rows, ranked.
-            if (altpkg.fuzzy(sp.name, text)) |sc| {
-                st.rows.append(self.gpa, .{ .kind = .space, .name = sp.name, .line = sp.event, .second = tl.items, .hint = "↵ enter", .ws = si, .space = idx, .score = sc }) catch {};
-            }
-            for (sn.windows.items, 0..) |w, wi| {
-                var nb: [48]u8 = undefined;
-                const tab = self.tabName(sn, w, &nb);
-                const wname = std.fmt.allocPrint(a, "{s} › {s}", .{ sp.name, tab }) catch continue;
-                const actor = self.windowOwner(w);
-                const wline: []const u8 = if (actor.len > 0) (std.fmt.allocPrint(a, "{s} drives it", .{actor}) catch "") else "";
-                if (altpkg.fuzzy(wname, text)) |sc| {
-                    st.rows.append(self.gpa, .{ .kind = .tab, .name = wname, .line = wline, .hint = "↵ go", .ws = si, .win = wi, .score = sc + 2 }) catch {};
-                }
-                for (self.panes.items) |p| {
-                    if (!w.layout.contains(p.id)) continue;
-                    var pb: [64]u8 = undefined;
-                    const prog = p.fgName(&pb) orelse "shell";
-                    var tb: [256]u8 = undefined;
-                    const title = p.title(&tb);
-                    const pname = std.fmt.allocPrint(a, "{s} › {s} › {s}", .{ sp.name, tab, prog }) catch continue;
-                    const pline = a.dupe(u8, title) catch "";
-                    const sc = altpkg.fuzzy(pname, text) orelse (if (altpkg.fuzzy(pline, text)) |s2| s2 + 30 else null) orelse continue;
-                    st.rows.append(self.gpa, .{ .kind = .pane, .name = pname, .line = pline, .hint = "↵ focus", .pane = p.id, .score = sc + 4 }) catch {};
-                }
-            }
-        }
-
-        // Global pins: live at every altitude, listed with where they
-        // came from so the keyboard can reach the dock.
-        if (self.global_pins.items.len > 0 and !finding) {
-            st.rows.append(self.gpa, .{ .kind = .header, .name = "pinned everywhere" }) catch {};
-        }
-        for (self.global_pins.items) |id| {
-            const p = self.pane(id) orelse continue;
-            var pb: [64]u8 = undefined;
-            const prog = p.fgName(&pb) orelse "shell";
-            const from = self.pinOrigin(id);
-            const name = std.fmt.allocPrint(a, "{s}", .{prog}) catch continue;
-            const line = if (from.len > 0)
-                std.fmt.allocPrint(a, "from {s}", .{chromepkg.shortSpace(from)}) catch ""
-            else
-                "";
-            var pg: [8]u8 = undefined;
-            const pin_glyph = std.fmt.bufPrint(&pg, "{s}g", .{ui.glyph(&self.ui, .pin)}) catch "g";
-            const pin_glyph_d = a.dupe(u8, pin_glyph) catch continue;
-            var row: altpkg.Row = .{ .kind = .pin, .glyph = pin_glyph_d, .ink = self.ui.muted, .name = name, .line = line, .hint = "↵ focus", .pane = id };
-            if (finding) row.score = (altpkg.fuzzy(name, text) orelse continue) + 6;
-            st.rows.append(self.gpa, row) catch {};
-        }
-
-        if (finding) {
-            std.mem.sort(altpkg.Row, st.rows.items, {}, struct {
-                fn lt(_: void, x: altpkg.Row, y: altpkg.Row) bool {
-                    return x.score < y.score;
-                }
-            }.lt);
-            if (st.rows.items.len == 0) {
-                st.rows.append(self.gpa, .{ .kind = .note, .name = "nothing matches" }) catch {};
-            }
-        }
-        // a section asked for by a key: the cursor on its first row,
-        // or on the header's neighbour when it is empty
-        switch (st.land) {
-            .none => {},
-            .needs => if (land_needs) |i| {
-                st.cur = i;
-            },
-            .running => if (land_running) |i| {
-                st.cur = i;
-            },
-        }
-        st.land = .none;
-        st.clampCursor();
-    }
-
-    /// Home's projection: the spaces, then every task as one entity
-    /// — a producer's row, an agent rook sees producing where nobody
-    /// claims, a pane that signalled, an action waiting on a hand —
-    /// sorted into its group, then the navigator's rows, then the
-    /// inspector for what is selected. A task the rail knows that
-    /// changed state since last time earns one note in the thread.
-    fn homeBuild(self: *Server, a: std.mem.Allocator, now: i64) void {
-        const st = &self.alt;
-        const h = &st.home;
-        h.reset();
-        // What the rail says in the server's first seconds is what was
-        // already true, not news; after that, a task appearing is.
-        h.seeded = nowMs() - self.started_ms > 5000;
-        for (self.sessions.items, 0..) |sn, si| {
-            if (st.spaces_n == st.spaces.len) break;
-            self.spaceInfo(a, sn, si, &st.spaces[st.spaces_n]);
-            st.spaces_n += 1;
-        }
-        const claims = if (self.side.agents.panel) |pnl| pnl.items else &.{};
-
-        // needs you: what the companion proposed, still waiting on a hand
-        if (st.req.ref) |*r| {
-            for (r.actions[0..r.actions_n], 0..) |*act, i| {
-                if (act.ran or act.running) continue;
-                _ = h.addTask(.{
-                    .kind = .approval,
-                    .module = .needs,
-                    .id = r.taskSlice(),
-                    .title = act.labelSlice(),
-                    .space = r.spaceSlice(),
-                    .full = r.spaceSlice(),
-                    .actor = self.askName(),
-                    .event = act.runSlice(),
-                    .action = i,
-                    .ws = self.sessionNamed(r.spaceSlice()),
-                });
-            }
-        }
-        // …then what a program asked, oldest first
-        var attn: [64]*panepkg.Pane = undefined;
-        var an: usize = 0;
-        for (self.panes.items) |p| {
-            if (p.unread_ms == 0 or self.ownPane(p.id)) continue;
-            if (an == attn.len) break;
-            var i = an;
-            while (i > 0 and attn[i - 1].unread_ms > p.unread_ms) : (i -= 1) attn[i] = attn[i - 1];
-            attn[i] = p;
-            an += 1;
-        }
-        for (attn[0..an]) |p| {
-            const at = self.placeOf(p.id) orelse continue;
-            var tab: []const u8 = "";
-            var ws: ?usize = null;
-            var win: ?usize = null;
-            if (self.sessionNamed(at.workspace)) |si| {
-                ws = si;
-                if (at.window) |wi| {
-                    win = wi - 1;
-                    const sn = self.sessions.items[si];
-                    if (wi - 1 < sn.windows.items.len) {
-                        var nb: [48]u8 = undefined;
-                        tab = a.dupe(u8, self.tabName(sn, sn.windows.items[wi - 1], &nb)) catch "";
-                    }
-                }
-            }
-            var nb: [64]u8 = undefined;
-            const prog = a.dupe(u8, p.fgName(&nb) orelse "shell") catch "shell";
-            const said: []const u8 = if (p.notif_ms != 0 and p.notif_ms >= p.unread_ms and p.notif_title_len > 0)
-                a.dupe(u8, p.notif_title[0..p.notif_title_len]) catch ""
-            else if (p.bell_ms != 0 and p.bell_ms >= p.unread_ms)
-                "rang the bell"
-            else if (p.progress_done_ms != 0 and p.progress_done_ms >= p.unread_ms)
-                "finished its progress bar"
-            else
-                "signalled";
-            _ = h.addTask(.{
-                .kind = .signal,
-                .module = .needs,
-                .title = said,
-                .space = chromepkg.shortSpace(at.workspace),
-                .full = at.workspace,
-                .actor = if (p.owner_len > 0) p.ownerName() else prog,
-                .program = prog,
-                .tab = tab,
-                .event = if (p.notif_body_len > 0 and p.notif_ms >= p.unread_ms) (a.dupe(u8, p.notif_body[0..p.notif_body_len]) catch "") else "",
-                .unread = true,
-                .age_ms = now - p.unread_ms,
-                .pane = p.id,
-                .ws = ws,
-                .win = win,
-            });
-        }
-        // the producer's tasks, each in its group by state
-        for (claims) |*it| {
-            const ws_name = it.workspace();
-            const held = self.sessionNamed(ws_name);
-            const module: homepkg.Module = switch (it.state) {
-                .blocked, .failed => .needs,
-                .done => .recent,
-                else => .active,
-            };
-            const detail = if (it.event.len > 0) it.event else it.sub;
-            const agent_pane: u32 = if (held) |si| (self.agentPaneIn(self.sessions.items[si]) orelse 0) else 0;
-            _ = h.addTask(.{
-                .kind = .producer,
-                .module = module,
-                .id = it.id,
-                .title = it.name,
-                .state = it.state,
-                .space = chromepkg.shortSpace(ws_name),
-                .full = ws_name,
-                .actor = it.actor,
-                .event = if (std.mem.startsWith(u8, detail, it.state.word())) std.mem.trimStart(u8, detail[it.state.word().len..], " ·") else detail,
-                .result = it.result,
-                .unread = it.unread,
-                .age_ms = if (it.started_ms > 0) now - it.started_ms else 0,
-                .pane = agent_pane,
-                .ws = held,
-                .item = it,
-            });
-            if (h.remember(it.id, it.state)) |was| {
-                // a task first seen already done is history, not news
-                if (was != .none or (h.seeded and it.state != .done)) self.noteTransition(a, it.*, was, now);
-            }
-        }
-        // agents rook can see producing where no producer claims: one
-        // quiet row each, titled by what rook can see. Idle ones are
-        // not work; they show as marks on their space's row.
-        for (self.sessions.items, 0..) |sn, si| {
-            if (chromepkg.claimedIn(claims, sn.label())) continue;
-            for (self.panes.items) |p| {
-                if (!p.is_agent or !self.paneIn(sn, p.id)) continue;
-                const lo = p.last_output_ms.load(.acquire);
-                if (lo == 0 or now - lo >= chromepkg.working_ms) continue;
-                var nb: [64]u8 = undefined;
-                const prog = a.dupe(u8, p.fgName(&nb) orelse "agent") catch "agent";
-                const at = self.placeOf(p.id) orelse continue;
-                var tab: []const u8 = "";
-                if (at.window) |wi| {
-                    if (wi - 1 < sn.windows.items.len) {
-                        var tb: [48]u8 = undefined;
-                        tab = a.dupe(u8, self.tabName(sn, sn.windows.items[wi - 1], &tb)) catch "";
-                    }
-                }
-                _ = h.addTask(.{
-                    .kind = .found,
-                    .module = .active,
-                    .title = std.fmt.allocPrint(a, "{s} at work", .{if (p.owner_len > 0) p.ownerName() else prog}) catch prog,
-                    .space = chromepkg.shortSpace(sn.label()),
-                    .full = sn.label(),
-                    .actor = prog,
-                    .program = prog,
-                    .tab = tab,
-                    .age_ms = now - lo,
-                    .pane = p.id,
-                    .ws = si,
-                });
-            }
-        }
-
-        // the rows, group by group; an empty group is left out, and
-        // an empty navigator says so once
-        var any_work = false;
-        inline for (.{ homepkg.Module.needs, homepkg.Module.active, homepkg.Module.recent }) |m| {
-            var n: usize = 0;
-            for (h.tasks[0..h.tasks_n]) |tk| {
-                if (tk.module == m) n += 1;
-            }
-            if (n > 0) {
-                any_work = true;
-                h.addRow(.{ .module = m, .header = true });
-                for (h.tasks[0..h.tasks_n], 0..) |tk, ti| {
-                    if (tk.module == m) h.addRow(.{ .module = m, .task = ti });
-                }
-            }
-        }
-        if (!any_work) h.addRow(.{ .module = .active });
-        h.addRow(.{ .module = .spaces, .header = true });
-        for (0..st.spaces_n) |si| h.addRow(.{ .module = .spaces, .space = si });
-
-        switch (st.land) {
-            .none => {},
-            .needs => {
-                if (!h.landNav(.needs)) _ = h.landNav(.active);
-            },
-            .running => {
-                if (!h.landNav(.active)) _ = h.landNav(.needs);
-            },
-        }
-        st.land = .none;
-        h.restoreSelection();
-        self.inspBuild(a, now);
-    }
-
-    /// The inspector for what is selected: sections only where the
-    /// data is, controls only where the producer said, and rook's
-    /// own two — open the workspace, ask vera about this.
-    fn inspBuild(self: *Server, a: std.mem.Allocator, now: i64) void {
-        const st = &self.alt;
-        const h = &st.home;
-        const ins = &h.insp;
-        ins.reset();
-        var kb: [72]u8 = undefined;
-        const row = h.selectedRow() orelse {
-            ins.subject("");
-            self.inspQuiet(a);
-            return;
-        };
-        ins.subject(h.rowKey(row, &kb));
-        if (row.task) |ti| {
-            self.inspTask(a, h.tasks[ti], now);
-        } else if (row.space) |si| {
-            self.inspSpace(a, si, now);
-        }
-    }
-
-    /// Nothing selected: what there is, and what there is to do.
-    fn inspQuiet(self: *Server, a: std.mem.Allocator) void {
-        const ins = &self.alt.home.insp;
-        ins.line(.{ .kind = .title, .text = "rook", .mark = .none });
-        ins.line(.{ .kind = .meta, .text = std.fmt.allocPrint(a, "{d} space{s} · nothing running · nothing needs you", .{ self.sessions.items.len, plural(self.sessions.items.len) }) catch "" });
-        ins.line(.{ .kind = .blank });
-        ins.line(.{ .kind = .quiet, .text = "a task a producer pushes shows here by its goal; an agent rook sees producing shows by its pane" });
-        ins.line(.{ .kind = .blank });
-        ins.line(.{ .kind = .section, .text = "to do something" });
-        self.inspAskHint(a);
-        ins.line(.{ .kind = .kv, .extra = ":new", .text = "a new space, by name" });
-        ins.line(.{ .kind = .kv, .extra = "/", .text = "find a space, a task, a tab, a pane" });
-    }
-
-    /// "`t  ask vera": the companion's chord, when one is bound and
-    /// there is a companion to ask.
-    fn inspAskHint(self: *Server, a: std.mem.Allocator) void {
-        if (self.conf.companionSlice().len == 0) return;
-        var cb: [24]u8 = undefined;
-        const ch = self.chord(.companion, &cb) orelse return;
-        self.alt.home.insp.line(.{ .kind = .kv, .extra = a.dupe(u8, ch) catch return, .text = std.fmt.allocPrint(a, "ask {s}", .{self.askName()}) catch "ask" });
-    }
-
-    /// "ask vera about this", in the companion's name; none without one.
-    fn askAct(self: *Server, a: std.mem.Allocator) void {
-        if (self.conf.companionSlice().len == 0) return;
-        self.alt.home.insp.act(.{ .label = std.fmt.allocPrint(a, "ask {s} about this", .{self.askName()}) catch "ask about this", .kind = .ask });
-    }
-
-    fn inspTask(self: *Server, a: std.mem.Allocator, tk: homepkg.Task, now: i64) void {
-        const st = &self.alt;
-        const h = &st.home;
-        const ins = &h.insp;
-        var ab: [16]u8 = undefined;
-        const mark = tk.mark();
-        ins.line(.{ .kind = .title, .text = tk.title, .mark = mark });
-        // who, where, what state, since when
-        var meta: std.ArrayList(u8) = .empty;
-        meta.appendSlice(a, tk.stateWord()) catch {};
-        if (tk.space.len > 0) meta.print(a, " · in {s}", .{tk.space}) catch {};
-        if (tk.tab.len > 0) meta.print(a, " › {s}", .{tk.tab}) catch {};
-        if (tk.actor.len > 0 and tk.kind != .found) meta.print(a, " · {s}", .{tk.actor}) catch {};
-        if (tk.kind == .found) meta.print(a, " · {s}", .{tk.program}) catch {};
-        if (tk.kind == .producer and tk.age_ms > 0) meta.print(a, " · {s} since it started", .{altpkg.age(&ab, tk.age_ms)}) catch {};
-        if (tk.kind == .found and tk.age_ms >= 0) meta.print(a, " · wrote {s} ago", .{altpkg.age(&ab, tk.age_ms)}) catch {};
-        if (tk.kind == .signal) meta.print(a, " · {s} ago, nobody was looking", .{altpkg.age(&ab, tk.age_ms)}) catch {};
-        ins.line(.{ .kind = .meta, .text = meta.items });
-        ins.line(.{ .kind = .blank });
-
-        switch (tk.kind) {
-            .approval => {
-                ins.line(.{ .kind = .section, .text = "what vera proposed" });
-                ins.line(.{ .kind = .text, .text = tk.title });
-                ins.line(.{ .kind = .kv, .extra = "runs", .text = tk.event });
-                if (st.req.ref) |*r| {
-                    if (r.intent_len > 0) {
-                        ins.line(.{ .kind = .blank });
-                        ins.line(.{ .kind = .section, .text = "because you asked for" });
-                        ins.line(.{ .kind = .text, .text = r.intentSlice() });
-                    }
-                    if (r.plan_n > 0) {
-                        ins.line(.{ .kind = .blank });
-                        ins.line(.{ .kind = .section, .text = "her plan" });
-                        var i: usize = 0;
-                        while (i < r.plan_n) : (i += 1) ins.line(.{ .kind = .step_todo, .text = r.planLine(i) });
-                    }
-                }
-                ins.line(.{ .kind = .blank });
-                ins.line(.{ .kind = .section, .text = "controls" });
-                ins.act(.{ .label = "run it", .kind = .approval, .action = tk.action, .run = tk.event });
-                self.askAct(a);
-                return;
-            },
-            .signal => {
-                ins.line(.{ .kind = .section, .text = "what happened" });
-                ins.line(.{ .kind = .text, .text = std.fmt.allocPrint(a, "{s} {s} in {s}{s}{s}", .{ tk.program, tk.title, tk.space, if (tk.tab.len > 0) " › " else "", tk.tab }) catch tk.title });
-                if (tk.event.len > 0) ins.line(.{ .kind = .text, .text = tk.event });
-                self.inspOutput(a, tk.pane, 6);
-                ins.line(.{ .kind = .blank });
-                ins.line(.{ .kind = .section, .text = "controls" });
-                ins.act(.{ .label = "go see it", .kind = .go_see });
-                self.askAct(a);
-                return;
-            },
-            .found => {
-                ins.line(.{ .kind = .quiet, .text = "no producer pushed a task for this agent, so rook can say only what it sees: the program, where it runs, and that it is producing" });
-                self.inspOutput(a, tk.pane, 8);
-                ins.line(.{ .kind = .blank });
-                ins.line(.{ .kind = .section, .text = "controls" });
-                ins.act(.{ .label = "open its pane", .kind = .open });
-                self.askAct(a);
-                return;
-            },
-            .producer => {},
-        }
-
-        const it = tk.item orelse return;
-        if (it.goal.len > 0) {
-            ins.line(.{ .kind = .text, .text = it.goal });
-            ins.line(.{ .kind = .blank });
-        }
-        if (tk.state == .done) {
-            ins.line(.{ .kind = .section, .text = "outcome" });
-            ins.line(.{ .kind = .text, .text = if (tk.result.len > 0) tk.result else "finished; the producer gave no summary" });
-            ins.line(.{ .kind = .blank });
-        } else if (tk.state == .failed) {
-            ins.line(.{ .kind = .section, .text = "what went wrong" });
-            ins.line(.{ .kind = .text, .text = if (tk.event.len > 0) tk.event else "the producer said it failed, and no more" });
-            ins.line(.{ .kind = .blank });
-        } else if (tk.state == .blocked) {
-            ins.line(.{ .kind = .section, .text = "waiting on you" });
-            ins.line(.{ .kind = .text, .text = if (it.question.len > 0) it.question else if (tk.event.len > 0) tk.event else "the producer said it is waiting, and no more" });
-            ins.line(.{ .kind = .blank });
-        } else if (tk.event.len > 0) {
-            ins.line(.{ .kind = .section, .text = "now" });
-            ins.line(.{ .kind = .text, .text = tk.event });
-            ins.line(.{ .kind = .blank });
-        }
-        if (it.question.len > 0 and tk.state != .blocked) {
-            ins.line(.{ .kind = .section, .text = "question" });
-            ins.line(.{ .kind = .text, .text = it.question });
-            ins.line(.{ .kind = .blank });
-        }
-        if (it.plan.len > 0) {
-            var done: usize = 0;
-            for (it.plan) |sp| {
-                if (sp.done) done += 1;
-            }
-            ins.line(.{ .kind = .section, .text = "plan", .extra = std.fmt.allocPrint(a, "{d} of {d}", .{ done, it.plan.len }) catch "" });
-            for (it.plan) |sp| ins.line(.{ .kind = if (sp.done) .step_done else .step_todo, .text = sp.text });
-            ins.line(.{ .kind = .blank });
-        }
-        if (it.events.len > 0) {
-            ins.line(.{ .kind = .section, .text = "timeline" });
-            const from = it.events.len -| 8;
-            for (it.events[from..]) |ev| {
-                var eb: [16]u8 = undefined;
-                const age: []const u8 = if (ev.ms > 0) (a.dupe(u8, altpkg.age(&eb, now - ev.ms)) catch "") else "";
-                ins.line(.{ .kind = .event, .text = ev.text, .extra = age });
-            }
-            ins.line(.{ .kind = .blank });
-        }
-        if (it.files.len > 0) {
-            ins.line(.{ .kind = .section, .text = "files", .extra = std.fmt.allocPrint(a, "{d}", .{it.files.len}) catch "" });
-            for (it.files[0..@min(it.files.len, 8)]) |fpath| ins.line(.{ .kind = .output, .text = fpath });
-            if (it.files.len > 8) ins.line(.{ .kind = .quiet, .text = std.fmt.allocPrint(a, "and {d} more", .{it.files.len - 8}) catch "" });
-            ins.line(.{ .kind = .blank });
-        }
-        if (it.commits.len > 0) {
-            ins.line(.{ .kind = .section, .text = "commits" });
-            for (it.commits[0..@min(it.commits.len, 6)]) |c| ins.line(.{ .kind = .output, .text = c });
-            ins.line(.{ .kind = .blank });
-        }
-        if (it.tests.len > 0) ins.line(.{ .kind = .kv, .extra = "tests", .text = it.tests });
-        if (it.artifacts.len > 0) {
-            ins.line(.{ .kind = .section, .text = "artifacts" });
-            for (it.artifacts) |ar| {
-                if (ar.url.len > 0) {
-                    ins.line(.{ .kind = .kv, .extra = ar.label, .text = ar.url });
-                } else {
-                    ins.line(.{ .kind = .output, .text = ar.label });
-                }
-            }
-            ins.line(.{ .kind = .blank });
-        }
-        if (it.usage) |u| {
-            ins.line(.{ .kind = .kv, .extra = "usage", .text = std.fmt.allocPrint(a, "{s} tokens · {s}", .{ fmtTokens(a, u.tokens), fmtCents(a, u.cents) }) catch "" });
-        }
-        const n_turns = h.thread.countAbout(tk.id);
-        if (n_turns > 0) {
-            ins.line(.{ .kind = .kv, .extra = "vera", .text = std.fmt.allocPrint(a, "{d} turn{s} about this in her pane", .{ n_turns, plural(n_turns) }) catch "" });
-        }
-        if (tk.pane != 0 and tk.state != .done) self.inspOutput(a, tk.pane, 4);
-        ins.line(.{ .kind = .blank });
-        ins.line(.{ .kind = .section, .text = "controls" });
-        if (st.req.ref) |*r| {
-            if (r.task_len > 0 and std.mem.eql(u8, r.taskSlice(), tk.id)) {
-                for (r.actions[0..r.actions_n], 0..) |*act, i| {
-                    if (act.ran or act.running) continue;
-                    ins.act(.{ .label = act.labelSlice(), .kind = .approval, .action = i, .run = act.runSlice() });
-                }
-            }
-        }
-        for (it.options) |o| ins.act(.{ .label = o.label, .kind = .answer, .run = o.run, .ctrl = o.kind });
-        for (it.controls) |c| ins.act(.{ .label = c.label, .kind = .control, .run = c.run, .ctrl = c.kind });
-        if (tk.ws != null) ins.act(.{ .label = if (tk.pane != 0) "open its pane" else "open the space", .kind = .open });
-        self.askAct(a);
-        if (it.options.len == 0 and it.controls.len == 0 and tk.state != .done) {
-            ins.line(.{ .kind = .quiet, .text = "the producer offered no controls for this task; what it supports, it says on the rail" });
-        }
-    }
-
-    /// The last lines a pane wrote, from retained cells — output,
-    /// shown, never read for state.
-    fn inspOutput(self: *Server, a: std.mem.Allocator, pane_id: u32, max: usize) void {
-        const ins = &self.alt.home.insp;
-        const p = self.pane(pane_id) orelse return;
-        p.snapshot() catch return;
-        const view = self.frame.plainText(p);
-        self.full = true;
-        var lines: [8][]const u8 = undefined;
-        var n: usize = 0;
-        var it = std.mem.splitBackwardsScalar(u8, view, '\n');
-        while (it.next()) |line| {
-            const t = std.mem.trim(u8, line, " \t\r");
-            if (t.len == 0) continue;
-            if (n == @min(max, lines.len)) break;
-            lines[n] = a.dupe(u8, t[0..@min(t.len, 160)]) catch "";
-            n += 1;
-        }
-        if (n == 0) return;
-        ins.line(.{ .kind = .blank });
-        var nb: [64]u8 = undefined;
-        const prog = p.fgName(&nb) orelse "shell";
-        ins.line(.{ .kind = .section, .text = "its pane", .extra = a.dupe(u8, prog) catch "" });
-        var i = n;
-        while (i > 0) {
-            i -= 1;
-            ins.line(.{ .kind = .output, .text = lines[i] });
-        }
-    }
-
-    fn inspSpace(self: *Server, a: std.mem.Allocator, si: usize, now: i64) void {
-        const st = &self.alt;
-        const h = &st.home;
-        const ins = &h.insp;
-        const sp = st.spaces[si];
-        const sn = self.sessions.items[sp.ws];
-        ins.line(.{ .kind = .title, .text = sp.name, .mark = if (sp.unread > 0) .attention else if (sp.working) .working else .none });
-        var ab: [16]u8 = undefined;
-        ins.line(.{ .kind = .meta, .text = std.fmt.allocPrint(a, "a space · {d} tab{s}{s}{s}", .{ sp.tabs.len, plural(sp.tabs.len), if (sp.quiet_ms > 0) " · quiet " else "", if (sp.quiet_ms > 0) altpkg.age(&ab, sp.quiet_ms) else "" }) catch "" });
-        ins.line(.{ .kind = .blank });
-        var any = false;
-        inline for (.{ homepkg.Module.needs, homepkg.Module.active, homepkg.Module.recent }) |m| {
-            var first = true;
-            for (h.tasks[0..h.tasks_n]) |tk| {
-                if (tk.module != m or !std.mem.eql(u8, tk.full, sp.full)) continue;
-                if (first) {
-                    ins.line(.{ .kind = .section, .text = m.word() });
-                    first = false;
-                    any = true;
-                }
-                const mg = ui.markGlyph(&self.ui, tk.mark());
-                ins.line(.{ .kind = .text, .text = std.fmt.allocPrint(a, "{s} {s}{s}{s}", .{ mg, tk.title, if (tk.actor.len > 0) " · " else "", tk.actor }) catch tk.title });
-            }
-            if (!first) ins.line(.{ .kind = .blank });
-        }
-        if (!any) {
-            ins.line(.{ .kind = .quiet, .text = "no task the rail knows runs here" });
-            ins.line(.{ .kind = .blank });
-        }
-        var agents: usize = 0;
-        for (self.panes.items) |p| {
-            if (!p.is_agent or !self.paneIn(sn, p.id)) continue;
-            if (agents == 0) ins.line(.{ .kind = .section, .text = "agents" });
-            agents += 1;
-            var nb: [64]u8 = undefined;
-            const prog = a.dupe(u8, p.fgName(&nb) orelse "agent") catch "agent";
-            const lo = p.last_output_ms.load(.acquire);
-            const producing = lo != 0 and now - lo < chromepkg.working_ms;
-            var eb: [16]u8 = undefined;
-            const word: []const u8 = if (producing) "producing" else (std.fmt.allocPrint(a, "idle · {s} since output", .{altpkg.age(&eb, now - lo)}) catch "idle");
-            ins.line(.{ .kind = .text, .text = std.fmt.allocPrint(a, "{s} {s}{s}{s} · {s}", .{ ui.markGlyph(&self.ui, if (producing) .working else .waiting), prog, if (p.owner_len > 0) " claimed by " else "", if (p.owner_len > 0) p.ownerName() else "", word }) catch prog });
-        }
-        if (agents > 0) ins.line(.{ .kind = .blank });
-        ins.line(.{ .kind = .section, .text = "tabs" });
-        for (sp.tabs) |tb| {
-            var lb: [64]u8 = undefined;
-            const label = altpkg.tabLabel(&lb, tb.name, tb.actor);
-            const mg = ui.markGlyph(&self.ui, altpkg.markOf(tb.mark));
-            ins.line(.{ .kind = .output, .text = std.fmt.allocPrint(a, "{s}{s}{s}{s}", .{ label, if (mg.len > 0) " " else "", mg, if (tb.current) " · current" else "" }) catch label });
-        }
-        ins.line(.{ .kind = .blank });
-        ins.line(.{ .kind = .section, .text = "controls" });
-        ins.act(.{ .label = "enter the space", .kind = .enter });
-        self.askAct(a);
-        if (h.tasks_n == 0) {
-            ins.line(.{ .kind = .blank });
-            ins.line(.{ .kind = .section, .text = "to do something" });
-            self.inspAskHint(a);
-            ins.line(.{ .kind = .kv, .extra = ":new", .text = "a new space, by name" });
-            ins.line(.{ .kind = .kv, .extra = "/", .text = "find a space, a task, a tab, a pane" });
-        }
-    }
-
-    /// A task the rail knows moved: say so in the thread, once, in
-    /// rook's own words, with the task's id on the turn.
-    fn noteTransition(self: *Server, a: std.mem.Allocator, it: chromepkg.Item, was: chromepkg.State, now: i64) void {
-        const h = &self.alt.home;
-        const space = chromepkg.shortSpace(it.workspace());
-        switch (it.state) {
-            .done => {
-                const text = if (it.result.len > 0)
-                    std.fmt.allocPrint(a, "{s} finished · {s}", .{ it.name, it.result }) catch it.name
-                else
-                    std.fmt.allocPrint(a, "{s} finished", .{it.name}) catch it.name;
-                _ = h.thread.push(.result, text, it.id, it.workspace(), now);
-            },
-            .failed => {
-                const text = std.fmt.allocPrint(a, "{s} failed{s}{s}", .{ it.name, if (it.event.len > 0) " · " else "", it.event }) catch it.name;
-                _ = h.thread.push(.err, text, it.id, it.workspace(), now);
-            },
-            .blocked => {
-                const text = std.fmt.allocPrint(a, "{s} needs you{s}{s}", .{ it.name, if (it.event.len > 0) " · " else "", it.event }) catch it.name;
-                _ = h.thread.push(.note, text, it.id, it.workspace(), now);
-            },
-            .working => if (was != .blocked) {
-                const text = std.fmt.allocPrint(a, "{s} began in {s}{s}{s}", .{ it.name, space, if (it.actor.len > 0) " · " else "", it.actor }) catch it.name;
-                _ = h.thread.push(.note, text, it.id, it.workspace(), now);
-            } else {
-                const text = std.fmt.allocPrint(a, "{s} resumed", .{it.name}) catch it.name;
-                _ = h.thread.push(.note, text, it.id, it.workspace(), now);
-            },
-            else => {},
-        }
-    }
-
-    /// The request moved: the thread gets the turn.
-    fn absorbRequest(self: *Server, ev: askpkg.Request.Event) void {
-        const st = &self.alt;
-        const h = &st.home;
-        const now = panepkg.epochMs();
-        switch (ev) {
-            .none, .output => {},
-            .replied => switch (st.req.state) {
-                .replied => if (st.req.ref) |*r| {
-                    var fba = std.heap.FixedBufferAllocator.init(&st.buf);
-                    var text: std.ArrayList(u8) = .empty;
-                    const a = fba.allocator();
-                    if (r.intent_len > 0) text.appendSlice(a, r.intentSlice()) catch {};
-                    var i: usize = 0;
-                    while (i < r.plan_n) : (i += 1) {
-                        text.print(a, "\n{d}. {s}", .{ i + 1, r.planLine(i) }) catch {};
-                    }
-                    if (r.question_len > 0) text.print(a, "\n{s} {s}", .{ ui.markGlyph(&self.ui, .attention), r.questionSlice() }) catch {};
-                    if (text.items.len == 0) text.appendSlice(a, "answered with nothing to show") catch {};
-                    h.req_serial += 1;
-                    const turn = h.thread.push(.plan, text.items, r.taskSlice(), r.spaceSlice(), now);
-                    turn.req_serial = h.req_serial;
-                } else {
-                    const reply = std.mem.trim(u8, st.req.replySlice(), " \t\r\n");
-                    _ = h.thread.push(.vera, if (reply.len > 0) reply else "answered with nothing", h.aboutTask(), h.aboutSpace(), now);
-                },
-                .failed => {
-                    var b: [200]u8 = undefined;
-                    const why = askpkg.firstLine(if (st.req.note_len > 0) st.req.noteSlice() else st.req.replySlice());
-                    _ = h.thread.push(.err, std.fmt.bufPrint(&b, "{s} could not answer ({d}) · {s}", .{ self.askName(), st.req.code, why }) catch why, "", "", now);
-                },
-                else => {},
-            },
-            .action_done => |i| if (st.req.ref) |*r| {
-                const act = &r.actions[i];
-                var b: [320]u8 = undefined;
-                const out = askpkg.firstLine(act.receiptSlice());
-                if (act.code == 0) {
-                    _ = h.thread.push(.receipt, std.fmt.bufPrint(&b, "ran {s}{s}{s}", .{ act.labelSlice(), if (out.len > 0) " · " else "", out }) catch act.labelSlice(), r.taskSlice(), r.spaceSlice(), now);
-                } else {
-                    _ = h.thread.push(.err, std.fmt.bufPrint(&b, "{s} failed ({d}){s}{s}", .{ act.labelSlice(), act.code, if (out.len > 0) " · " else "", out }) catch act.labelSlice(), r.taskSlice(), r.spaceSlice(), now);
-                }
-            },
-        }
-        h.thread_scroll = 0;
-    }
-
-    /// An item's control finished: its receipt is a turn about the
-    /// task, and the rail's next push says what changed.
-    fn absorbRunner(self: *Server) void {
-        const h = &self.alt.home;
-        const j = &(h.runner.job orelse return);
-        var b: [320]u8 = undefined;
-        const out = askpkg.firstLine(j.stdout());
-        const err = askpkg.firstLine(j.stderr());
-        const now = panepkg.epochMs();
-        if (j.code == 0) {
-            _ = h.thread.push(.receipt, std.fmt.bufPrint(&b, "ran {s}{s}{s}", .{ h.runner.labelSlice(), if (out.len > 0) " · " else "", out }) catch h.runner.labelSlice(), h.runner.taskSlice(), "", now);
-        } else {
-            _ = h.thread.push(.err, std.fmt.bufPrint(&b, "{s} failed ({d}){s}{s}", .{ h.runner.labelSlice(), j.code, if (err.len > 0) " · " else "", if (err.len > 0) err else out }) catch h.runner.labelSlice(), h.runner.taskSlice(), "", now);
-        }
-        h.runner.job = null;
-        h.thread_scroll = 0;
-    }
-
-    /// A producer's task as one row: the goal it named, its state
-    /// and the space it runs in, then the fields it chose to add —
-    /// the actor, the last event, the result. ↵ goes to the space's
-    /// agent pane, or the space.
-    fn workRow(self: *Server, a: std.mem.Allocator, it: chromepkg.Item, text: []const u8, finding: bool) void {
-        const st = &self.alt;
-        const ws = it.workspace();
-        const held = self.sessionNamed(ws);
-        var line: std.ArrayList(u8) = .empty;
-        line.appendSlice(a, it.state.word()) catch {};
-        if (held != null or ws.len > 0) {
-            line.appendSlice(a, " · ") catch {};
-            line.appendSlice(a, chromepkg.shortSpace(ws)) catch {};
-            if (held == null) line.appendSlice(a, " (not open here)") catch {};
-        }
-        if (it.actor.len > 0) {
-            line.appendSlice(a, " · ") catch {};
-            line.appendSlice(a, it.actor) catch {};
-        }
-        const detail = if (it.state == .done and it.result.len > 0) it.result else if (it.event.len > 0) it.event else it.sub;
-        if (detail.len > 0 and !std.mem.startsWith(u8, detail, it.state.word())) {
-            line.appendSlice(a, " · ") catch {};
-            line.appendSlice(a, detail) catch {};
-        }
-        const mark: ui.Mark = switch (it.state) {
-            .working => .working,
-            .done => .success,
-            .failed => .failed,
-            .blocked => .attention,
-            .idle, .none => .waiting,
-        };
-        const target_pane: u32 = if (held) |si| (self.agentPaneIn(self.sessions.items[si]) orelse 0) else 0;
-        var row: altpkg.Row = .{
-            .kind = .work,
-            .glyph = ui.markGlyph(&self.ui, mark),
-            .ink = ui.markInk(&self.ui, mark),
-            .name = it.name,
-            .line = line.items,
-            .line_ink = self.ui.secondary,
-            .hint = if (held != null) "↵ go" else "",
-            .pane = target_pane,
-            .ws = held orelse 0,
-            .arg = if (held != null) (a.dupe(u8, ws) catch "") else "",
-        };
-        if (it.unread) row.glyph = ui.markGlyph(&self.ui, .unread);
-        if (finding) row.score = altpkg.fuzzy(it.name, text) orelse (altpkg.fuzzy(line.items, text) orelse return) + 20;
-        st.rows.append(self.gpa, row) catch {};
-    }
-
-    /// One space, described: its label and identity, its tabs with
-    /// their actors and marks, the count unread, whether anything in
-    /// it is producing, the event line, and — for the space you left
-    /// — the last lines of the pane you were in, read from retained
-    /// cells without resizing anything.
-    fn spaceInfo(self: *Server, a: std.mem.Allocator, sn: *Session, si: usize, sp: *altpkg.Space) void {
-        const st = &self.alt;
-        const now = panepkg.epochMs();
-        sp.* = .{ .name = chromepkg.shortSpace(sn.label()), .full = sn.label(), .ws = si, .current = si == self.cur_sess };
-        // tabs
-        const tabs = st.takeTabs(sn.windows.items.len);
-        for (tabs, 0..) |*t, wi| {
-            const w = sn.windows.items[wi];
-            var nb: [48]u8 = undefined;
-            t.* = .{ .name = a.dupe(u8, self.tabName(sn, w, &nb)) catch "", .actor = self.windowOwner(w), .current = wi == sn.cur };
-            const marked = self.windowAgentPane(w) orelse self.pane(w.focused);
-            if (marked) |p| {
-                t.mark = chromepkg.tabMark(.{
-                    .current = false,
-                    .agent = p.is_agent,
-                    .last_output_ms = p.last_output_ms.load(.acquire),
-                    .seen_ms = w.seen_ms,
-                    .now = now,
-                    .signal = self.windowUnread(w),
-                });
-            }
-        }
-        sp.tabs = tabs;
-        // facts across the space's panes
-        var latest: ?*panepkg.Pane = null;
-        var working: ?*panepkg.Pane = null;
-        var last_out: i64 = 0;
-        for (self.panes.items) |p| {
-            if (!self.paneIn(sn, p.id)) continue;
-            if (p.unread_ms != 0) {
-                sp.unread += 1;
-                if (p.notif_ms != 0 and p.notif_title_len > 0 and (latest == null or p.notif_ms > latest.?.notif_ms)) latest = p;
-            }
-            const lo = p.last_output_ms.load(.acquire);
-            if (lo > last_out) last_out = lo;
-            if (p.is_agent and lo != 0 and now - lo < chromepkg.working_ms and working == null) working = p;
-        }
-        sp.working = working != null;
-        // the event line: a producer's words for this space first —
-        // an ask outranks work, work outranks a quiet report
-        var out: std.ArrayList(u8) = .empty;
-        const claims = if (self.side.agents.panel) |pnl| pnl.items else &.{};
-        var claimed: ?chromepkg.Item = null;
-        for (claims) |it| {
-            if (it.claims(sn.label())) {
-                claimed = it;
-                break;
-            }
-        }
-        if (claimed) |it| {
-            if (it.name.len > 0 and !std.mem.eql(u8, it.name, sn.label())) out.appendSlice(a, it.name) catch {};
-            if (it.state.word().len > 0) {
-                if (out.items.len > 0) out.appendSlice(a, " · ") catch {};
-                out.appendSlice(a, it.state.word()) catch {};
-            }
-            sp.event_kind = switch (it.state) {
-                .blocked, .failed => .needs_you,
-                .working => .working,
-                else => .said,
-            };
-        }
-        if (latest) |p| {
-            if (out.items.len > 0) out.appendSlice(a, " · ") catch {};
-            out.appendSlice(a, p.notif_title[0..p.notif_title_len]) catch {};
-            if (sp.event_kind == .quiet) sp.event_kind = .said;
-        }
-        // rook's own sighting of work, unless the producer said it
-        const producer_said_working = if (claimed) |it| it.state == .working else false;
-        if (working) |p| {
-            if (!producer_said_working) {
-                if (out.items.len > 0) out.appendSlice(a, " · ") catch {};
-                var nb: [64]u8 = undefined;
-                const who: []const u8 = if (p.owner_len > 0) p.ownerName() else (p.fgName(&nb) orelse "agent");
-                out.appendSlice(a, who) catch {};
-                out.appendSlice(a, " ") catch {};
-                out.appendSlice(a, ui.markGlyph(&self.ui, .working)) catch {};
-                out.appendSlice(a, " working") catch {};
-            }
-            if (sp.event_kind == .quiet or sp.event_kind == .said) sp.event_kind = .working;
-        }
-        if (sp.unread > 0) {
-            if (out.items.len > 0) out.appendSlice(a, " · ") catch {};
-            out.print(a, "{s}{d} need{s} you", .{ ui.markGlyph(&self.ui, .attention), sp.unread, if (sp.unread == 1) "s" else "" }) catch {};
-            if (sp.event_kind == .quiet) sp.event_kind = .needs_you;
-        }
-        if (out.items.len == 0) {
-            var ab: [16]u8 = undefined;
-            if (last_out == 0) {
-                out.appendSlice(a, "quiet") catch {};
-            } else {
-                out.print(a, "quiet · {s}", .{altpkg.age(&ab, now - last_out)}) catch {};
-            }
-        }
-        sp.event = out.items;
-        sp.quiet_ms = if (last_out == 0) 0 else now - last_out;
-        // the excerpt: the pane you were in, its last lines, from the
-        // cells it already holds — never a resize, never a read of
-        // anything the program did not draw
-        if (sp.current) {
-            if (self.pane(self.focusedId())) |p| {
-                p.snapshot() catch {};
-                const view = self.frame.plainText(p);
-                self.full = true; // the frame buffer was borrowed
-                var n: usize = 0;
-                var it = std.mem.splitBackwardsScalar(u8, view, '\n');
-                while (it.next()) |line| {
-                    const t = std.mem.trim(u8, line, " \t\r");
-                    // a bare prompt is not an excerpt
-                    if (t.len < 3) continue;
-                    if (n == altpkg.max_excerpt) break;
-                    st.excerpt[altpkg.max_excerpt - 1 - n] = a.dupe(u8, t[0..@min(t.len, 120)]) catch "";
-                    n += 1;
-                }
-                sp.excerpt = st.excerpt[altpkg.max_excerpt - n ..];
-            }
-        }
-    }
-
-    /// The `:` rows: every command the typed word could become, with
-    /// the argument as typed; for the commands that take a space, one
-    /// row per space that matches the argument so far.
-    fn altCommandRows(self: *Server, a: std.mem.Allocator) void {
-        const st = &self.alt;
-        const text = st.textSlice();
-        var specs: [16]altpkg.CommandSpec = undefined;
-        const parsed = altpkg.parseCommand(text);
-        const comps = altpkg.completions(text, &specs);
-        var any = false;
-        for (comps) |c| {
-            const arg: []const u8 = if (parsed) |pc| (if (pc.spec.cmd == c.cmd) pc.arg else "") else "";
-            const takes_space = c.cmd == .go or c.cmd == .close;
-            if (takes_space) {
-                for (self.sessions.items) |sn| {
-                    if (arg.len > 0 and altpkg.fuzzy(sn.label(), arg) == null) continue;
-                    const name = std.fmt.allocPrint(a, ":{s} {s}", .{ c.word, sn.label() }) catch continue;
-                    const argd = a.dupe(u8, sn.label()) catch continue;
-                    st.rows.append(self.gpa, .{ .kind = .command, .glyph = ":", .ink = self.ui.accent, .name = name, .line = c.help, .hint = "↵ run", .cmd = c.cmd, .arg = argd }) catch {};
-                    any = true;
-                }
-                continue;
-            }
-            const shown_arg: []const u8 = if (arg.len > 0) arg else c.arg;
-            const name = std.fmt.allocPrint(a, ":{s} {s}", .{ c.word, shown_arg }) catch continue;
-            const argd = a.dupe(u8, arg) catch "";
-            st.rows.append(self.gpa, .{ .kind = .command, .glyph = ":", .ink = self.ui.accent, .name = name, .line = c.help, .hint = if (arg.len > 0 or c.arg.len == 0) "↵ run" else "type its argument", .cmd = c.cmd, .arg = argd }) catch {};
-            any = true;
-        }
-        if (!any) st.rows.append(self.gpa, .{ .kind = .note, .name = "no such command" }) catch {};
+    /// Where a home pane starts: its own dir, else its window's, else
+    /// home's, else `~`.
+    fn homeDir(self: *Server, hp: config.Home.Pane, wdir: []const u8, buf: []u8) ?[*:0]const u8 {
+        const h = &self.home_conf;
+        const pd = h.str(hp.dir);
+        const d = if (pd.len > 0) pd else if (wdir.len > 0) wdir else h.str(h.dir);
+        const z = config.expandDir(d, buf) orelse return null;
+        return z.ptr;
     }
 };
 

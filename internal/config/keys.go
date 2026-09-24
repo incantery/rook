@@ -16,8 +16,7 @@ var Verbs = []string{
 	"new-window", "next-window", "previous-window", "select-window",
 	"last-pane", "zoom", "copy-mode", "kill-pane", "detach",
 	"next-unread", "inspect",
-	"home", "home-running", "home-needs", "home-find", "home-command",
-	"last-space", "companion", "companion-pin",
+	"home", "last-space",
 	"sidebar", "pin", "pin-global",
 	"popup",
 }

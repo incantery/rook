@@ -5,9 +5,8 @@
 //!   scrollback_mb = 4
 //!   accent = "#cba6f7"             # chrome color: tabs, borders, popup
 //!   restore = false                # skip resurrecting the last layout on boot
-//!   sidebar_mode = "hidden"        # the legacy spaces/agents side panel,
-//!                                  # off by default since altitude took
-//!                                  # its job: open, collapsed, hidden
+//!   sidebar_mode = "hidden"        # the legacy spaces/agents side panel:
+//!                                  # open, collapsed, hidden
 //!   sidebar = false                # the older spelling: true = open
 //!   sidebar_width = 30             # its width in columns, open
 //!   agents = ["claude"]            # programs the agents rail looks for
@@ -15,35 +14,25 @@
 //!   bar = true                     # the calm bar: one row at the bottom,
 //!                                  # who holds the focused pane's keys
 //!                                  # left, signals right (false = off)
-//!   zoom_view = "orbit"            # :orbit: "orbit" draws each space as
-//!                                  # a figure; "ledger" is rows only
 //!   glyphs = "unicode"             # "ascii" for a glass without the marks
-//!   status_home = ["view", "-", "agents", "attention", "blocked", "session", "companion"]
 //!   status_space = ["input", "-", "working", "attention", "unread", "pins"]
-//!                                  # the calm bar's modules at home and in a
-//!                                  # space; "-" is where the right-aligned
-//!                                  # ones start (docs/altitude.md)
-//!   startup = "global"             # where plain `rook` lands: "global" is
-//!                                  # rook's home; "last-space" is the space
-//!                                  # you were in (docs/altitude.md)
+//!                                  # the calm bar's modules; "-" is where
+//!                                  # the right-aligned ones start (also
+//!                                  # agents, blocked, session)
+//!   startup = "home"               # where plain `rook` lands: "home", or
+//!                                  # "last-space" for the space you were in
 //!
-//! and the [companion] table the Go half already reads — the one
-//! resident rook knows by name, so it can say when and where it is
-//! open. Rook names no occupant: without this table there is none.
+//! the [companion] table the Go half already reads — the one resident
+//! rook knows by name, so it can say when and where it is open. Rook
+//! names no occupant: without this table there is none.
 //!   [companion]
 //!   command = "vera"               # what summons it; its first word
 //!   program = "vera"               # …or the program outright, when
 //!                                  # the command's first word is a
 //!                                  # wrapper (`program = ""` = off)
-//!   ask = "vera say -c rook"       # what bare text at rook's home runs,
-//!                                  # the text as its one argument
-//!                                  # (unset = no intent door)
-//!   chat = "vera chat"             # the companion's own terminal, run in
-//!                                  # its panel as a real pane
-//!                                  # (unset = rook's own surface)
 //!
-//! The [keys] table — what each key after the prefix does — is
-//! keys.zig's, read by `keysConfig`.
+//! [home] (`Home`, below), and [keys] — what each key after the prefix
+//! does — which is keys.zig's, read by `keysConfig`.
 const std = @import("std");
 const chrome = @import("chrome.zig");
 const keyspkg = @import("keys.zig");
@@ -124,35 +113,17 @@ pub const Mux = struct {
     /// TUI, the one motion rook must never cause, so the choice is
     /// made once here rather than per signal.
     bar: bool = true,
-    /// The spatial subview behind prefix-s. Orbit draws each space
-    /// as a figure; ledger is the same rows with no figure — the SSH,
-    /// narrow and reduced-motion form, and the one orbit falls back
-    /// to when the glass is too small for a figure.
-    zoom_ledger: bool = false,
     /// ASCII marks and glyphs for a glass that cannot show the
     /// Unicode ones. The inks and fills are the same, so the
     /// hierarchy survives the swap (docs/ui-design-system.md).
     ascii_glyphs: bool = false,
-    /// Where a glass lands. Rook's home is the root of the product:
-    /// plain `rook` opens it, and a space is a destination (`rook .`,
-    /// `rook --space`). `last-space` is the opt-in that lands in the
+    /// Where a glass lands: home, unless `last-space` asks for the
     /// space the server is showing instead.
     startup_last_space: bool = false,
-    /// The calm bar's modules, newline-joined names, at home and in
-    /// a space. Empty means the default composition for that scope.
-    status_home: [256]u8 = @splat(0),
-    status_home_len: usize = 0,
+    /// The calm bar's modules, newline-joined names. Empty means the
+    /// default composition.
     status_space: [256]u8 = @splat(0),
     status_space_len: usize = 0,
-    /// The intent door: the command bare text at the root runs, with
-    /// the text as its one argument (ask.zig). Unset means no door,
-    /// and the root says so.
-    ask: [256]u8 = @splat(0),
-    ask_len: usize = 0,
-    /// The companion's own terminal: the command rook runs, in a pty,
-    /// inside its panel. Unset keeps rook's own one-shot surface.
-    chat: [256]u8 = @splat(0),
-    chat_len: usize = 0,
 
     pub fn ownersSlice(self: *const Mux) []const u8 {
         return self.owners[0..self.owners_len];
@@ -168,24 +139,8 @@ pub const Mux = struct {
         return self.companion[0..self.companion_len];
     }
 
-    pub fn statusHome(self: *const Mux) []const u8 {
-        return if (self.status_home_len > 0) self.status_home[0..self.status_home_len] else default_status_home;
-    }
     pub fn statusSpace(self: *const Mux) []const u8 {
         return if (self.status_space_len > 0) self.status_space[0..self.status_space_len] else default_status_space;
-    }
-
-    /// The ask command, as the config says it; rook knows no
-    /// program's verbs. Empty means no intent door.
-    pub fn askSlice(self: *const Mux) []const u8 {
-        return self.ask[0..self.ask_len];
-    }
-
-    /// The chat command: the companion's own terminal, hosted in its
-    /// panel, as the config says it. Empty means the panel keeps
-    /// rook's own surface.
-    pub fn chatSlice(self: *const Mux) []const u8 {
-        return self.chat[0..self.chat_len];
     }
 
     /// Precedence, whichever order the lines appear in: `program`
@@ -209,12 +164,8 @@ pub const Mux = struct {
     }
 };
 
-/// The calm bar at home: the view, then ambient health — agents,
-/// what needs you, what failed, the session's spend, the companion
-/// (when the config names one).
-pub const default_status_home = "view\n-\nagents\nattention\nblocked\nsession\ncompanion";
-/// In a space: who holds the keys, then the signals, with one global
-/// attention count and no more of the dashboard than that.
+/// Who holds the keys, then the signals, with one global attention
+/// count and no more of a dashboard than that.
 pub const default_status_space = "input\n-\nworking\nattention\nunread\npins";
 
 /// The prefix table: rook's defaults under the file's [keys] (keys.zig).
@@ -274,12 +225,6 @@ pub fn parseMux(toml: []const u8, out: *Mux) void {
                 out.setCompanion(v, .command);
             } else if (std.mem.eql(u8, key, "name")) {
                 out.setCompanion(v, .name);
-            } else if (std.mem.eql(u8, key, "ask")) {
-                out.ask_len = @min(v.len, out.ask.len);
-                @memcpy(out.ask[0..out.ask_len], v[0..out.ask_len]);
-            } else if (std.mem.eql(u8, key, "chat")) {
-                out.chat_len = @min(v.len, out.chat.len);
-                @memcpy(out.chat[0..out.chat_len], v[0..out.chat_len]);
             }
             continue;
         }
@@ -313,19 +258,236 @@ pub fn parseMux(toml: []const u8, out: *Mux) void {
         } else if (std.mem.eql(u8, key, "glyphs")) {
             const v = std.mem.trim(u8, val, "\"'");
             out.ascii_glyphs = std.mem.eql(u8, v, "ascii");
-        } else if (std.mem.eql(u8, key, "status_home")) {
-            out.status_home_len = parseList(val, &out.status_home);
         } else if (std.mem.eql(u8, key, "status_space")) {
             out.status_space_len = parseList(val, &out.status_space);
         } else if (std.mem.eql(u8, key, "startup")) {
             const v = std.mem.trim(u8, val, "\"'");
             out.startup_last_space = std.mem.eql(u8, v, "last-space") or std.mem.eql(u8, v, "last_space") or std.mem.eql(u8, v, "space");
-        } else if (std.mem.eql(u8, key, "zoom_view")) {
-            const v = std.mem.trim(u8, val, "\"'");
-            if (std.mem.eql(u8, v, "ledger")) out.zoom_ledger = true;
-            if (std.mem.eql(u8, v, "orbit")) out.zoom_ledger = false;
         }
     }
+}
+
+/// Home: the one workspace outside the list of spaces, a key away
+/// from any of them (docs/home.md). Rook seeds it from here when it
+/// is gone to and it is not there; with nothing configured it is one
+/// shell in `~`, a scratch pad.
+///
+///   [home]
+///   on_empty = "return"      # its last pane closed: back to the space
+///                            # you came from, and home starts over next
+///                            # time; "stay" seeds it again in place
+///   dir = "~"                # where its panes start, unless they say
+///   color = "cyan"           # its accent, and its chrome's tint (a hex
+///                            # colour or an ANSI name; the accent unset)
+///   [[home.window]]
+///   name = "me"
+///   dir = "~/work"
+///   panes = ["grim", "docket"]        # each a pane, side by side
+///   [[home.window]]
+///   name = "notes"
+///   [[home.window.pane]]
+///   command = "nvim scratch.md"
+///   dir = "~/notes"
+///   [[home.window.pane]]
+///   split = "down"                    # a shell, under it
+pub const Home = struct {
+    pub const max_windows = 8;
+    pub const max_panes = 8;
+    /// A string in `buf`: `Home` is returned by value, so it holds no
+    /// slices into itself.
+    pub const Str = struct { off: u16 = 0, len: u16 = 0 };
+    pub const Pane = struct { cmd: Str = .{}, dir: Str = .{}, down: bool = false };
+    pub const Window = struct {
+        name: Str = .{},
+        dir: Str = .{},
+        panes: [max_panes]Pane = @splat(.{}),
+        panes_n: usize = 0,
+    };
+
+    stay: bool = false,
+    /// Home's colour: its accent, and what its chrome is tinted
+    /// toward. Null is the config's accent.
+    color: ?chrome.Rgb = null,
+    dir: Str = .{},
+    windows: [max_windows]Window = @splat(.{}),
+    windows_n: usize = 0,
+    buf: [4096]u8 = undefined,
+    buf_len: usize = 0,
+
+    pub fn str(self: *const Home, s: Str) []const u8 {
+        return self.buf[s.off..][0..s.len];
+    }
+
+    fn keep(self: *Home, v: []const u8) Str {
+        if (self.buf_len + v.len > self.buf.len) return .{};
+        @memcpy(self.buf[self.buf_len..][0..v.len], v);
+        const out: Str = .{ .off = @intCast(self.buf_len), .len = @intCast(v.len) };
+        self.buf_len += v.len;
+        return out;
+    }
+};
+
+pub fn homeConfig() Home {
+    var out: Home = .{};
+    var buf: [8192]u8 = undefined;
+    const home = std.mem.span(getenv("HOME") orelse return out);
+    var path_buf: [1024]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buf, "{s}/.config/rook/rook.toml", .{home}) catch return out;
+    const f = std.c.fopen(path, "r") orelse return out;
+    defer _ = std.c.fclose(f);
+    const n = std.c.fread(&buf, 1, buf.len, f);
+    parseHome(buf[0..n], &out);
+    return out;
+}
+
+pub fn parseHome(toml: []const u8, out: *Home) void {
+    var section: enum { other, home, window, pane } = .other;
+    var lines = std.mem.splitScalar(u8, toml, '\n');
+    while (lines.next()) |line| {
+        const t = std.mem.trim(u8, line, " \t\r");
+        if (t.len == 0 or t[0] == '#') continue;
+        if (t[0] == '[') {
+            if (std.mem.eql(u8, t, "[home]")) {
+                section = .home;
+            } else if (std.mem.eql(u8, t, "[[home.window]]")) {
+                section = .other;
+                if (out.windows_n < Home.max_windows) {
+                    out.windows[out.windows_n] = .{};
+                    out.windows_n += 1;
+                    section = .window;
+                }
+            } else if (std.mem.eql(u8, t, "[[home.window.pane]]")) {
+                section = .other;
+                if (out.windows_n > 0) {
+                    const w = &out.windows[out.windows_n - 1];
+                    if (w.panes_n < Home.max_panes) {
+                        w.panes[w.panes_n] = .{};
+                        w.panes_n += 1;
+                        section = .pane;
+                    }
+                }
+            } else section = .other;
+            continue;
+        }
+        if (section == .other) continue;
+        const eq = std.mem.indexOfScalar(u8, t, '=') orelse continue;
+        const key = std.mem.trim(u8, t[0..eq], " \t");
+        const raw = std.mem.trim(u8, t[eq + 1 ..], " \t");
+        switch (section) {
+            .home => {
+                const v = quoted(raw) orelse continue;
+                if (std.mem.eql(u8, key, "on_empty")) {
+                    out.stay = std.mem.eql(u8, v, "stay");
+                } else if (std.mem.eql(u8, key, "dir")) {
+                    out.dir = out.keep(v);
+                } else if (std.mem.eql(u8, key, "color")) {
+                    out.color = chrome.Rgb.parse(v) orelse chrome.named(v);
+                }
+            },
+            .window => {
+                const w = &out.windows[out.windows_n - 1];
+                if (std.mem.eql(u8, key, "name")) {
+                    w.name = out.keep(quoted(raw) orelse continue);
+                } else if (std.mem.eql(u8, key, "dir")) {
+                    w.dir = out.keep(quoted(raw) orelse continue);
+                } else if (std.mem.eql(u8, key, "panes")) {
+                    // a list of commands, each quoted: commands have
+                    // spaces, so this is not parseList's split on them
+                    var rest = raw;
+                    while (std.mem.indexOfAny(u8, rest, "\"'")) |q| {
+                        const close = std.mem.indexOfScalarPos(u8, rest, q + 1, rest[q]) orelse break;
+                        if (w.panes_n < Home.max_panes) {
+                            w.panes[w.panes_n] = .{ .cmd = out.keep(rest[q + 1 .. close]) };
+                            w.panes_n += 1;
+                        }
+                        rest = rest[close + 1 ..];
+                    }
+                }
+            },
+            .pane => {
+                const w = &out.windows[out.windows_n - 1];
+                const p = &w.panes[w.panes_n - 1];
+                const v = quoted(raw) orelse continue;
+                if (std.mem.eql(u8, key, "command")) {
+                    p.cmd = out.keep(v);
+                } else if (std.mem.eql(u8, key, "dir")) {
+                    p.dir = out.keep(v);
+                } else if (std.mem.eql(u8, key, "split")) {
+                    p.down = std.mem.eql(u8, v, "down");
+                }
+            },
+            .other => {},
+        }
+    }
+}
+
+/// `"x"` or `'x'` → `x`; a trailing `# comment` after the value is fine.
+fn quoted(raw: []const u8) ?[]const u8 {
+    if (raw.len < 2 or (raw[0] != '"' and raw[0] != '\'')) return null;
+    const close = std.mem.indexOfScalarPos(u8, raw, 1, raw[0]) orelse return null;
+    return raw[1..close];
+}
+
+/// A home directory as the config spells it: `~` and `~/x` are under
+/// $HOME, and so is a relative path — home is not anywhere else.
+pub fn expandDir(dir: []const u8, buf: []u8) ?[:0]const u8 {
+    const h = std.mem.span(getenv("HOME") orelse return null);
+    if (dir.len == 0 or std.mem.eql(u8, dir, "~")) return std.fmt.bufPrintZ(buf, "{s}", .{h}) catch null;
+    if (std.mem.startsWith(u8, dir, "~/")) return std.fmt.bufPrintZ(buf, "{s}/{s}", .{ h, dir[2..] }) catch null;
+    if (dir[0] == '/') return std.fmt.bufPrintZ(buf, "{s}", .{dir}) catch null;
+    return std.fmt.bufPrintZ(buf, "{s}/{s}", .{ h, dir }) catch null;
+}
+
+test "home: nothing configured is a scratch pad" {
+    var h: Home = .{};
+    parseHome("[tmux]\nprefix = \"`\"\n", &h);
+    try std.testing.expectEqual(@as(usize, 0), h.windows_n);
+    try std.testing.expect(!h.stay);
+}
+
+test "home: windows, their panes, and where they start" {
+    var h: Home = .{};
+    parseHome(
+        \\[home]
+        \\on_empty = "stay"
+        \\color = "cyan"
+        \\dir = "~/work"
+        \\[[home.window]]
+        \\name = "me"
+        \\panes = ["grim", "docket --all"]  # side by side
+        \\[[home.window]]
+        \\name = "notes"
+        \\dir = "~/notes"
+        \\[[home.window.pane]]
+        \\command = "nvim scratch.md"
+        \\[[home.window.pane]]
+        \\dir = "archive"
+        \\split = "down"
+        \\[keys]
+        \\name = "not a window"
+    , &h);
+    const eq = std.testing.expectEqualStrings;
+    try std.testing.expect(h.stay);
+    try std.testing.expectEqual(@as(?chrome.Rgb, chrome.teal), h.color);
+    try eq("~/work", h.str(h.dir));
+    try std.testing.expectEqual(@as(usize, 2), h.windows_n);
+    const me = h.windows[0];
+    try eq("me", h.str(me.name));
+    try std.testing.expectEqual(@as(usize, 2), me.panes_n);
+    try eq("grim", h.str(me.panes[0].cmd));
+    try eq("docket --all", h.str(me.panes[1].cmd));
+    const notes = h.windows[1];
+    try eq("notes", h.str(notes.name));
+    try eq("~/notes", h.str(notes.dir));
+    try std.testing.expectEqual(@as(usize, 2), notes.panes_n);
+    try eq("nvim scratch.md", h.str(notes.panes[0].cmd));
+    try eq("", h.str(notes.panes[1].cmd));
+    try eq("archive", h.str(notes.panes[1].dir));
+    try std.testing.expect(notes.panes[1].down and !notes.panes[0].down);
+    // a pane table before any window has nowhere to go
+    var stray: Home = .{};
+    parseHome("[[home.window.pane]]\ncommand = \"x\"\n", &stray);
+    try std.testing.expectEqual(@as(usize, 0), stray.windows_n);
 }
 
 /// `["a", "b"]` → `a\nb` in `buf`; returns the length written. The
@@ -382,13 +544,10 @@ test "parseMux" {
     try std.testing.expectEqualStrings("claude\ncodex", a.agentsSlice());
     var b: Mux = .{};
     try std.testing.expect(b.bar); // the calm bar is on unless turned off
-    try std.testing.expect(!b.zoom_ledger);
-    parseMux("[mux]\nbar = false\nzoom_view = \"ledger\"\n", &b);
+    parseMux("[mux]\nbar = false\n", &b);
     try std.testing.expect(!b.bar);
-    try std.testing.expect(b.zoom_ledger);
-    parseMux("[mux]\nbar = true\nzoom_view = \"orbit\"\n", &b);
+    parseMux("[mux]\nbar = true\n", &b);
     try std.testing.expect(b.bar);
-    try std.testing.expect(!b.zoom_ledger);
     try std.testing.expect(!b.ascii_glyphs);
     parseMux("[mux]\nglyphs = \"ascii\"\n", &b);
     try std.testing.expect(b.ascii_glyphs);
@@ -403,32 +562,9 @@ test "parseMux" {
 
 test "the status bar's modules are the default until a config names them" {
     var d: Mux = .{};
-    try std.testing.expectEqualStrings(default_status_home, d.statusHome());
     try std.testing.expectEqualStrings(default_status_space, d.statusSpace());
-    parseMux("[mux]\nstatus_home = [\"view\", \"-\", \"session\"]\nstatus_space = [\"input\"]\n", &d);
-    try std.testing.expectEqualStrings("view\n-\nsession", d.statusHome());
+    parseMux("[mux]\nstatus_space = [\"input\"]\n", &d);
     try std.testing.expectEqualStrings("input", d.statusSpace());
-}
-
-test "the ask and chat doors are the config's, or none" {
-    const eq = std.testing.expectEqualStrings;
-    // rook knows no program's verbs, its first companion's included
-    var d: Mux = .{};
-    try eq("", d.askSlice());
-    try eq("", d.chatSlice());
-    var vera: Mux = .{};
-    parseMux("[companion]\ncommand = \"vera chat\"\n", &vera);
-    try eq("", vera.askSlice());
-    try eq("", vera.chatSlice());
-    var said: Mux = .{};
-    parseMux("[companion]\nprogram = \"aider\"\nask = \"aider --message\"\nchat = \"aider\"\n", &said);
-    try eq("aider --message", said.askSlice());
-    try eq("aider", said.chatSlice());
-    // and the two doors are independent
-    var one: Mux = .{};
-    parseMux("[companion]\nask = \"vera say -c rook\"\n", &one);
-    try eq("vera say -c rook", one.askSlice());
-    try eq("", one.chatSlice());
 }
 
 test "the companion slot, named or summoned" {

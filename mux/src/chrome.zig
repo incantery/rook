@@ -282,7 +282,7 @@ pub const Item = struct {
     /// producer said nothing, and the name is the only claim it has.
     ws: []const u8 = "",
     /// The fields a work item may carry past the rail's own (rook's
-    /// home lists them, docs/altitude.md): who is driving it, the
+    /// docs/altitude.md at 8a9daf9): who is driving it, the
     /// last meaningful thing that happened, and what it produced.
     /// Empty when the producer did not say; never inferred.
     actor: []const u8 = "",

@@ -50,11 +50,11 @@ func versionLine() string {
 
 const usage = `rook — the multiplexer, owned
 
-  rook                    rook's home: intent, attention, work, spaces
-                          (starts the server if rookd hasn't)
+  rook                    home: the workspace outside the list, seeded from
+                          [home] (starts the server if rookd hasn't)
   rook .                  the space for this directory, made if it must be
   rook --space <name>     that space (made here if it must be)
-  rook home               rook's home, said outright
+  rook home               home, said outright
   rook attach [--root | --space <name> [--cwd DIR]]   the exact form of the three above
   rook ls                 list workspaces
   rook new [-q] <name> [cwd] [-- cmd...]
@@ -62,7 +62,7 @@ const usage = `rook — the multiplexer, owned
                           after -- is what its first pane is born running
   rook switch <name>      switch workspace
   rook close <name>       close a workspace (hangs up every pane in it)
-  rook pick               pick a workspace (fzf; prefix-s floats this)
+  rook pick               pick a workspace (fzf; bind it: s = "popup rook pick")
   rook blocks [--json]    the block table (stable ids), or the same as JSON
   rook raw <id>           this terminal becomes one block, no chrome
   rook state | watch      the state feed: one snapshot, or one per change
@@ -75,7 +75,7 @@ const usage = `rook — the multiplexer, owned
   rook close-pane <id>    hang a pane up
   rook resume <id> <cmd>  how to bring the pane's program back after a restart
   rook own <id> <actor> | --paused <actor> | --release | --request | --take
-                          who holds a pane's keyboard (docs/altitude.md)
+                          who holds a pane's keyboard (docs/altitude.md at 8a9daf9)
   rook rename <name> | --auto
                           name the current tab for good, or give it back to rook
                           to guess (which lets the namer speak again)

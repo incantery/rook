@@ -62,19 +62,36 @@ func TestLoadRejectsMalformedTOML(t *testing.T) {
 // it has not heard of must not refuse those.
 func TestEngineKeysAreNotErrors(t *testing.T) {
 	c, err := Load(write(t, "[mux]\nagents = [\"claude\"]\nsidebar_width = 30\n"+
-		"[companion]\ncommand = \"vera chat\"\nname = \"vera\"\nprogram = \"vera\"\nkey = \"l\"\n"+
-		"ask = \"vera say -c rook\"\nchat = \"vera chat\"\n"))
+		"[companion]\ncommand = \"vera chat\"\nname = \"vera\"\nprogram = \"vera\"\nkey = \"l\"\n"))
 	if err != nil {
 		t.Fatalf("a file the engine also reads refused to load: %v", err)
 	}
 	if c.Companion.Program != "vera" || c.Companion.Command != "vera chat" {
 		t.Errorf("companion: %+v", c.Companion)
 	}
-	if c.Companion.Ask != "vera say -c rook" || c.Companion.Chat != "vera chat" {
-		t.Errorf("the engine's own companion keys: %+v", c.Companion)
-	}
 	// A typo is still a typo.
 	if _, err := Load(write(t, "[companion]\ncommandd = \"vera\"\n")); err == nil {
 		t.Error("an unrecognized key loaded anyway")
+	}
+}
+
+func TestLoadHome(t *testing.T) {
+	c, err := Load(write(t, "[home]\non_empty = \"stay\"\n[[home.window]]\nname = \"me\"\npanes = [\"grim\", \"docket\"]\n"+
+		"[[home.window]]\nname = \"notes\"\ndir = \"~/notes\"\n[[home.window.pane]]\ncommand = \"nvim\"\n[[home.window.pane]]\nsplit = \"down\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := c.Home
+	if h.OnEmpty != "stay" || len(h.Window) != 2 || h.Window[0].Panes[1] != "docket" || h.Window[1].Pane[1].Split != "down" {
+		t.Fatalf("home = %+v", h)
+	}
+	for _, bad := range []string{
+		"[home]\non_empty = \"leave\"\n",
+		"[[home.window]]\n[[home.window.pane]]\nsplit = \"left\"\n",
+		"[[home.window]]\nnmae = \"typo\"\n",
+	} {
+		if _, err := Load(write(t, bad)); err == nil {
+			t.Errorf("loaded anyway: %q", bad)
+		}
 	}
 }

@@ -86,48 +86,14 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
     out.print(gpa, ",\"geometry\":{{\"cols\":{d},\"rows\":{d}}}", .{ g.cols, g.rows }) catch return;
 
     // Focus: the pane input goes to, and whether the mux is holding it
-    // (copy mode, popups, the root, the ownership gate and the
-    // inspector all take the keyboard away from the pane).
+    // (copy mode, popups, the ownership gate and the inspector all
+    // take the keyboard away from the pane).
     out.print(gpa, ",\"focus\":{{\"pane\":{d},\"mode\":\"{s}\"}}", .{
         sv.focusedId(),
-        if (sv.popup != null) "popup" else if (sv.at_root) "root" else if (sv.inspect) "inspect" else if (sv.gate) "gate" else if (sv.scrolling) "copy" else "pane",
+        if (sv.popup != null) "popup" else if (sv.inspect) "inspect" else if (sv.gate) "gate" else if (sv.scrolling) "copy" else "pane",
     }) catch return;
-    // The scope, and the root's own state: which view, what the
-    // input's first character makes of the draft, and where the
-    // request stands. The draft itself is not published: it is the
-    // person's, half typed.
-    var kb: [72]u8 = undefined;
-    const sel_key: []const u8 = if (sv.alt.home.selectedRow()) |r| sv.alt.home.rowKey(r, &kb) else "";
-    out.print(gpa, ",\"scope\":\"{s}\",\"root\":{{\"view\":\"{s}\",\"mode\":\"{s}\",\"ask\":\"{s}\",\"region\":\"{s}\",\"wide\":{s},\"detail\":{s},\"turns\":{d},\"draft\":{s},\"selected\":", .{
-        if (sv.at_root) "root" else "space",
-        sv.alt.view.word(),
-        sv.alt.mode().word(),
-        @tagName(sv.alt.req.state),
-        @tagName(sv.alt.home.focus),
-        boolStr(sv.alt.home.wide),
-        boolStr(sv.alt.home.detail),
-        sv.alt.home.thread.count(),
-        boolStr(sv.alt.len > 0),
-    }) catch return;
-    str(gpa, out, sel_key);
-    // vera's pane: summoned, pinned, holding the keys in a space,
-    // what the next request is about, and — when rook is hosting her
-    // own terminal rather than drawing a surface of its own — the
-    // pane it is running in, which resolves in `panes[]` like any
-    // other. `null` means the panel is rook's own surface.
-    out.print(gpa, ",\"vera\":{{\"open\":{s},\"pinned\":{s},\"keys\":{s},\"pane\":", .{
-        boolStr(sv.alt.home.vera_open),
-        boolStr(sv.alt.home.vera_pinned),
-        boolStr(sv.vera_keys or (sv.at_root and sv.alt.home.focus == .vera and sv.alt.home.veraShown())),
-    }) catch return;
-    if (sv.vera_pane) |pid| {
-        out.print(gpa, "{d}", .{pid}) catch return;
-    } else {
-        out.appendSlice(gpa, "null") catch return;
-    }
-    out.appendSlice(gpa, ",\"about\":") catch return;
-    str(gpa, out, sv.alt.home.aboutTask());
-    out.appendSlice(gpa, "}}") catch return;
+    // The scope: home, the one workspace outside the list, or a space.
+    out.print(gpa, ",\"scope\":\"{s}\"", .{if (sv.atHome()) "home" else "space"}) catch return;
     // The calm bar, so a second glass lays its rows out the same way.
     out.print(gpa, ",\"bar\":{s}", .{boolStr(sv.barOn())}) catch return;
 
@@ -193,7 +159,9 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
         if (si > 0) out.append(gpa, ',') catch return;
         out.appendSlice(gpa, "{\"name\":") catch return;
         str(gpa, out, sn.label());
-        out.print(gpa, ",\"current\":{s},\"windows\":[", .{boolStr(si == sv.cur_sess)}) catch return;
+        // home is here like any workspace, flagged: readers that list
+        // the spaces leave it out
+        out.print(gpa, ",\"home\":{s},\"current\":{s},\"windows\":[", .{ boolStr(sn.home), boolStr(si == sv.cur_sess) }) catch return;
         for (sn.windows.items, 0..) |w, wi| {
             if (wi > 0) out.append(gpa, ',') catch return;
             // `name` is the tab's name: minted once — a person's
@@ -294,7 +262,7 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
         // in its own words, and only while it is the one in front.
         out.appendSlice(gpa, ",\"resume\":") catch return;
         str(gpa, out, p.resumeLive());
-        // Who holds the keyboard (docs/altitude.md, resolution 5):
+        // Who holds the keyboard (docs/altitude.md at 8a9daf9, resolution 5):
         // `human` unless an actor claimed the pane through `rook own`,
         // then the actor's own name for itself and one of the five
         // states. `sinceMs` is when the state last changed.

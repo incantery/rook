@@ -84,6 +84,24 @@ pub const Theme = struct {
         return .{ .accent = accent, .border_focused = accent, .glyphs = glyphs };
     }
 
+    /// The same theme at home: home's colour is the accent — the chip,
+    /// focus, the selected tab — and the chrome grounds and edges are
+    /// pulled toward it, so both bars and every seam say you are in
+    /// another room. Nothing moves and no pane changes size; only the
+    /// chrome's colour does. With `color` the accent itself, only the
+    /// grounds shift.
+    pub fn home(self: Theme, color: Rgb) Theme {
+        var t = self;
+        t.accent = color;
+        t.border_focused = color;
+        t.chrome = toward(self.chrome, color, 26);
+        t.raised = toward(self.raised, color, 32);
+        t.selection = toward(self.selection, color, 32);
+        t.border_subtle = toward(self.border_subtle, color, 30);
+        t.border = toward(self.border, color, 40);
+        return t;
+    }
+
     /// The same theme under a scrim: every ink and every fill pulled
     /// most of the way to the chrome ground, which stays where it is.
     /// The bars and the canvas wear this while a popup is the one lit
@@ -176,7 +194,7 @@ pub fn markInk(t: *const Theme, m: Mark) Rgb {
 }
 
 /// Chrome's other glyphs, with their ASCII forms.
-pub const Glyph = enum { separator, marker, prompt, back, pin, companion, more, plus, arrow_to, edge };
+pub const Glyph = enum { separator, marker, prompt, back, pin, companion, more, plus, arrow_to, edge, home };
 
 pub fn glyph(t: *const Theme, g: Glyph) []const u8 {
     return switch (t.glyphs) {
@@ -191,6 +209,7 @@ pub fn glyph(t: *const Theme, g: Glyph) []const u8 {
             .plus => "+",
             .arrow_to => "›",
             .edge => "▎",
+            .home => "⌂",
         },
         .ascii => switch (g) {
             .separator => "|",
@@ -203,6 +222,7 @@ pub fn glyph(t: *const Theme, g: Glyph) []const u8 {
             .plus => "+",
             .arrow_to => ">",
             .edge => "|",
+            .home => "~",
         },
     };
 }

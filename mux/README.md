@@ -30,36 +30,30 @@ spelling of hidden), and `agents = ["claude"]` — the foreground program
 names the rail treats as an agent it found. A `[companion]` table (the
 same one the Go half reads) names the resident rook watches for —
 `command = "vera"`, or `program = "vera"` when that command's first
-word is a wrapper; vera by default, `program = ""` turns the slot off.
+word is a wrapper; none unless named, `program = ""` turns the slot off.
 `bar = false` turns the calm bar off (the bottom row: who holds the
-focused pane's keyboard, and the signals), `zoom_view = "ledger"`
-makes prefix-s draw rows only, never figures, and `startup =
+focused pane's keyboard, and the signals), and `startup =
 "last-space"` makes plain `rook` land in a space instead of at home.
-`[companion] ask` is what bare text at home runs (`vera say -c rook`
-while the companion is vera) and `[companion] chat` is her own
-terminal, which rook runs in her panel rather than imitating (`vera
-chat` while the companion is vera; `chat = ""` keeps rook's own
-surface). The side panel is **off by default** —
-the frame is the tab bar, the work at full width, and the calm bar —
-and `sidebar_mode = "open"` is how a config asks for it back. Then:
+`[home]` is what home is seeded with (see Home, below), and `[keys]`
+is the prefix table (`mux/src/keys.zig`: every row rebindable, `""`
+unbinds, `popup [WxH[@MWxMH]] <cmd>` floats a program). The side panel
+is **off by default** — the frame is the tab bar, the work at full
+width, and the calm bar — and `sidebar_mode = "open"` is how a config
+asks for it back. The defaults, none of which runs a program:
 
     v |        split side by side          c        new window
     -          split stacked               n p 1-9  switch window
     hjkl       focus pane                  z        zoom pane
     HJKL       resize split                [        copy mode (hjkl, v, y, q)
     x          kill pane                  d        detach
-    o          home: out to rook, from anywhere    u   the oldest unread pane
-    s          orbit: the spaces as figures, a subview of home
-    t  T       vera's pane, from anywhere; pinned, she stays
-    a  !       home, the navigator on what is in progress / what needs you
-    /  :       home, finding / a command
+    o          home, and back              u        the oldest unread pane
     C-o        return jump: the space before the last hop
     i          inspector: the focused pane's actor, input owner, program
     A          the legacy side panel away, and back
 
 The top row is the tab bar: the space's name in the scope slot, then
 a chip per window. A tab is named once — a name a person gave (`rook
-rename`, `:rename` at home), else the first program in it that
+rename`), else the first program in it that
 was not the shell, with an ordinal when a sibling wears the name —
 and rook never renames it afterwards. An actor that claimed a pane in
 the window (`rook own`) rides after the name, `deploy · main`; the
@@ -71,8 +65,7 @@ who holds the keyboard, through what — or `main ▸ claude owns input ·
 you observe` once an actor claimed it, and `◐ n · !n · •n · ⊕g n` on the
 right — agents producing output, panes unread, global pins — empty
 when nothing signals. While the prefix is armed the bar shows the
-chords. `docs/altitude.md` is the whole model and the ontology:
-home, ownership, the gate, what each word means at runtime.
+chords, as the table binds them. `docs/home.md` is home's model.
 
 Workspaces: `rook ls`, `rook new <name>`, `rook switch <name>` —
 named sessions in one server, each with its own windows; `rook .` and
@@ -100,11 +93,7 @@ this repo; point your plugin manager at `mux/nvim`, gated on
 nvim move between its own windows first and call `rook nav <dir>` when
 a move hits its edge. When navigation
 has nowhere to go the key falls through to the pane, so Ctrl-l still
-clears a lone shell. The motion does not stop at home's door either:
-at the root the same four keys walk the cockpit's regions — the
-thread above the composer, the dashboard right of both — and at one
-of those edges the key is the view's again (Ctrl-h in the composer is
-a backspace). Panes are scrubbed of outer-mux identity
+clears a lone shell. Panes are scrubbed of outer-mux identity
 (`TMUX`, `HERDR_PANE_ID`) so editor plugins pick the right navigator.
 
 Working today: dirty-row frames paced at 8ms, scrollback view, OSC 52
@@ -242,85 +231,21 @@ exits 0 in silence: it is written to be a hook.
 
 ## Home
 
-Plain `rook` lands at home: the same frame, the whole width between
-the bars rook's own canvas, split in two. The scope slot holds the
-system's chip — `rook` in the accent block, which a space's name
-never wears, so a space named `rook` is still just a space — then
-the view as a tab and, muted, what is selected; no counts, no
-corner. Left, the work navigator: `needs you`, `in progress`,
-`recent`, `spaces`, each only when it has rows — one row per task,
-by goal, with its mark and its space or age; a task's agent, pane
-and space are on it, never beside it; an idle agent is not work.
-Right, the inspector for the selected row: the goal, `now` (or
-`waiting on you` with the question, or `what went wrong`, or the
-`outcome`), the plan with `n of m`, the timeline, files, commits,
-tests, artifacts, usage, the last lines its pane wrote, and
-`controls` — the producer's options and actions (each a command
-rook runs on ↵, never implied), vera's pending proposals about it,
-`open its pane`, `ask vera about this`. `j k` walk, `l` inspects,
-`h` is the list, `o` opens the exact pane or space, `g G` the ends,
-Ctrl-h/l and ⇥ walk the regions. Under 81 columns the two are a
-stack. Nothing is resized to get here or back.
-
-Vera is a pane rook owns, one key away: `prefix-t` summons her over
-the inspector's side (or, in a space, over the panes, holding the
-keys, resizing nothing) and again dismisses her; `prefix-T` pins
-her, a third column when the glass affords three. Her thread, her
-scroll and your draft survive. Typing a letter from the navigator
-summons her with the letter; `/` and `:` are find and command
-without her.
-
-**Inside the panel is her own terminal.** `[companion] chat` — `vera
-chat` by default — runs in a real pty rook starts the first time she
-is summoned and keeps alive after, sized to the panel and to nothing
-else. What is on those rows is hers (mote's screen: streaming
-markdown, tool cards, a multiline box); rook draws one header row
-above them and keeps four things: where the panel is, how wide, who
-has the keyboard, and the way out. While she has the focus every
-byte is the program's — Esc, the arrows, Ctrl-j for a newline, its
-own paste — except the prefix and a Ctrl-h/j/k/l that has a region
-to go to, which is the bargain every pane in a space already makes.
-`prefix-t` hides her; `Ctrl-h` walks out of her. She never takes the
-window focus, is never counted as an agent at work, and reads as
-`place: "vera"` in the state feed.
-
-A chat that dies the moment it starts is not started again on the
-next frame: the panel falls back to rook's own surface, what the
-program last had on its screen becomes an error turn in the thread,
-and `prefix-t` at her is the retry — a person asking, never a frame.
-
-`chat = ""` (or no chat command on PATH) keeps rook's own surface
-instead: one composer, one thread, and `[companion] ask` behind it.
-`ask vera about this` then attaches the selected task as a reference
-the request carries (`ROOK_ABOUT_TASK`, `ROOK_ABOUT_SPACE` in its
-environment); bare text runs `vera say -c rook <text>`, and a reply
-that is one JSON object (`ask.zig`: intent, plan, space, task,
-question, actions) is a block in her pane and its actions are rows
-under `needs you`. With her own terminal up there is no such door
-into a program already running, so `ask vera about this` types the
-task's id into her box — a reference she can look up, and text a
-hand can delete. Without her on PATH the bar says `vera offline` and
-everything but her works.
-
-The calm bar is composed from `[mux] status_home` at home (`view -
-agents attention blocked session vera`) and `status_space` in a
-space (`input - working attention unread pins`): `agents ◐ 2 active
-· 1 idle`, `! 2 need you`, `✕ 1 failed`, `session $4.18 · 812k
-tokens` (the producer's usage since this server started; off until
-someone reports it), `vera ready|thinking|waiting for you|offline` — or, while rook is
-hosting her own terminal, `vera open|working`, which is all rook
-knows and all it claims.
-
-prefix-s is orbit, a subview of home: the scope bar reads `rook │
-orbit` with `esc rook` in the corner, and every space is a figure
-when rook has something to say about it (the name in the top edge
-with an event line; the tabs with their actors and marks inside; for
-the space you left, the last lines of the pane you were in, read from
-retained cells) or one compact row when it does not. Under 60
-columns, with `zoom_view = "ledger"`, or when the figures would not
-fit, the same spaces draw as two-line rows, and the bar and the scope
-bar say `ledger`. `scripts/altitude-fixture.py` renders all of it
-deterministically; `docs/altitude.md` is the model.
+Home is a workspace — a `Session` flagged `home` — that lives outside
+the list of spaces. Plain `rook` lands there; `prefix-o` (the `home`
+verb) goes home from any space and back to the one it was gone to
+from. It is made when it is gone to and is not there, from the
+config's `[home]` — windows, panes, a command and a dir each — or, with
+nothing configured, one shell in `~`. A pane's command is typed into a
+login shell once the prompt is up (the same boot restored panes use),
+so a program that quits leaves the shell. Closing its last pane goes
+back to the space you came from and home is gone until it is gone to
+again; `on_empty = "stay"` seeds it again in place; with no other
+space it is seeded again either way, so the server does not end with
+the scratch pad. It wears the accent chip, `rook ls`, the picker and
+the rail leave it out, C-o never lands on it, it is never saved, and
+the feed says `"scope": "home"` and `"home": true` on its workspace.
+`docs/home.md` is the model; `scripts/home-fixture.py` drives it.
 
 ## Owning a pane
 

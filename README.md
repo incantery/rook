@@ -52,37 +52,36 @@ scope slot, then its tabs — the work at full width under it, and one
 calm bar across the bottom. No sidebar: the legacy spaces/agents
 panel is off unless `[mux] sidebar_mode = "open"` asks for it.
 
-**Home.** Plain `rook` lands at rook's home, not in a space: the
-scope slot is the system's chip, `rook` in the accent block, then
-the view and what is selected. The canvas is a work navigator on
-the left — what needs you (vera's proposed actions, a pane that
-rang, a task a producer says is waiting or failed), what is in
-progress by goal, what finished, the spaces — and an inspector on
-the right for the selected thing: the goal, the current step, the
-plan with its progress, the timeline, files, commits, tests,
-artifacts, usage, the last lines its pane wrote, and the controls
-the producer supports (an answer to its question, pause, stop,
-retry), each a command run on ↵, plus `open its pane` and `ask
-vera about this`. `j k` move, `l` inspects, `h` is the list, `o`
-opens the exact workspace; typing a letter summons vera. `prefix-t`
-is vera's pane from anywhere — over the inspector, over a space's
-panes without resizing them — and again dismisses her with her
-thread and draft kept; `prefix-T` pins her. `/` finds, `:`
-commands, `prefix-o` from anywhere comes back home, Esc closes one
-layer at a time. Under 81 columns the navigator and the inspector
-are a stack. `prefix-s` floats the picker from home too, and
-`:orbit` is orbit; `rook .` and `rook --space
-<name>` land in a space outright; `startup = "last-space"` makes
-plain `rook` do that too. `docs/altitude.md` is the model and the
-ontology; `scripts/altitude-fixture.py` renders it deterministically.
+**Home.** Plain `rook` lands at home: a workspace like any other —
+panes, windows, splits — that lives outside the list of spaces.
+`prefix-o` goes home from any space and back to the one you came from;
+C-o never lands on it, and `rook ls` and the picker leave it out. With
+nothing configured it is one shell in `~`, a scratch pad: check
+something, close it, and you are back where you were. Closing its last
+pane goes back to that space, and home starts over the next time
+(`[home] on_empty = "stay"` starts it over in place). It is never
+saved; every boot seeds it fresh. What it holds is yours:
 
-**The calm bar at home** is composed from `[mux] status_home`: `rook
-· home · navigator` on the left, and on the right `agents ◐ 2
-active · 1 idle`, `! 2 need you`, `✕ 1 failed`, `session $4.18 ·
-812k tokens` (the producer's usage, since this server started) and
-`vera ready` — warnings off at zero, usage off until someone reports
-it. A space's bar (`status_space`) keeps `you ▸ tool` and the
-signals, with one global `! n need you`.
+```toml
+[home]
+dir = "~"
+[[home.window]]
+name = "me"
+panes = ["docket", ""]          # commands, side by side; "" is a shell
+[[home.window]]
+name = "notes"
+dir = "~/notes"
+[[home.window.pane]]
+command = "nvim scratch.md"
+[[home.window.pane]]
+split = "down"
+```
+
+A pane's command is typed into its shell, so a program that quits
+leaves the shell behind. `rook .` and `rook --space <name>` land in a
+space outright; `startup = "last-space"` makes plain `rook` do that too.
+`docs/home.md` is the model; `scripts/home-fixture.py` drives it end
+to end.
 
 **The calm bar.** One row at the bottom: who holds the focused pane's
 keyboard on the left — `you ▸ nvim`, or `claude·main ▸ owns input ·
@@ -94,7 +93,7 @@ false` turns the row off.
 
 **The rail (legacy, off by default).** A left panel of *spaces* over
 *agents*, a dot and two lines each, behind `[mux] sidebar_mode =
-"open"`. Its model still feeds the state feed and home:
+"open"`. Its model still feeds the state feed:
 rook lists its own workspaces and the panes it can see running an
 agent; a producer pushes the rest, one JSON frame per line:
 
@@ -183,9 +182,9 @@ copy = [".env"]
 link = ["node_modules"]
 ```
 
-**The companion.** One resident is named in the config and rook knows
-her by sight — vera by default — so "is she already open, and where"
-is a question rook answers:
+**The companion.** One resident may be named in the config, and rook
+knows it by sight — none unless named — so "is it already open, and
+where" is a question rook answers:
 
 ```toml
 [companion]

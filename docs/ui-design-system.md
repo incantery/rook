@@ -1,11 +1,11 @@
 # The UI design system
 
 Rook's chrome is one system: the scope bar across the top, the calm
-bar across the bottom, the borders between panes, the root canvas
-and its figures, the input, the gate, the inspector. They share a
+bar across the bottom, the borders between panes, the popup, the
+gate, the inspector. They share a
 theme of semantic roles and a handful of primitives, and nothing
 outside `mux/src/ui.zig` names a color. This page is the intent behind
-those roles; the file is the implementation; `scripts/altitude-fixture.py`
+those roles; the file is the implementation; `scripts/home-fixture.py`
 is where the result is looked at.
 
 ## Rules
@@ -37,7 +37,7 @@ Surfaces, from the ground up:
 | role | palette | used for |
 |---|---|---|
 | `work` | base | the terminal's own ground; panes keep it, chrome never paints it |
-| `chrome` | mantle | both bars, the root canvas — opaque |
+| `chrome` | mantle | both bars — opaque |
 | `raised` | surface0 | one step up: a space's chip, a field, an overlay's interior, the selected tab's fill |
 | `selection` | surface1 | a selected row's band, bounded to its content |
 
@@ -78,7 +78,7 @@ waiting, unread. One glyph is drawn, the strongest.
 Three levels, and no others: the work surface (the terminal's, which
 may be translucent), chrome (opaque `chrome`), and elevated chrome
 (opaque `raised`). Overlays, the input, the inspector and the gate sit
-on elevated chrome. The root canvas is chrome. A pane's edge is
+on elevated chrome. A pane's edge is
 drawn on the work surface, so it is a color, not a fill, and its ink
 is chosen to read over transparency (`border`, not `border_subtle`).
 
@@ -103,19 +103,20 @@ two. A pane's title, when there is one, sits inside `┤ ├`.
 The top row. It answers: what scope am I in, what can I move within
 it, what is exceptional here.
 
-    [main] │  1 zsh   2 implement   3 review ◐   4 logs   +      `o rook
-    [ROOK] │  4 spaces · 2 agents working · 2 need you
-    [ROOK] │  orbit   4 spaces · 2 agents working · 2 need you    esc rook
+    [main] │  1 zsh   2 implement   3 review ◐   4 logs   +      `o home
+    [HOME] │  1 me   2 notes   +                                  `o main
 
 - In a space: the space's chip (`raised`, `primary`, bold), the
-  separator, the tabs, `+`, and the corner: the way out to rook in
-  the prefix's own key (or `copy`, `zoom` while those are on).
-- At home: the system's chip (the accent fill), the separator, the
-  summary in `secondary`, and no corner — nothing is above home.
-- In a subview of the root (orbit, ledger): the subview's name as
-  the tab component, selected, between the chip and the summary, and
-  `esc rook` in the corner. A space named `rook` gets the space chip;
-  the system gets the accent. They never look alike.
+  separator, the tabs, `+`, and the corner: the home key and `home`
+  (or `copy`, `zoom` while those are on).
+- At home: the same bar in another room's colours (`Theme.home`):
+  home's colour (`[home] color`, else the accent) is the accent, and
+  `chrome`, `raised`, `selection` and the edges are pulled toward it —
+  26%, 32%, 32%, 30–40% — so both bars and every seam change together.
+  The chip is `⌂ home` in the accent fill — a space named `home` gets
+  the space chip, so they never look alike — the calm bar leads with
+  `⌂ home` in the accent, and the corner is the home key and the space
+  it goes back to. The panes' own ground is never painted.
 
 A tab is one component: ` 1 deploy · main ◐ `. Index in `muted`,
 label in `secondary` (or `primary`, bold, when selected), actor after
@@ -145,61 +146,15 @@ inactive seam, the accent for the focused pane's. Ownership is the
 bar's word, never a border. Work in flight is the tab's mark, never a
 border.
 
-## The root
-
-The canvas is `chrome`: the navigator (a third) and the inspector
-(the rest), split by one column of `border_subtle`; vera's pane on
-`raised` over the inspector's side with one `border_subtle` edge, or
-a third column on `chrome` when pinned and afforded; on narrow glass
-one at a time.
-
-Navigator groups: a `muted` word and a count, `needs you` in the
-attention ink, bold, a blank row above all but the first. Rows: the
-mark in its ink, the title in `primary` (bold when selected or
-needing you), the space or the age at the edge in `muted`. The
-selected row is a `selection` band with the accent marker — `muted`
-when focus is elsewhere, so selection and focus never read alike. A
-needs-you row wears the attention edge (`▎`). A space row is the
-name, its mark, its tab count in `muted`, its age.
-
-Inspector: the title with its mark, bold; the meta line in
-`secondary`; section words in `muted` with a count after; prose in
-`primary`, wrapped; a done step `✓` in `success` with `muted` text,
-a pending step `◌` in `muted` with `primary` text; a timeline row's
-age in `muted` then its text in `secondary`; a key-value's key in
-`muted` at a fixed column; output lines behind a `│` in `muted`, the
-text in `secondary`; quiet lines in `muted`. Controls: a glyph for
-the kind (`◌` an answer or an approval, `›` open, `!` go see, `✦`
-ask vera, `✕` stop in `err`), the label in `primary`, the command
-after `$` in `muted`; the selected control a `selection` band with
-the accent marker and `↵` at the edge. `⋯ n more · j k` at the foot
-when it overflows.
-
-Vera's pane: the header (`✦` in the accent while focused, the name
-bold, her status in its ink, `pinned` at the edge), `about <chip>`
-when a reference is attached, the thread as before (roles in the
-margin, her reflection as a block one step up from the pane's
-ground), the composer at the foot — the field one step up when
-focused, the prompt in the accent — and its hint line.
-
-Figures (orbit) wear `border`, the selected one `border_focused`;
-the space's name in the top edge is its chip; the tabs inside are
-the tab component without indices. Ledger draws the same rows with
-the same inks. Finding and commanding draw one `raised` field with
-the accent prompt at the top of the canvas and rows under it, the
-selected one banded.
-
 ## The calm bar's modules
 
-Composed by name (`status_home`, `status_space`). `view`: `rook`
-bold, the view, the focused region, in `muted`. `input`: `you ▸
+Composed by name (`status_space`). `input`: `you ▸
 tool`, or the actor's claim. `agents`: `agents` in `muted`, `◐ n
 active` in the working ink, `n idle` in `muted`. `attention`: `! n
 need you` in the attention ink, bold glyph, off at zero. `blocked`:
 `✕ n failed` in `err`, off at zero. `session`: `session` in `muted`,
 the spend in `secondary`, the tokens in `muted`, off when nobody
-reported. `vera`: her name in her status's ink, bold when it is not
-`ready`. Counts (`working`, `unread`, `pins`) as before. Warnings
+reported. Counts (`working`, `unread`, `pins`) as before. Warnings
 strengthen by ink and weight, never by motion.
 
 ## Overlays

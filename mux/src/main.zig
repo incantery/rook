@@ -21,7 +21,7 @@
 //!   rook focus <id> / rook jump / rook close-pane <id>
 //!   rook resume <id> <cmd...>  how to bring the pane's program back after a restart
 //!   rook own <id> <actor> | --paused <actor> | --release | --request | --take
-//!                       who holds a pane's keyboard (docs/altitude.md)
+//!                       who holds a pane's keyboard (docs/altitude.md at 8a9daf9)
 //!   rook rename <name>  name the current tab; it never renames itself again
 //!   rook rename --suggest <pane> <name>   a namer's word for that pane's tab;
 //!                       it yields to a name given by hand
@@ -85,11 +85,9 @@ test {
     _ = @import("proto.zig");
     _ = @import("config.zig");
     _ = @import("keys.zig");
+    _ = @import("sheet.zig");
     _ = @import("chrome.zig");
     _ = @import("companion.zig");
-    _ = @import("altitude.zig");
-    _ = @import("ask.zig");
-    _ = @import("home.zig");
     _ = @import("ui.zig");
     _ = @import("server.zig");
 }
