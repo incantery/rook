@@ -93,6 +93,7 @@ no pane resized:
 | `tabs` | the same, on the selected tab |
 | `separator` | between the chip and the tabs, `│` by default; `""` for none |
 | `fill` | what the bars' empty stretch is drawn with, e.g. `╌` or `▔` |
+| `tab_fill` | `all`: every tab a filled segment with `tabs`' caps — the selected lifted toward the accent, the others sunk toward the bar, a coloured tab in its colour dimmed; `selected` (rook's): only the selected one |
 
 `powerline`, `round` and `slant` are Nerd Font glyphs; with `[mux]
 glyphs = "ascii"` they draw as `bracket`.
@@ -243,6 +244,7 @@ so they are held to one rule of their own.
 | `frame_color` | a colour, like the others; the accent when unsaid | nothing |
 | `header_rule` | one character, drawn the width of the work under the tab bar: `▔` a double bar, `▀` in `frame_color = "bar"` a taller header | a row |
 | `footer_rule` | the same over the calm bar: `▁`, `━`, `╌` | a row |
+| `bar_height` | the tab bar's rows: `2` puts a half-block row under the tabs (segments a row and a half tall), `3` one above and one below with the words centred (two rows tall); caps follow in quarter blocks | 1 or 2 rows |
 
 ```toml
 [[style.match]]
@@ -259,8 +261,8 @@ class = "error"
 frame_color = "red"             # a colour may follow a class
 ```
 
-**Only a rule that cannot flicker may set `frame`, `header_rule` or
-`footer_rule`**: one on `home`, `workspace`, `dir`, `repo` or `branch`.
+**Only a rule that cannot flicker may set `frame`, `header_rule`,
+`footer_rule` or `bar_height`**: one on `home`, `workspace`, `dir`, `repo` or `branch`.
 A rule that asks about `program`, `class` or `state` may not — a frame
 that came and went with a flickering fact would resize every program in
 the workspace each time it did, the one motion rook must never cause.

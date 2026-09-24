@@ -102,6 +102,8 @@ func TestGeometryOnlyFromStaticRules(t *testing.T) {
 		"[[style.match]]\nprogram = \"nvim\"\nheader_rule = \"▔\"\n",
 		"[style]\nframe = \"hexagon\"\n",
 		"[style]\nheader_rule = \"==\"\n",
+		"[style]\nbar_height = 4\n",
+		"[[style.match]]\nclass = \"x\"\nbar_height = 2\n",
 	} {
 		if _, err := Load(write(t, bad)); err == nil {
 			t.Errorf("loaded anyway: %q", bad)

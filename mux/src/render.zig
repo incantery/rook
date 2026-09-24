@@ -16,6 +16,9 @@ pub const Chrome = struct {
     tabbar: []const u8,
     /// Column the tab bar starts at — the side panel pushes it right.
     tab_x: u16 = 0,
+    /// Row its words are on: 0, or 1 in a three-row bar (the rows
+    /// around it are the server's, painted in the overlay).
+    tab_y: u16 = 0,
     /// The side panel, when it is showing: its model, its width, and
     /// how much of itself it is showing (`chrome.SideMode`). It owns
     /// columns 0..w-1 and the seam at w. Hidden is `null` here — the
@@ -178,7 +181,7 @@ pub const Frame = struct {
 
         // Tab bar: top row, starting past whatever chrome pushed it
         // right. `tabbar` is pre-sized to (cols - tab_x) columns.
-        self.cup(chrome.tab_x, 0);
+        self.cup(chrome.tab_x, chrome.tab_y);
         self.put(chrome.tabbar);
         self.put(csi ++ "0m");
         if (chrome.bar) |bar| {

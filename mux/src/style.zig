@@ -40,6 +40,9 @@ pub const Props = struct {
     tabs: ?[]const u8 = null,
     separator: ?[]const u8 = null,
     fill: ?[]const u8 = null,
+    /// "all": every tab is a filled segment, the unselected a step
+    /// dimmer; "selected" (rook's): only the selected one is
+    tab_fill: ?[]const u8 = null,
     icon: ?[]const u8 = null,
     label: ?[]const u8 = null,
     bar_label: ?[]const u8 = null,
@@ -48,6 +51,10 @@ pub const Props = struct {
     frame_color: ?[]const u8 = null,
     header_rule: ?[]const u8 = null,
     footer_rule: ?[]const u8 = null,
+    /// the tab bar's rows: 1 (rook's), 2 — a half-block row under the
+    /// tabs, segments a row and a half tall — or 3, one above and one
+    /// below, the words centred in segments two rows tall
+    bar_height: ?u8 = null,
 
     /// `over` on top of `self`: each property `over` says wins.
     pub fn merge(self: *Props, over: Props) void {
@@ -99,7 +106,7 @@ pub fn dynamic(w: When) bool {
 }
 
 /// The properties that take cells, which only a static rule may set.
-pub const geometry_props = [_][]const u8{ "frame", "header_rule", "footer_rule" };
+pub const geometry_props = [_][]const u8{ "frame", "header_rule", "footer_rule", "bar_height" };
 
 fn isGeometry(comptime name: []const u8) bool {
     inline for (geometry_props) |g| {
@@ -500,6 +507,7 @@ pub fn theme(p: Props, base_theme: ui.Theme) ui.Theme {
         if (p.tabs) |c| t.tab_cap = if (Cap.parse(c) == .plain) .plain else .bracket;
     }
     if (p.separator) |s| t.separator = s;
+    if (p.tab_fill) |f| t.tabs_filled = std.mem.eql(u8, f, "all");
     if (p.fill) |s| t.fill = if (s.len == 0) " " else s;
     return t;
 }
@@ -522,9 +530,16 @@ pub const Geometry = struct {
     frame: Frame = .none,
     header: []const u8 = "",
     footer: []const u8 = "",
+    /// the tab bar's rows, 1 to 3
+    bar_rows: u8 = 1,
 
     pub fn eql(a: Geometry, b: Geometry) bool {
-        return a.frame == b.frame and std.mem.eql(u8, a.header, b.header) and std.mem.eql(u8, a.footer, b.footer);
+        return a.frame == b.frame and a.bar_rows == b.bar_rows and std.mem.eql(u8, a.header, b.header) and std.mem.eql(u8, a.footer, b.footer);
+    }
+
+    /// The row the tab bar's words are on: the middle of three.
+    pub fn tabRow(self: Geometry) u16 {
+        return if (self.bar_rows == 3) 1 else 0;
     }
 
     /// Columns and rows taken from each side of the window region.
@@ -555,6 +570,7 @@ pub fn geometryOf(p: Props) Geometry {
         .frame = if (p.frame) |f| (std.meta.stringToEnum(Frame, f) orelse .none) else .none,
         .header = p.header_rule orelse "",
         .footer = p.footer_rule orelse "",
+        .bar_rows = std.math.clamp(p.bar_height orelse 1, 1, 3),
     };
 }
 

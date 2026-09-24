@@ -616,6 +616,21 @@ try:
 finally:
     r.close()
 
+# ---- 17: a taller tab bar: rows above and below, the words centred
+r = Rook(tag="tall", conf='[[style.match]]\nhome = true\nbar_height = 3\ntabs = "round"\ntab_fill = "all"\n', cols=100, rows=14)
+try:
+    hr = r.pane(r.home_ws()["windows"][0]["focus"])["rect"]
+    check("a three-row bar: the panes start under it", hr["y"] == 3, hr)
+    lines = r.lines()
+    check("the words are on the middle row", "home" in lines[1] and "home" not in lines[0], (lines[0][:20], lines[1][:20]))
+    chip_x = lines[1].index("home")
+    check("half blocks above and below the chip, in its colour", r.screen.buffer[0][chip_x].data == "▄" and r.screen.buffer[2][chip_x].data == "▀" and r.screen.buffer[0][chip_x].fg == r.screen.buffer[1][chip_x].bg, (r.screen.buffer[0][chip_x].data, r.screen.buffer[2][chip_x].data))
+    r.keys("`o", settle=0.8)
+    mr = r.pane(r.current()["windows"][0]["focus"])["rect"]
+    check("a space without the rule keeps a one-row bar", mr["y"] == 1, mr)
+finally:
+    r.close()
+
 # ---- 09: the prefix table is the config's
 r = Rook(tag="keys", conf='[keys]\ne = "popup 50x50 cat"\n"=" = "split-right"\nx = ""\n')
 try:

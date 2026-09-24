@@ -462,6 +462,11 @@ pub const Server = struct {
     /// region before its insets: where the frame is drawn.
     geom: stylepkg.Geometry = .{},
     in_relayout: bool = false,
+    /// The tab bar's filled segments as last painted — the chip and
+    /// every tab on a ground of its own — in bar columns: what a taller
+    /// bar extends above and below.
+    bar_spans: [chromepkg.max_tab_zones + 2]BarSpan = undefined,
+    bar_spans_n: usize = 0,
     frame_rect: layoutpkg.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     /// A second frame builder for what the server paints over the
     /// panes itself: the altitude view, the ownership gate, the
@@ -1061,21 +1066,23 @@ pub const Server = struct {
         const base_x: u16 = if (self.side_w) |sw| sw + 1 else 0;
         // Row 0 is the tab bar; the window area sits below it, and
         // above the calm bar when there is one.
-        const body = self.bodyRows();
-        const win_y: u16 = 1;
-        const win_h: u16 = body -| 1;
         // The stylesheet's geometry (style.Geometry): a frame, a rule
-        // under the tab bar or over the calm bar. It comes only from
-        // rules that cannot flicker, and it is the window region's to
-        // give up — the panes are laid out inside what is left.
-        // the facts first: a switch lands here before any frame has
-        // looked at the workspace it switched to
+        // under the tab bar or over the calm bar, a taller tab bar. It
+        // comes only from rules that cannot flicker, and it is the
+        // window region's to give up — the panes are laid out inside
+        // what is left. The facts first: a switch lands here before
+        // any frame has looked at the workspace it switched to.
         self.in_relayout = true;
         self.fact_key = std.math.maxInt(u64);
         _ = self.refreshFacts();
         self.in_relayout = false;
         self.geom = self.geometryNow();
         const in = self.geom.insets();
+        // The tab bar's rows at the top; the window area below them,
+        // above the calm bar when there is one.
+        const body = self.bodyRows();
+        const win_y: u16 = self.geom.bar_rows;
+        const win_h: u16 = body -| win_y;
         if (w.zoomed) {
             const outer: layoutpkg.Rect = .{ .x = base_x, .y = win_y, .w = g.cols -| base_x, .h = win_h };
             self.frame_rect = outer;
@@ -2570,7 +2577,7 @@ pub const Server = struct {
         }
         // Row 0 past the chrome to its left is the tab bar, and no
         // pane is under it: a click there is the bar's, hit or miss.
-        if (cy == 0 and cx >= self.tab_x) {
+        if (cy < self.geom.bar_rows and cx >= self.tab_x) {
             if (ev.btn == 0 and !ev.release) self.clickTab(cx - self.tab_x);
             return;
         }
@@ -3511,6 +3518,7 @@ pub const Server = struct {
         var cur_over: ?renderpkg.CursorOverride = null;
         const placed = self.placed.items;
         const dock_x = self.dock_x;
+        self.paintBarRows();
         self.paintFrame();
         if (self.gate) self.gateRow();
         if (self.inspect) self.inspectorSheet();
@@ -3528,6 +3536,7 @@ pub const Server = struct {
         const chrome: renderpkg.Chrome = .{
             .tabbar = tabbar,
             .tab_x = self.tab_x,
+            .tab_y = self.geom.tabRow(),
             .side = if (self.side_w) |sw| .{ .model = self.sideModel(), .w = sw, .mode = self.side_shown } else null,
             .dock_x = dock_x,
             .dock_top = self.dock_top,
@@ -3970,7 +3979,10 @@ pub const Server = struct {
             // says otherwise; home's own rule says `{icon} home`
             var hb: [64]u8 = undefined;
             const chip = if (self.resolved.props.label) |tmpl| stylepkg.render(&hb, tmpl, self.facts(), self.resolved.props.icon orelse "") else sc;
+            self.bar_spans_n = 0;
+            const chip_x = vis;
             vis += ui.scopeChip(out, t, if (chip.len > 0) chip[0..@min(chip.len, 40)] else sc);
+            self.noteSpan(chip_x, vis - chip_x, t.chip_bg, t.chip_cap, t.chip_cap.ends() != null);
             vis += ui.separator(out, t, t.chrome);
 
             // the tabs, as components
@@ -4042,7 +4054,9 @@ pub const Server = struct {
                     self.tab_zones[self.tab_zones_n] = .{ .x = vis, .w = w, .target = .{ .window = i } };
                     self.tab_zones_n += 1;
                 }
+                const tab_x0 = vis;
                 vis += ui.tab(out, t, tb, fit);
+                if (ui.tabGround(t, tb)) |gr| self.noteSpan(tab_x0, vis - tab_x0, gr.bg, t.tab_cap, gr.capped);
                 vis += ui.ink(out, on, " ");
             }
             const hidden = n_tabs - @min(shown, n_tabs) - (if (sn.cur >= shown) @as(usize, 1) else 0);
@@ -4983,6 +4997,55 @@ pub const Server = struct {
         return .{ .name = name, .index = @intCast(i + 1), .program = prog, .classes = cls[0..n_cls], .states = st };
     }
 
+    fn noteSpan(self: *Server, x: u16, w: u16, bg: chromepkg.Rgb, cap: ui.Cap, capped: bool) void {
+        if (self.bar_spans_n == self.bar_spans.len or w == 0) return;
+        self.bar_spans[self.bar_spans_n] = .{ .x = x, .w = w, .bg = bg, .cap = cap, .capped = capped };
+        self.bar_spans_n += 1;
+    }
+
+    /// A taller tab bar's other rows: the bar's ground, and under every
+    /// filled segment a half block in its colour — below the words for
+    /// two rows, above and below for three — so a segment reads a row
+    /// and a half or two rows tall. Its ends follow the cap's shape in
+    /// quarter blocks: a round cap's corners, a slant's step, a
+    /// powerline arrow's taper to its point.
+    fn paintBarRows(self: *Server) void {
+        const rows = self.geom.bar_rows;
+        if (rows < 2) return;
+        const t = &self.ui;
+        const g = self.geometry();
+        const f = &self.over;
+        var b: [64]u8 = undefined;
+        const text_y = self.geom.tabRow();
+        const pads = [_]struct { y: u16, top: bool }{ .{ .y = text_y + 1, .top = false }, .{ .y = 0, .top = true } };
+        for (pads[0 .. rows - 1]) |pad| {
+            // the ground, the whole row
+            f.cup(self.tab_x, pad.y);
+            f.put((ui.Style{ .bg = t.chrome }).sgr(&b));
+            var x: u16 = self.tab_x;
+            while (x < g.cols) : (x += 1) f.put(" ");
+            const half = if (pad.top) "▄" else "▀";
+            for (self.bar_spans[0..self.bar_spans_n]) |sp| {
+                f.cup(self.tab_x + sp.x, pad.y);
+                f.put((ui.Style{ .fg = sp.bg, .bg = t.chrome }).sgr(&b));
+                var i: u16 = 0;
+                while (i < sp.w) : (i += 1) {
+                    const first = i == 0;
+                    const last = i + 1 == sp.w;
+                    const cell: []const u8 = if (!sp.capped or !(first or last)) half else switch (sp.cap) {
+                        .round => if (pad.top) (if (first) "▗" else "▖") else (if (first) "▝" else "▘"),
+                        // `╱`: wider at the top on the right, at the bottom on the left
+                        .slant => if (pad.top) (if (first) " " else half) else (if (first) half else " "),
+                        .powerline, .bracket => " ",
+                        .plain => half,
+                    };
+                    f.put(cell);
+                }
+            }
+        }
+        f.put("\x1b[0m");
+    }
+
     /// The stylesheet's frame and rules, into the overlay: in the cells
     /// the layout left for them (`relayout`, `inset`), so they never sit
     /// on a pane.
@@ -5250,6 +5313,8 @@ fn fmtCents(a: std.mem.Allocator, cents: u64) []const u8 {
 
 /// The prefix key as a person types it: the character itself, or
 /// `C-x` for a control key.
+const BarSpan = struct { x: u16, w: u16, bg: chromepkg.Rgb, cap: ui.Cap, capped: bool };
+
 /// A rect with the stylesheet's insets taken off, never below one cell.
 fn inset(r: layoutpkg.Rect, in: anytype) layoutpkg.Rect {
     const w = r.w -| (in.left + in.right);

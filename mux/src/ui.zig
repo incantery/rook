@@ -115,6 +115,8 @@ pub const Theme = struct {
     separator: ?[]const u8 = null,
     /// what the bars' empty cells are drawn with
     fill: []const u8 = " ",
+    /// every tab a filled segment, not only the selected one
+    tabs_filled: bool = false,
 
     pub fn init(accent: Rgb, glyphs: Glyphs) Theme {
         return .{ .accent = accent, .border_focused = accent, .glyphs = glyphs };
@@ -360,7 +362,7 @@ pub const short_label: u16 = 8;
 /// Columns a tab takes at a fit, without drawing it.
 pub fn tabWidth(t: *const Theme, tb: Tab, fit: Fit) u16 {
     var n: u16 = 2; // the padding either side
-    if (tb.selected and t.tab_cap.ends() != null) n += 2;
+    if ((tb.selected or t.tabs_filled) and t.tab_cap.ends() != null) n += 2;
     if (tb.index != null) n += 2; // "1 "
     const collapsed = fit == .collapsed and !tb.selected;
     if (!collapsed) {
@@ -381,11 +383,15 @@ pub fn tab(out: anytype, t: *const Theme, tb: Tab, fit: Fit) u16 {
     // a tab with a colour of its own: filled in it when selected (no
     // edge — the fill is the edge), inked in it toned down when not
     if (tb.colour) |tc| return tabColoured(out, t, tb, fit, tc);
-    const bg: Rgb = if (tb.selected) t.raised else t.chrome;
+    // every tab a segment: the selected lifted toward the accent, the
+    // others sunk toward the bar, so the one you are on is plain at a glance
+    const bg: Rgb = if (tb.selected)
+        (if (t.tabs_filled) toward(t.raised, t.accent, 22) else t.raised)
+    else if (t.tabs_filled) toward(t.raised, t.chrome, 70) else t.chrome;
     const edge: ?Rgb = if (tb.selected) t.accent else null;
     const pad: Style = .{ .bg = bg, .underline = edge };
     var n: u16 = 0;
-    const caps = if (tb.selected) t.tab_cap.ends() else null;
+    const caps = if (tb.selected or t.tabs_filled) t.tab_cap.ends() else null;
     const cap_st: Style = if (t.tab_cap == .bracket) .{ .fg = t.accent, .bg = t.chrome } else .{ .fg = bg, .bg = t.chrome };
     if (caps) |e| n += ink(out, cap_st, e[0]);
     n += ink(out, pad, " ");
@@ -412,11 +418,11 @@ pub fn tab(out: anytype, t: *const Theme, tb: Tab, fit: Fit) u16 {
 }
 
 fn tabColoured(out: anytype, t: *const Theme, tb: Tab, fit: Fit, tc: TabColour) u16 {
-    const bg: Rgb = if (tb.selected) tc.fill else t.chrome;
+    const bg: Rgb = if (tb.selected) tc.fill else if (t.tabs_filled) toward(tc.fill, t.chrome, 72) else t.chrome;
     const fg: Rgb = if (tb.selected) tc.text else tc.inactive;
     const pad: Style = .{ .bg = bg };
     var n: u16 = 0;
-    const caps = if (tb.selected) t.tab_cap.ends() else null;
+    const caps = if (tb.selected or t.tabs_filled) t.tab_cap.ends() else null;
     const cap_st: Style = if (t.tab_cap == .bracket) .{ .fg = tc.fill, .bg = t.chrome } else .{ .fg = bg, .bg = t.chrome };
     if (caps) |e| n += ink(out, cap_st, e[0]);
     n += ink(out, pad, " ");
@@ -442,6 +448,21 @@ fn tabColoured(out: anytype, t: *const Theme, tb: Tab, fit: Fit, tc: TabColour) 
     n += ink(out, pad, " ");
     if (caps) |e| n += ink(out, cap_st, e[1]);
     return n;
+}
+
+/// The ground a tab is drawn on, when it is a filled segment, and the
+/// ends it wears: what a taller bar extends above and below it. Null
+/// for a tab that is only ink on the bar.
+pub fn tabGround(t: *const Theme, tb: Tab) ?struct { bg: Rgb, capped: bool } {
+    const capped = (tb.selected or t.tabs_filled) and t.tab_cap.ends() != null;
+    if (tb.colour) |tc| {
+        if (tb.selected) return .{ .bg = tc.fill, .capped = capped };
+        if (t.tabs_filled) return .{ .bg = toward(tc.fill, t.chrome, 72), .capped = capped };
+        return null;
+    }
+    if (tb.selected) return .{ .bg = if (t.tabs_filled) toward(t.raised, t.accent, 22) else t.raised, .capped = capped };
+    if (t.tabs_filled) return .{ .bg = toward(t.raised, t.chrome, 70), .capped = capped };
+    return null;
 }
 
 /// The gap between tabs on the bar, in columns.

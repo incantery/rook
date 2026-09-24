@@ -43,6 +43,9 @@ type Style struct {
 	Separator *string `toml:"separator" json:"separator,omitempty"`
 	// Fill is what the bars' empty cells are drawn with, repeated.
 	Fill *string `toml:"fill" json:"fill,omitempty"`
+	// TabFill is "all" for every tab a filled segment (the unselected a
+	// step dimmer), "selected" for only the selected one (rook's).
+	TabFill *string `toml:"tab_fill" json:"tab_fill,omitempty"`
 
 	// ---- words: templates over {name} {repo} {branch} {dir} {icon},
 	// and the same in capitals ({NAME}) for the word upper-cased
@@ -61,6 +64,9 @@ type Style struct {
 	// the tab bar and over the calm bar ("▔", "━", "╌").
 	HeaderRule *string `toml:"header_rule" json:"header_rule,omitempty"`
 	FooterRule *string `toml:"footer_rule" json:"footer_rule,omitempty"`
+	// BarHeight is the tab bar's rows: 1, 2 (a half-block row under the
+	// tabs) or 3 (one above and one below, the words centred).
+	BarHeight *int `toml:"bar_height" json:"bar_height,omitempty"`
 }
 
 var frames = []string{"none", "rail", "corners", "box"}
@@ -76,6 +82,9 @@ func (s Style) geometry() []string {
 	}
 	if s.FooterRule != nil {
 		out = append(out, "footer_rule")
+	}
+	if s.BarHeight != nil {
+		out = append(out, "bar_height")
 	}
 	return out
 }
@@ -264,6 +273,12 @@ func (s Style) check(where string) error {
 		if v != nil && !contains(capShapes, *v) {
 			return fmt.Errorf("%s %s = %q: one of %s", where, k, *v, strings.Join(capShapes, ", "))
 		}
+	}
+	if s.TabFill != nil && *s.TabFill != "all" && *s.TabFill != "selected" {
+		return fmt.Errorf("%s tab_fill = %q: \"all\" or \"selected\"", where, *s.TabFill)
+	}
+	if s.BarHeight != nil && (*s.BarHeight < 1 || *s.BarHeight > 3) {
+		return fmt.Errorf("%s bar_height = %d: 1, 2 or 3 rows", where, *s.BarHeight)
 	}
 	if s.Frame != nil && !contains(frames, *s.Frame) {
 		return fmt.Errorf("%s frame = %q: one of %s", where, *s.Frame, strings.Join(frames, ", "))
