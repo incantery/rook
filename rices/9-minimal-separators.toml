@@ -1,0 +1,5 @@
+# 9 · Minimal icon and separator — a heavier separator after a
+# bracketed chip; nothing else changes.
+[style]
+separator = "┃"
+chip = "bracket"

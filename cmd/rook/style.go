@@ -15,7 +15,19 @@ import (
 // styleFeed is the state feed's `style`: what the engine saw, which
 // rules held, and what won (mux/src/statefeed.zig).
 type styleFeed struct {
-	Scope string `json:"scope"`
+	Scope      string `json:"scope"`
+	Workspaces []struct {
+		Current bool `json:"current"`
+		Windows []struct {
+			Index int    `json:"index"`
+			Name  string `json:"name"`
+			Style *struct {
+				Rules []int  `json:"rules"`
+				Color string `json:"color"`
+				Label string `json:"label"`
+			} `json:"style"`
+		} `json:"windows"`
+	} `json:"workspaces"`
 	Style struct {
 		Facts struct {
 			Home      bool     `json:"home"`
@@ -54,13 +66,65 @@ func runStyle(args []string) error {
 		return nil
 	}
 	var rules []config.EngineRule
+	var tabRules []config.EngineTabRule
 	if path, err := config.Path(); err == nil {
 		if c, err := config.Load(path); err == nil {
 			rules = c.Compile().Style.Rules
+			tabRules = c.Compile().Style.Tabs
 		}
 	}
 	explain(os.Stdout, st, rules)
+	explainTabs(os.Stdout, st, tabRules)
 	return nil
+}
+
+// explainTabs lists each tab of the workspace on the glass with the
+// [[style.tab]] rules that held for it and the colour they gave it.
+func explainTabs(w io.Writer, st styleFeed, rules []config.EngineTabRule) {
+	if len(rules) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "\ntabs")
+	for _, ws := range st.Workspaces {
+		if !ws.Current {
+			continue
+		}
+		for _, win := range ws.Windows {
+			if win.Style == nil || len(win.Style.Rules) == 0 {
+				fmt.Fprintf(w, "  %d %-14s rook's own\n", win.Index, win.Name)
+				continue
+			}
+			var from []string
+			for _, i := range win.Style.Rules {
+				d := fmt.Sprintf("tab:%d", i)
+				if i < len(rules) {
+					d += " " + tabRuleString(rules[i])
+				}
+				from = append(from, d)
+			}
+			fmt.Fprintf(w, "  %d %-14s %-10s %s\n", win.Index, win.Name, win.Style.Color, strings.Join(from, "; "))
+		}
+	}
+}
+
+func tabRuleString(r config.EngineTabRule) string {
+	var parts []string
+	if r.Name != "" {
+		parts = append(parts, fmt.Sprintf("name = %q", r.Name))
+	}
+	if r.Index != nil {
+		parts = append(parts, fmt.Sprintf("index = %d", *r.Index))
+	}
+	if w := whenString(r.When); w != "(always)" {
+		parts = append(parts, w)
+	}
+	if r.Source != "" {
+		parts = append(parts, "("+shortPath(r.Source)+")")
+	}
+	if len(parts) == 0 {
+		return "(always)"
+	}
+	return strings.Join(parts, ", ")
 }
 
 // builtinWhen describes rook's own rules, in the engine's order
@@ -96,10 +160,14 @@ func explain(w io.Writer, st styleFeed, rules []config.EngineRule) {
 			fmt.Fprintf(w, "  %s rook:%d     %s\n", mark, r.Index, desc)
 			continue
 		}
+		src := ""
 		if r.Index < len(rules) {
 			desc = whenString(rules[r.Index].When)
+			if s := rules[r.Index].Source; s != "" {
+				src = "   (" + shortPath(s) + ")"
+			}
 		}
-		fmt.Fprintf(w, "  %s config:%d   %s\n", mark, r.Index, desc)
+		fmt.Fprintf(w, "  %s config:%d   %s%s\n", mark, r.Index, desc, src)
 	}
 	fmt.Fprintln(w, "\ncomputed")
 	keys := make([]string, 0, len(st.Style.Computed))
@@ -132,4 +200,12 @@ func whenString(w config.When) string {
 		return "(always)"
 	}
 	return strings.Join(parts, ", ")
+}
+
+// shortPath is a path with $HOME as ~.
+func shortPath(p string) string {
+	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(p, home+"/") {
+		return "~" + p[len(home):]
+	}
+	return p
 }

@@ -1,0 +1,23 @@
+# Tabs by what they are: each wears its own colour — filled when it is
+# the selected tab, toned down when not. By name, by program, or by a
+# class on a pane in it (a failing build, say).
+[style]
+tabs = "round"
+
+[[style.tab]]
+home = true
+name = "docker*"
+color = "#89b4fa"
+
+[[style.tab]]
+program = "mongo*"
+color = "#a6e3a1"
+label = "{name} · {program}"
+
+[[style.tab]]
+program = "nvim"
+color = "#cba6f7"
+
+[[style.tab]]
+class = "error"
+color = "#f38ba8"

@@ -1,0 +1,6 @@
+# 3 · Double bar — home's bars carry a rule, top and bottom.
+# Takes a row each, so it is keyed on home, which cannot flicker.
+[[style.match]]
+home = true
+header_rule = "▔"
+footer_rule = "▁"

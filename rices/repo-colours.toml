@@ -1,0 +1,19 @@
+# Per repository: each checkout wears its own accent, and the chip
+# says the repo and the branch. Edit the globs for your own.
+[[style.match]]
+repo = "github.com/grafana/*"
+accent = "#ff8833"
+tint = "accent"
+tint_amount = 18
+label = "{repo}:{branch}"
+
+[[style.match]]
+repo = "github.com/incantery/*"
+accent = "#a6e3a1"
+label = "{repo}:{branch}"
+
+# a release branch, anywhere, is framed so it is never mistaken
+[[style.match]]
+branch = "release/*"
+frame = "corners"
+frame_color = "#f38ba8"

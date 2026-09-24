@@ -1,0 +1,5 @@
+# 6 · Patterned bar — home's bars fill their empty stretch with a
+# pattern; the words keep a cell clear of it.
+[[style.match]]
+home = true
+fill = "╌"

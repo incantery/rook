@@ -1,0 +1,5 @@
+# 1 · Prominent home label — home says so in capitals, at both edges.
+[[style.match]]
+home = true
+label = "{icon} HOME"
+bar_label = "{icon} HOME"

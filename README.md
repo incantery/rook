@@ -63,14 +63,19 @@ the tool is the bar's word, never the tab's.
 `branch`, `program` — each setting any of the theme's colours, the
 chip's and tabs' caps (`round`, `powerline`, …), the separator, a fill
 pattern for the bars, and the chip's and calm bar's words as templates
-(`label = "{REPO}:{branch}"`). Rules also match **classes** — names
+(`label = "{REPO}:{branch}"`). `[[style.tab]]` colours tabs one by one —
+by name, program or class, filled when selected and toned down when not
+(a `docker` tab blue, a `mongo` tab green). Rules also match **classes** — names
 anyone puts on a workspace or pane (`rook class api +error --ttl 5m`,
 or a program's own OSC 1337 `SetUserVar=rook_class`) — and rook's own
 states (`unread`, `working`, `zoomed`, …): an error detector or a loop
 watchdog is a script that sets a class, never something rook knows
 about. A later rule wins, property by property;
 rook's only rule of its own is home's look. `rook style` explains it —
-the facts, which rules held, what won and from where. `docs/style.md`.
+the facts, which rules held, what won and from where. Stylesheets can
+live in files of their own — rices — and be included
+(`include = ["~/.config/rook/rices/*.toml"]`, at the top); `rices/` in
+this repository holds eleven to start from. `docs/style.md`.
 
 **The frame.** One tab bar across the top — the space's name in the
 scope slot, then its tabs — the work at full width under it, and one

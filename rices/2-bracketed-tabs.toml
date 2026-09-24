@@ -1,0 +1,5 @@
+# 2 · Bracketed tabs — the chip and the selected tab in a shape of
+# their own (powerline caps; needs a Nerd Font, brackets on ASCII).
+[style]
+chip = "powerline"
+tabs = "powerline"

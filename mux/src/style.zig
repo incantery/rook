@@ -43,6 +43,11 @@ pub const Props = struct {
     icon: ?[]const u8 = null,
     label: ?[]const u8 = null,
     bar_label: ?[]const u8 = null,
+    // ---- geometry: these take cells (see `Geometry`)
+    frame: ?[]const u8 = null,
+    frame_color: ?[]const u8 = null,
+    header_rule: ?[]const u8 = null,
+    footer_rule: ?[]const u8 = null,
 
     /// `over` on top of `self`: each property `over` says wins.
     pub fn merge(self: *Props, over: Props) void {
@@ -83,6 +88,26 @@ pub const States = std.EnumSet(State);
 
 pub const Rule = struct { when: When = .{}, style: Props = .{} };
 
+
+/// A rule is dynamic when it asks about something that changes on its
+/// own — the program in front, a class, a state. Such a rule may
+/// colour and word the chrome, never shape it: a frame that came and
+/// went with a flickering fact would resize every program in the
+/// workspace each time, the one motion rook must never cause.
+pub fn dynamic(w: When) bool {
+    return w.program.len > 0 or w.class.len > 0 or w.state.len > 0;
+}
+
+/// The properties that take cells, which only a static rule may set.
+pub const geometry_props = [_][]const u8{ "frame", "header_rule", "footer_rule" };
+
+fn isGeometry(comptime name: []const u8) bool {
+    inline for (geometry_props) |g| {
+        if (comptime std.mem.eql(u8, g, name)) return true;
+    }
+    return false;
+}
+
 /// Rook's own rules, ahead of the config's. Home is the one place rook
 /// has a look of its own: its colour on the chip, the chrome pulled
 /// toward it, and its name said at both edges (docs/home.md). A rule in
@@ -98,10 +123,44 @@ pub const builtin = [_]Rule{
     } },
 };
 
+/// One tab's looks (`[[style.tab]]`). Colour only: a tab rule may ask
+/// about anything, classes and states included, since nothing it says
+/// takes a cell.
+pub const TabProps = struct {
+    /// the tab's colour: the selected tab's fill, and — toned down
+    /// toward the bar — the others' ink
+    color: ?[]const u8 = null,
+    /// the unselected ink outright, instead of the toned-down colour
+    color_inactive: ?[]const u8 = null,
+    /// the selected tab's text; light or dark by the fill when unsaid
+    text: ?[]const u8 = null,
+    icon: ?[]const u8 = null,
+    /// a template: {name} {index} {icon} {program}, and the workspace's
+    label: ?[]const u8 = null,
+
+    pub fn merge(self: *TabProps, over: TabProps) void {
+        inline for (std.meta.fields(TabProps)) |f| {
+            if (@field(over, f.name)) |v| @field(self, f.name) = v;
+        }
+    }
+};
+
+/// A `[[style.tab]]`: the workspace's conditions (`When`, asked of the
+/// tab — its program, its panes' classes, its states), and the tab's own.
+pub const TabRule = struct {
+    when: When = .{},
+    /// the tab's name, a glob
+    name: []const u8 = "",
+    /// its number on the bar, from 1
+    index: ?u16 = null,
+    style: TabProps = .{},
+};
+
 const Doc = struct {
     style: struct {
         base: Props = .{},
         rules: []const Rule = &.{},
+        tabs: []const TabRule = &.{},
     } = .{},
 };
 
@@ -125,6 +184,10 @@ pub const Sheet = struct {
 
     pub fn rules(self: *const Sheet) []const Rule {
         return if (self.parsed) |p| p.value.style.rules else &.{};
+    }
+
+    pub fn tabs(self: *const Sheet) []const TabRule {
+        return if (self.parsed) |p| p.value.style.tabs else &.{};
     }
 };
 
@@ -216,11 +279,14 @@ pub const Resolved = struct {
     n_rules: usize = 0,
     from: [n_props]From = @splat(.none),
 
-    fn take(self: *Resolved, over: Props, src: From) void {
+    fn take(self: *Resolved, over: Props, src: From, dyn: bool) void {
         inline for (std.meta.fields(Props), 0..) |fld, i| {
-            if (@field(over, fld.name)) |v| {
-                @field(self.props, fld.name) = v;
-                self.from[i] = src;
+            const skip = dyn and comptime isGeometry(fld.name);
+            if (!skip) {
+                if (@field(over, fld.name)) |v| {
+                    @field(self.props, fld.name) = v;
+                    self.from[i] = src;
+                }
             }
         }
     }
@@ -230,21 +296,117 @@ pub fn resolve(sheet: *const Sheet, f: Facts) Resolved {
     var r: Resolved = .{};
     for (builtin) |rule| {
         if (matches(rule.when, f)) {
-            r.take(rule.style, .{ .rule = @intCast(r.n_rules) });
+            r.take(rule.style, .{ .rule = @intCast(r.n_rules) }, dynamic(rule.when));
             r.matched[r.n_rules] = true;
         }
         r.n_rules += 1;
     }
-    r.take(sheet.base(), .base);
+    r.take(sheet.base(), .base, false);
     for (sheet.rules()) |rule| {
         if (r.n_rules == max_rules) break;
         if (matches(rule.when, f)) {
-            r.take(rule.style, .{ .rule = @intCast(r.n_rules) });
+            r.take(rule.style, .{ .rule = @intCast(r.n_rules) }, dynamic(rule.when));
             r.matched[r.n_rules] = true;
         }
         r.n_rules += 1;
     }
     return r;
+}
+
+// ---- tabs
+
+/// A tab as a rule sees it: its own name, number and program, its
+/// panes' classes and its states; the workspace's facts for the rest.
+pub const TabFacts = struct {
+    name: []const u8 = "",
+    index: u16 = 0,
+    program: []const u8 = "",
+    classes: []const []const u8 = &.{},
+    states: States = .{},
+};
+
+pub const TabResolved = struct {
+    props: TabProps = .{},
+    matched: [max_rules]bool = @splat(false),
+    n_rules: usize = 0,
+};
+
+/// The cascade for one tab: every `[[style.tab]]` whose conditions all
+/// hold, in order, a later one winning property by property. A
+/// workspace condition is asked of the workspace, except `program`,
+/// `class` and `state`, which are the tab's.
+pub fn resolveTab(sheet: *const Sheet, ws: Facts, tf: TabFacts) TabResolved {
+    var r: TabResolved = .{};
+    var f = ws;
+    f.program = tf.program;
+    f.classes = tf.classes;
+    f.states = tf.states;
+    for (sheet.tabs()) |rule| {
+        if (r.n_rules == max_rules) break;
+        const ok = matches(rule.when, f) and
+            (rule.name.len == 0 or glob(rule.name, tf.name)) and
+            (if (rule.index) |i| i == tf.index else true);
+        if (ok) {
+            r.props.merge(rule.style);
+            r.matched[r.n_rules] = true;
+        }
+        r.n_rules += 1;
+    }
+    return r;
+}
+
+/// A tab's inks from its winning properties, over the theme: the fill
+/// and text when selected, the ink when not. Null when no rule gave it
+/// a colour — the tab is drawn as rook draws every tab.
+pub fn tabColours(p: TabProps, t: *const ui.Theme) ?ui.TabColour {
+    const c = colour(p.color orelse return null, t) orelse return null;
+    const text = if (p.text) |v| (colour(v, t) orelse contrast(c)) else contrast(c);
+    const dim = if (p.color_inactive) |v| (colour(v, t) orelse ui.toward(c, t.chrome, 40)) else ui.toward(c, t.chrome, 40);
+    return .{ .fill = c, .text = text, .inactive = dim };
+}
+
+/// Dark text on a light fill, light on a dark one.
+fn contrast(c: Rgb) Rgb {
+    const lum = (@as(u32, c.r) * 299 + @as(u32, c.g) * 587 + @as(u32, c.b) * 114) / 1000;
+    return if (lum > 140) chromepkg.crust else chromepkg.text;
+}
+
+/// A tab's label template: {name} {index} {icon} {program}, and the
+/// workspace's tokens.
+pub fn renderTab(buf: []u8, tmpl: []const u8, ws: Facts, tf: TabFacts, icon: []const u8) []const u8 {
+    // the tab's own tokens first, then the workspace's for the rest
+    var mid: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&mid);
+    var i: usize = 0;
+    while (i < tmpl.len) {
+        if (tmpl[i] == '{') {
+            if (std.mem.indexOfScalarPos(u8, tmpl, i, '}')) |end| {
+                const tok = tmpl[i + 1 .. end];
+                if (std.ascii.eqlIgnoreCase(tok, "index")) {
+                    w.print("{d}", .{tf.index}) catch {};
+                    i = end + 1;
+                    continue;
+                }
+                const upper = tok.len > 0 and std.ascii.isUpper(tok[0]);
+                const val: ?[]const u8 = if (std.ascii.eqlIgnoreCase(tok, "name"))
+                    tf.name
+                else if (std.ascii.eqlIgnoreCase(tok, "program"))
+                    tf.program
+                else
+                    null;
+                if (val) |v| {
+                    if (upper) {
+                        for (v) |ch| w.writeByte(std.ascii.toUpper(ch)) catch break;
+                    } else w.writeAll(v) catch {};
+                    i = end + 1;
+                    continue;
+                }
+            }
+        }
+        w.writeByte(tmpl[i]) catch break;
+        i += 1;
+    }
+    return render(buf, w.buffered(), ws, icon);
 }
 
 // ---- from properties to a theme
@@ -340,6 +502,68 @@ pub fn theme(p: Props, base_theme: ui.Theme) ui.Theme {
     if (p.separator) |s| t.separator = s;
     if (p.fill) |s| t.fill = if (s.len == 0) " " else s;
     return t;
+}
+
+// ---- geometry
+
+pub const Frame = enum {
+    none,
+    /// a column down the left of the work
+    rail,
+    /// the four corners of the work, marked
+    corners,
+    /// a line all the way round
+    box,
+};
+
+/// The cells the chrome takes around the work, from the winning
+/// properties. Two looks with the same Geometry lay out the same.
+pub const Geometry = struct {
+    frame: Frame = .none,
+    header: []const u8 = "",
+    footer: []const u8 = "",
+
+    pub fn eql(a: Geometry, b: Geometry) bool {
+        return a.frame == b.frame and std.mem.eql(u8, a.header, b.header) and std.mem.eql(u8, a.footer, b.footer);
+    }
+
+    /// Columns and rows taken from each side of the window region.
+    pub fn insets(self: Geometry) struct { left: u16, right: u16, top: u16, bottom: u16 } {
+        var i: @TypeOf(self.insets()) = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 };
+        switch (self.frame) {
+            .none => {},
+            .rail => i.left = 1,
+            .corners => {
+                i.left = 1;
+                i.right = 1;
+            },
+            .box => {
+                i.left = 1;
+                i.right = 1;
+                i.top = 1;
+                i.bottom = 1;
+            },
+        }
+        if (self.header.len > 0) i.top += 1;
+        if (self.footer.len > 0) i.bottom += 1;
+        return i;
+    }
+};
+
+pub fn geometryOf(p: Props) Geometry {
+    return .{
+        .frame = if (p.frame) |f| (std.meta.stringToEnum(Frame, f) orelse .none) else .none,
+        .header = p.header_rule orelse "",
+        .footer = p.footer_rule orelse "",
+    };
+}
+
+/// The frame's colour: `frame_color`, else the accent.
+pub fn frameColour(p: Props, t: *const ui.Theme) Rgb {
+    if (p.frame_color) |v| {
+        if (colour(v, t)) |c| return c;
+    }
+    return t.accent;
 }
 
 /// A template over the facts: {name} {repo} {branch} {dir} {icon}, and
@@ -618,6 +842,62 @@ test "classes and states match" {
     try std.testing.expect(r.props.icon == null); // error, but nothing unread
     st.insert(.unread);
     try std.testing.expectEqualStrings("!", resolve(&sheet, .{ .classes = &cls, .states = st }).props.icon.?);
+}
+
+test "geometry comes only from rules that cannot flicker" {
+    const doc =
+        \\{"style":{"base":{"frame":"rail"},"rules":[
+        \\{"when":{"repo":"github.com/acme/*"},"style":{"frame":"box","header_rule":"▔"}},
+        \\{"when":{"class":"error"},"style":{"frame":"none","frame_color":"red","footer_rule":"━"}}]}}
+    ;
+    var sheet = try Sheet.parse(std.testing.allocator, doc);
+    defer sheet.deinit();
+    try std.testing.expectEqual(Frame.rail, geometryOf(resolve(&sheet, .{}).props).frame);
+    const cls = [_][]const u8{"error"};
+    const r = resolve(&sheet, .{ .repo = "github.com/acme/app", .classes = &cls });
+    const g = geometryOf(r.props);
+    // the class rule matched, but it is dynamic: its frame and rule are
+    // ignored, and its colour is not
+    try std.testing.expectEqual(Frame.box, g.frame);
+    try std.testing.expectEqualStrings("▔", g.header);
+    try std.testing.expectEqualStrings("", g.footer);
+    try std.testing.expectEqualStrings("red", r.props.frame_color.?);
+    const in = g.insets();
+    try std.testing.expectEqual(@as(u16, 1), in.left);
+    try std.testing.expectEqual(@as(u16, 2), in.top); // the box's row and the rule's
+    try std.testing.expectEqual(@as(u16, 1), in.bottom);
+}
+
+test "tabs: rules by name, program and workspace; the colour, toned down when not selected" {
+    const doc =
+        \\{"style":{"tabs":[
+        \\{"when":{"home":true},"name":"docker*","style":{"color":"#89b4fa"}},
+        \\{"when":{"program":"mongo*"},"style":{"color":"green","label":"{icon} {NAME} {program}","icon":"m"}},
+        \\{"index":3,"style":{"color":"#ffffff"}},
+        \\{"when":{"class":"error"},"style":{"color":"red"}}]}}
+    ;
+    var sheet = try Sheet.parse(std.testing.allocator, doc);
+    defer sheet.deinit();
+    const t = ui.Theme.init(chromepkg.mauve, .unicode);
+    const home: Facts = .{ .home = true, .workspace = "home" };
+    const space: Facts = .{ .workspace = "api" };
+    // docker: only at home
+    try std.testing.expectEqualStrings("#89b4fa", resolveTab(&sheet, home, .{ .name = "docker", .index = 1 }).props.color.?);
+    try std.testing.expect(resolveTab(&sheet, space, .{ .name = "docker", .index = 1 }).props.color == null);
+    // mongo by its program, anywhere, with a label
+    const m = resolveTab(&sheet, space, .{ .name = "db", .index = 2, .program = "mongosh" });
+    try std.testing.expectEqualStrings("green", m.props.color.?);
+    var lb: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("m DB mongosh", renderTab(&lb, m.props.label.?, space, .{ .name = "db", .index = 2, .program = "mongosh" }, m.props.icon.?));
+    // by index; and a class on a pane in the tab, later, wins
+    const white = tabColours(resolveTab(&sheet, space, .{ .name = "x", .index = 3 }).props, &t).?;
+    try std.testing.expectEqual(chromepkg.crust, white.text); // dark on a light fill
+    const cls = [_][]const u8{"error"};
+    const err = resolveTab(&sheet, space, .{ .name = "x", .index = 3, .classes = &cls });
+    try std.testing.expectEqualStrings("red", err.props.color.?);
+    const blue = tabColours(resolveTab(&sheet, home, .{ .name = "docker", .index = 1 }).props, &t).?;
+    try std.testing.expect(!std.meta.eql(blue.inactive, blue.fill)); // toned down
+    try std.testing.expect(tabColours(.{}, &t) == null);
 }
 
 test "a colour said outright is not tinted over" {

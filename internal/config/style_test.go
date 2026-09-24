@@ -89,3 +89,46 @@ func TestStatesMatchTheEngine(t *testing.T) {
 		t.Fatalf("states differ\nengine: %v\ngo:     %v", engine, States)
 	}
 }
+
+func TestGeometryOnlyFromStaticRules(t *testing.T) {
+	e := compile(t, "[style]\nframe = \"rail\"\n[[style.match]]\nrepo = \"x/*\"\nframe = \"box\"\nheader_rule = \"▔\"\n"+
+		"[[style.match]]\nclass = \"error\"\nframe_color = \"red\"\n")
+	if *e.Style.Base.Frame != "rail" || *e.Style.Rules[0].Style.HeaderRule != "▔" || *e.Style.Rules[1].Style.FrameColor != "red" {
+		t.Fatalf("style = %+v", e.Style)
+	}
+	for _, bad := range []string{
+		"[[style.match]]\nclass = \"error\"\nframe = \"box\"\n",
+		"[[style.match]]\nstate = \"working\"\nfooter_rule = \"━\"\n",
+		"[[style.match]]\nprogram = \"nvim\"\nheader_rule = \"▔\"\n",
+		"[style]\nframe = \"hexagon\"\n",
+		"[style]\nheader_rule = \"==\"\n",
+	} {
+		if _, err := Load(write(t, bad)); err == nil {
+			t.Errorf("loaded anyway: %q", bad)
+		}
+	}
+}
+
+func TestTabRules(t *testing.T) {
+	e := compile(t, "[[style.tab]]\nhome = true\nname = \"docker*\"\ncolor = \"#89b4fa\"\n"+
+		"[[style.tab]]\nprogram = \"mongo*\"\nclass = \"error\"\ncolor = \"green\"\nlabel = \"{icon} {name} {index}\"\n"+
+		"[[style.tab]]\nindex = 3\ncolor_inactive = \"muted\"\n")
+	tabs := e.Style.Tabs
+	if len(tabs) != 3 || tabs[0].Name != "docker*" || !*tabs[0].When.Home || *tabs[0].Style.Color != "#89b4fa" {
+		t.Fatalf("tabs = %+v", tabs)
+	}
+	if tabs[1].When.Program != "mongo*" || tabs[1].When.Class != "error" || *tabs[2].Index != 3 {
+		t.Fatalf("tabs = %+v", tabs)
+	}
+	for _, bad := range []string{
+		"[[style.tab]]\nname = \"x\"\ncolor = \"blurple\"\n",
+		"[[style.tab]]\nindex = 0\ncolor = \"red\"\n",
+		"[[style.tab]]\nlabel = \"{nmae}\"\n",
+		"[[style.tab]]\nstate = \"on-fire\"\ncolor = \"red\"\n",
+		"[[style.tab]]\nname = \"x\"\nfill = \"#fff\"\n",
+	} {
+		if _, err := Load(write(t, bad)); err == nil {
+			t.Errorf("loaded anyway: %q", bad)
+		}
+	}
+}

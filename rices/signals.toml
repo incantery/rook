@@ -1,0 +1,24 @@
+# Signals — looks for classes something else puts on (rook never
+# decides what an error is; a detector does, with `rook class`):
+#
+#   rook class api +error --ttl 10m      # a failing build, say
+#   rook class api +loop                 # a runaway, say
+#
+# and rook's own states of a workspace.
+
+[[style.match]]
+class = "error"
+bar = "#3a1f24"
+frame_color = "#f38ba8"
+bar_label = "✕ {name} is failing"
+
+[[style.match]]
+class = "loop"
+tint = "#fab387"
+tint_amount = 35
+bar_label = "↻ {name} is looping"
+
+[[style.match]]
+state = "working"
+icon = "◐"
+label = "{icon} {name}"

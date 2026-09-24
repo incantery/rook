@@ -281,6 +281,27 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
                 w.focused,
             }) catch return;
             w.layout.writeJson(gpa, out);
+            // the tab's [[style.tab]] rules held, and what they gave it
+            if (form.drift and sv.sheet.tabs().len > 0) {
+                var tnb: [48]u8 = undefined;
+                const r = sv.tabResolved(w, wi, sv.tabName(sn, w, &tnb));
+                out.appendSlice(gpa, ",\"style\":{\"rules\":[") catch return;
+                var firstm = true;
+                for (r.matched[0..r.n_rules], 0..) |m, mi| {
+                    if (!m) continue;
+                    if (!firstm) out.append(gpa, ',') catch return;
+                    firstm = false;
+                    out.print(gpa, "{d}", .{mi}) catch return;
+                }
+                out.appendSlice(gpa, "]") catch return;
+                inline for (std.meta.fields(stylepkg.TabProps)) |fld| {
+                    if (@field(r.props, fld.name)) |v| {
+                        out.appendSlice(gpa, ",\"" ++ fld.name ++ "\":") catch return;
+                        str(gpa, out, v);
+                    }
+                }
+                out.append(gpa, '}') catch return;
+            }
             out.append(gpa, '}') catch return;
         }
         out.appendSlice(gpa, "],\"pins\":[") catch return;

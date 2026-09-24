@@ -1,0 +1,4 @@
+# 4 · Left rail accent — a column of home's colour down the left.
+[[style.match]]
+home = true
+frame = "rail"

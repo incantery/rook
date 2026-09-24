@@ -327,7 +327,13 @@ pub fn separator(out: anytype, t: *const Theme, on: Rgb) u16 {
 
 /// A tab: an index, a stable label, an optional actor, and a mark.
 /// One component, one boundary.
+/// A tab's own colour (`[[style.tab]]`): its fill and text when it is
+/// the selected one, its ink when it is not.
+pub const TabColour = struct { fill: Rgb, text: Rgb, inactive: Rgb };
+
 pub const Tab = struct {
+    /// the stylesheet's colour for this tab; null is rook's own look
+    colour: ?TabColour = null,
     /// 1–9, shown on the bar; null in a figure
     index: ?u8 = null,
     label: []const u8,
@@ -372,6 +378,9 @@ pub fn tabWidth(t: *const Theme, tb: Tab, fit: Fit) u16 {
 /// chrome, their index muted. A calm tab has no glyph. Returns the
 /// columns spent (the same as `tabWidth`).
 pub fn tab(out: anytype, t: *const Theme, tb: Tab, fit: Fit) u16 {
+    // a tab with a colour of its own: filled in it when selected (no
+    // edge — the fill is the edge), inked in it toned down when not
+    if (tb.colour) |tc| return tabColoured(out, t, tb, fit, tc);
     const bg: Rgb = if (tb.selected) t.raised else t.chrome;
     const edge: ?Rgb = if (tb.selected) t.accent else null;
     const pad: Style = .{ .bg = bg, .underline = edge };
@@ -396,6 +405,39 @@ pub fn tab(out: anytype, t: *const Theme, tb: Tab, fit: Fit) u16 {
     if (tb.mark != .none) {
         n += ink(out, pad, " ");
         n += ink(out, .{ .fg = markInk(t, tb.mark), .bg = bg, .bold = tb.mark == .attention, .underline = edge }, markGlyph(t, tb.mark));
+    }
+    n += ink(out, pad, " ");
+    if (caps) |e| n += ink(out, cap_st, e[1]);
+    return n;
+}
+
+fn tabColoured(out: anytype, t: *const Theme, tb: Tab, fit: Fit, tc: TabColour) u16 {
+    const bg: Rgb = if (tb.selected) tc.fill else t.chrome;
+    const fg: Rgb = if (tb.selected) tc.text else tc.inactive;
+    const pad: Style = .{ .bg = bg };
+    var n: u16 = 0;
+    const caps = if (tb.selected) t.tab_cap.ends() else null;
+    const cap_st: Style = if (t.tab_cap == .bracket) .{ .fg = tc.fill, .bg = t.chrome } else .{ .fg = bg, .bg = t.chrome };
+    if (caps) |e| n += ink(out, cap_st, e[0]);
+    n += ink(out, pad, " ");
+    if (tb.index) |i| {
+        var ib: [2]u8 = .{ '0' + i, ' ' };
+        n += ink(out, .{ .fg = fg, .bg = bg }, &ib);
+    }
+    const collapsed = fit == .collapsed and !tb.selected;
+    if (!collapsed) {
+        const label = if (fit == .short and !tb.selected) chromepkg.clip(tb.label, short_label) else tb.label;
+        n += ink(out, .{ .fg = fg, .bg = bg, .bold = tb.selected }, label);
+        if (fit == .full and tb.actor.len > 0 and !std.mem.eql(u8, tb.actor, tb.label)) {
+            n += ink(out, .{ .fg = fg, .bg = bg }, " · ");
+            n += ink(out, .{ .fg = fg, .bg = bg }, tb.actor);
+        }
+    }
+    if (tb.mark != .none) {
+        n += ink(out, pad, " ");
+        // a mark keeps its state's ink, except on the fill it would sink into
+        const mk = if (tb.selected) tc.text else markInk(t, tb.mark);
+        n += ink(out, .{ .fg = mk, .bg = bg, .bold = tb.mark == .attention }, markGlyph(t, tb.mark));
     }
     n += ink(out, pad, " ");
     if (caps) |e| n += ink(out, cap_st, e[1]);

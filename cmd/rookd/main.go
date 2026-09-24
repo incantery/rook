@@ -96,7 +96,8 @@ func nameTabs(sock string) {
 	n.Run(context.Background(), 4*time.Second)
 }
 
-// watchConfig reloads the engine when rook.toml changes: saved and
+// watchConfig reloads the engine when rook.toml or a rice it includes
+// changes: saved and
 // good, the running server takes it (`rook reload`); saved and not, the
 // calm bar says why and the config that is running stays. Polled —
 // once a second is plenty for a file a person saves, and it survives
@@ -106,12 +107,21 @@ func watchConfig(sock string) {
 	if err != nil {
 		return
 	}
+	// every file the last good load read: rook.toml and its rices
+	files := []string{path}
+	if c, err := config.Load(path); err == nil {
+		files = c.Files
+	}
 	stamp := func() string {
-		fi, err := os.Stat(path)
-		if err != nil {
-			return ""
+		var b strings.Builder
+		for _, f := range append([]string{path}, files...) {
+			if fi, err := os.Stat(f); err == nil {
+				fmt.Fprintf(&b, "%d/%d;", fi.ModTime().UnixNano(), fi.Size())
+			} else {
+				b.WriteString("-;")
+			}
 		}
-		return fmt.Sprintf("%d/%d", fi.ModTime().UnixNano(), fi.Size())
+		return b.String()
 	}
 	engine := func(stdin string, args ...string) error {
 		cmd := exec.Command(mux.EnginePath(), args...)
@@ -127,7 +137,7 @@ func watchConfig(sock string) {
 	for {
 		time.Sleep(time.Second)
 		now := stamp()
-		if now == last || now == "" {
+		if now == last {
 			continue
 		}
 		last = now
@@ -142,6 +152,8 @@ func watchConfig(sock string) {
 			_ = engine("", "notify", "--mark", "failed", "rook.toml: "+why)
 			continue
 		}
+		files = c.Files
+		last = stamp()
 		if err := engine(string(c.Compile().JSON()), "reload"); err != nil {
 			log.Printf("config: reload failed: %v", err)
 			continue

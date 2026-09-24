@@ -458,6 +458,11 @@ pub const Server = struct {
     fact_class: [64][]const u8 = undefined,
     fact_class_n: usize = 0,
     fact_states: stylepkg.States = .{},
+    /// The geometry the current layout was made with, and the window
+    /// region before its insets: where the frame is drawn.
+    geom: stylepkg.Geometry = .{},
+    in_relayout: bool = false,
+    frame_rect: layoutpkg.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     /// A second frame builder for what the server paints over the
     /// panes itself: the altitude view, the ownership gate, the
     /// inspector. Its bytes ride the main frame as `Chrome.overlay`.
@@ -1059,8 +1064,22 @@ pub const Server = struct {
         const body = self.bodyRows();
         const win_y: u16 = 1;
         const win_h: u16 = body -| 1;
+        // The stylesheet's geometry (style.Geometry): a frame, a rule
+        // under the tab bar or over the calm bar. It comes only from
+        // rules that cannot flicker, and it is the window region's to
+        // give up — the panes are laid out inside what is left.
+        // the facts first: a switch lands here before any frame has
+        // looked at the workspace it switched to
+        self.in_relayout = true;
+        self.fact_key = std.math.maxInt(u64);
+        _ = self.refreshFacts();
+        self.in_relayout = false;
+        self.geom = self.geometryNow();
+        const in = self.geom.insets();
         if (w.zoomed) {
-            try self.placed.append(self.gpa, .{ .pane = self.focusedId(), .rect = .{ .x = base_x, .y = win_y, .w = g.cols -| base_x, .h = win_h } });
+            const outer: layoutpkg.Rect = .{ .x = base_x, .y = win_y, .w = g.cols -| base_x, .h = win_h };
+            self.frame_rect = outer;
+            try self.placed.append(self.gpa, .{ .pane = self.focusedId(), .rect = inset(outer, in) });
         } else {
             // The rail stacks global pins then this workspace's, down the
             // left edge of what the side panel left (hidden when that is
@@ -1100,8 +1119,9 @@ pub const Server = struct {
                 self.tab_x = if (push) base_x + rail_w + 1 else base_x;
                 win_x = base_x + rail_w + 1;
             }
-            const win_region: layoutpkg.Rect = .{ .x = win_x, .y = win_y, .w = g.cols -| win_x, .h = win_h };
-            try w.layout.place(win_region, &self.placed);
+            const outer: layoutpkg.Rect = .{ .x = win_x, .y = win_y, .w = g.cols -| win_x, .h = win_h };
+            self.frame_rect = outer;
+            try w.layout.place(inset(outer, in), &self.placed);
         }
         for (self.placed.items) |pl| {
             if (self.leasedBy(pl.pane) != null) continue; // a block client owns this geometry; the TUI crops
@@ -3491,6 +3511,7 @@ pub const Server = struct {
         var cur_over: ?renderpkg.CursorOverride = null;
         const placed = self.placed.items;
         const dock_x = self.dock_x;
+        self.paintFrame();
         if (self.gate) self.gateRow();
         if (self.inspect) self.inspectorSheet();
 
@@ -3955,6 +3976,7 @@ pub const Server = struct {
             // the tabs, as components
             var tabs: [chromepkg.max_tab_zones]ui.Tab = undefined;
             var names: [chromepkg.max_tab_zones][48]u8 = undefined;
+            var labels: [chromepkg.max_tab_zones][64]u8 = undefined;
             const n_tabs = @min(sn.windows.items.len, tabs.len);
             for (sn.windows.items[0..n_tabs], 0..) |win, i| {
                 const name = self.tabName(sn, win, &names[i]);
@@ -3973,9 +3995,12 @@ pub const Server = struct {
                     });
                 }
                 if (i == sn.cur) win.seen_ms = now;
+                // the stylesheet's say for this tab ([[style.tab]])
+                const tl = self.tabLook(win, i, name, &labels[i]);
                 tabs[i] = .{
+                    .colour = tl.colour,
                     .index = if (i < 9) @intCast(i + 1) else null,
-                    .label = name[0..@min(name.len, 24)],
+                    .label = if (tl.label) |l| l[0..@min(l.len, 24)] else name[0..@min(name.len, 24)],
                     .actor = self.windowOwner(win),
                     .mark = markOf(mark),
                     .selected = i == sn.cur,
@@ -4907,8 +4932,134 @@ pub const Server = struct {
         if (moved_any) {
             self.full = true;
             self.pending = true;
+            // a fact that moves the geometry — home, the workspace, a
+            // cd into another repository — lays the panes out again
+            if (!self.in_relayout and !self.geometryNow().eql(self.geom)) self.relayout() catch {};
         }
         return moved_any;
+    }
+
+    /// One tab through `[[style.tab]]`: its colour and, when a rule
+    /// words it, its label. Its facts are its own — the focused pane's
+    /// program, its panes' classes, whether it is unread or an agent in
+    /// it is producing — over the workspace's.
+    fn tabLook(self: *Server, win: *Window, i: usize, name: []const u8, buf: []u8) struct { colour: ?ui.TabColour, label: ?[]const u8 } {
+        if (self.sheet.tabs().len == 0) return .{ .colour = null, .label = null };
+        var nb: [64]u8 = undefined;
+        var cls: [32][]const u8 = undefined;
+        const tf = self.tabFacts(win, i, name, &nb, &cls);
+        const ws = self.facts();
+        const r = stylepkg.resolveTab(&self.sheet, ws, tf);
+        const label: ?[]const u8 = if (r.props.label) |tmpl| stylepkg.renderTab(buf, tmpl, ws, tf, r.props.icon orelse "") else null;
+        return .{ .colour = stylepkg.tabColours(r.props, &self.ui), .label = label };
+    }
+
+    /// The cascade for one tab, for the feed and `rook style`.
+    pub fn tabResolved(self: *Server, win: *Window, i: usize, name: []const u8) stylepkg.TabResolved {
+        var nb: [64]u8 = undefined;
+        var cls: [32][]const u8 = undefined;
+        return stylepkg.resolveTab(&self.sheet, self.facts(), self.tabFacts(win, i, name, &nb, &cls));
+    }
+
+    fn tabFacts(self: *Server, win: *Window, i: usize, name: []const u8, nb: *[64]u8, cls: *[32][]const u8) stylepkg.TabFacts {
+        const prog: []const u8 = if (self.pane(win.focused)) |p| (p.fgName(nb) orelse "") else "";
+        var n_cls: usize = 0;
+        var st: stylepkg.States = .{};
+        const now = panepkg.epochMs();
+        for (self.panes.items) |p| {
+            if (!win.layout.contains(p.id)) continue;
+            for (p.classes.slice()) |*c| {
+                if (n_cls < cls.len) {
+                    cls[n_cls] = c.slice();
+                    n_cls += 1;
+                }
+            }
+            if (p.is_agent) {
+                const lo = p.last_output_ms.load(.acquire);
+                if (lo != 0 and now - lo < chromepkg.working_ms) st.insert(.working);
+            }
+        }
+        if (self.windowUnread(win)) st.insert(.unread);
+        return .{ .name = name, .index = @intCast(i + 1), .program = prog, .classes = cls[0..n_cls], .states = st };
+    }
+
+    /// The stylesheet's frame and rules, into the overlay: in the cells
+    /// the layout left for them (`relayout`, `inset`), so they never sit
+    /// on a pane.
+    fn paintFrame(self: *Server) void {
+        const gm = self.geom;
+        if (gm.frame == .none and gm.header.len == 0 and gm.footer.len == 0) return;
+        const r = self.frame_rect;
+        const in = gm.insets();
+        if (r.w -| (in.left + in.right) < 10 or r.h -| (in.top + in.bottom) < 3) return; // `inset` gave up
+        const t = &self.ui;
+        const col = stylepkg.frameColour(self.resolved.props, t);
+        const f = &self.over;
+        var b: [64]u8 = undefined;
+        f.put((ui.Style{ .fg = col }).sgr(&b));
+        const ascii = t.glyphs == .ascii;
+        const right = r.x + r.w - 1;
+        var y0 = r.y;
+        var y1 = r.y + r.h - 1;
+        // the rules: under the tab bar, over the calm bar, the whole width
+        if (gm.header.len > 0) {
+            f.cup(r.x, y0);
+            var x: u16 = 0;
+            while (x < r.w) : (x += 1) f.put(gm.header);
+            y0 += 1;
+        }
+        if (gm.footer.len > 0) {
+            f.cup(r.x, y1);
+            var x: u16 = 0;
+            while (x < r.w) : (x += 1) f.put(gm.footer);
+            y1 -|= 1;
+        }
+        switch (gm.frame) {
+            .none => {},
+            .rail => {
+                var y = y0;
+                while (y <= y1) : (y += 1) {
+                    f.cup(r.x, y);
+                    f.put(if (ascii) "|" else "▌");
+                }
+            },
+            .corners => {
+                f.cup(r.x, y0);
+                f.put(if (ascii) "+" else "╭");
+                f.cup(right, y0);
+                f.put(if (ascii) "+" else "╮");
+                f.cup(r.x, y1);
+                f.put(if (ascii) "+" else "╰");
+                f.cup(right, y1);
+                f.put(if (ascii) "+" else "╯");
+            },
+            .box => {
+                f.cup(r.x, y0);
+                f.put(if (ascii) "+" else "╭");
+                var x: u16 = 1;
+                while (x + 1 < r.w) : (x += 1) f.put(if (ascii) "-" else "─");
+                f.put(if (ascii) "+" else "╮");
+                var y = y0 + 1;
+                while (y < y1) : (y += 1) {
+                    f.cup(r.x, y);
+                    f.put(if (ascii) "|" else "│");
+                    f.cup(right, y);
+                    f.put(if (ascii) "|" else "│");
+                }
+                f.cup(r.x, y1);
+                f.put(if (ascii) "+" else "╰");
+                x = 1;
+                while (x + 1 < r.w) : (x += 1) f.put(if (ascii) "-" else "─");
+                f.put(if (ascii) "+" else "╯");
+            },
+        }
+        f.put("\x1b[0m");
+    }
+
+    /// The geometry the stylesheet says for the workspace on the glass.
+    fn geometryNow(self: *Server) stylepkg.Geometry {
+        if (self.sessions.items.len == 0) return .{};
+        return stylepkg.geometryOf(stylepkg.resolve(&self.sheet, self.facts()).props);
     }
 
     /// The facts as one string, to tell whether they moved.
@@ -5099,6 +5250,14 @@ fn fmtCents(a: std.mem.Allocator, cents: u64) []const u8 {
 
 /// The prefix key as a person types it: the character itself, or
 /// `C-x` for a control key.
+/// A rect with the stylesheet's insets taken off, never below one cell.
+fn inset(r: layoutpkg.Rect, in: anytype) layoutpkg.Rect {
+    const w = r.w -| (in.left + in.right);
+    const h = r.h -| (in.top + in.bottom);
+    if (w < 10 or h < 3) return r; // too small to frame: the work wins
+    return .{ .x = r.x + in.left, .y = r.y + in.top, .w = w, .h = h };
+}
+
 /// The bar's ground between what it says: the style's fill, kept a
 /// cell clear of the words either side so a pattern never touches one.
 fn gap(out: ui.Buf, t: *const ui.Theme, from: u16, to: u16) u16 {

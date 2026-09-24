@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // Style is one set of looks: every field optional, unset meaning "as
@@ -48,6 +49,35 @@ type Style struct {
 	Icon     *string `toml:"icon" json:"icon,omitempty"`
 	Label    *string `toml:"label" json:"label,omitempty"`
 	BarLabel *string `toml:"bar_label" json:"bar_label,omitempty"`
+
+	// ---- geometry: these take cells from the work, so only a rule
+	// that cannot flicker may set them (no program, class or state)
+	// Frame is none, rail, corners or box.
+	Frame *string `toml:"frame" json:"frame,omitempty"`
+	// FrameColor is a colour like the others; the accent when unset.
+	// A colour takes no cells, so any rule may set it.
+	FrameColor *string `toml:"frame_color" json:"frame_color,omitempty"`
+	// HeaderRule and FooterRule are a row drawn in this character under
+	// the tab bar and over the calm bar ("▔", "━", "╌").
+	HeaderRule *string `toml:"header_rule" json:"header_rule,omitempty"`
+	FooterRule *string `toml:"footer_rule" json:"footer_rule,omitempty"`
+}
+
+var frames = []string{"none", "rail", "corners", "box"}
+
+// geometry is the geometry properties a style says, by name.
+func (s Style) geometry() []string {
+	var out []string
+	if s.Frame != nil {
+		out = append(out, "frame")
+	}
+	if s.HeaderRule != nil {
+		out = append(out, "header_rule")
+	}
+	if s.FooterRule != nil {
+		out = append(out, "footer_rule")
+	}
+	return out
 }
 
 // When is what a [[style.match]] asks of the workspace on the glass.
@@ -79,17 +109,96 @@ var States = []string{"unread", "working", "zoomed", "copy", "popup"}
 type Match struct {
 	When
 	Style
+	// Source is where the rule was written: a rice's path and its
+	// place in it, or empty for rook.toml's own.
+	Source string `toml:"-" json:"-"`
+}
+
+// TabStyle is one tab's looks ([[style.tab]]): colour only, so any
+// condition may set it.
+type TabStyle struct {
+	// Color fills the selected tab and, toned down toward the bar,
+	// inks the others.
+	Color *string `toml:"color" json:"color,omitempty"`
+	// ColorInactive is the unselected ink outright.
+	ColorInactive *string `toml:"color_inactive" json:"color_inactive,omitempty"`
+	// Text is the selected tab's text; light or dark by the fill unsaid.
+	Text  *string `toml:"text" json:"text,omitempty"`
+	Icon  *string `toml:"icon" json:"icon,omitempty"`
+	Label *string `toml:"label" json:"label,omitempty"`
+}
+
+// TabMatch is one [[style.tab]]: the workspace's conditions (program,
+// class and state asked of the tab), the tab's own name and index, and
+// its looks.
+type TabMatch struct {
+	When
+	// Name is the tab's name, a glob.
+	Name string `toml:"name" json:"name,omitempty"`
+	// Index is its number on the bar, from 1.
+	Index *int `toml:"index" json:"index,omitempty"`
+	TabStyle
+	Source string `toml:"-" json:"-"`
 }
 
 // EngineStyle is the stylesheet as the engine reads it.
 type EngineStyle struct {
-	Base  Style        `json:"base"`
-	Rules []EngineRule `json:"rules,omitempty"`
+	Base  Style           `json:"base"`
+	Rules []EngineRule    `json:"rules,omitempty"`
+	Tabs  []EngineTabRule `json:"tabs,omitempty"`
+}
+
+type EngineTabRule struct {
+	When   When     `json:"when"`
+	Name   string   `json:"name,omitempty"`
+	Index  *int     `json:"index,omitempty"`
+	Style  TabStyle `json:"style"`
+	Source string   `json:"source,omitempty"`
+}
+
+var tabTokens = []string{"name", "index", "icon", "program", "repo", "branch", "dir"}
+
+func (s TabStyle) check(where string) error {
+	for k, v := range map[string]*string{"color": s.Color, "color_inactive": s.ColorInactive, "text": s.Text} {
+		if err := checkColour(where, k, v); err != nil {
+			return err
+		}
+	}
+	for k, v := range map[string]*string{"icon": s.Icon, "label": s.Label} {
+		if v == nil {
+			continue
+		}
+		for _, m := range templateRe.FindAllStringSubmatch(*v, -1) {
+			if !contains(tabTokens, strings.ToLower(m[1])) {
+				return fmt.Errorf("%s %s = %q: no token {%s} ({%s})", where, k, *v, m[1], strings.Join(tabTokens, "} {"))
+			}
+		}
+	}
+	return nil
+}
+
+func checkTabs(tabs []TabMatch) error {
+	for i, t := range tabs {
+		where := fmt.Sprintf("[[style.tab]] %d:", i+1)
+		if t.State != "" && !contains(States, t.State) {
+			return fmt.Errorf("%s state = %q: one of %s", where, t.State, strings.Join(States, ", "))
+		}
+		if t.Index != nil && *t.Index < 1 {
+			return fmt.Errorf("%s index = %d: tabs count from 1", where, *t.Index)
+		}
+		if err := t.TabStyle.check(where); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type EngineRule struct {
 	When  When  `json:"when"`
 	Style Style `json:"style"`
+	// Source is where it was written, for `rook style`; the engine
+	// does not read it.
+	Source string `json:"source,omitempty"`
 }
 
 var (
@@ -139,7 +248,7 @@ func (s Style) check(where string) error {
 		"text": s.Text, "subtext": s.Subtext, "muted": s.Muted, "border": s.Border,
 		"border_focused": s.BorderFocused, "attention": s.Attention, "working": s.Working,
 		"unread": s.Unread, "success": s.Success, "error": s.Error,
-		"chip_bg": s.ChipBg, "chip_fg": s.ChipFg, "tint": s.Tint,
+		"chip_bg": s.ChipBg, "chip_fg": s.ChipFg, "tint": s.Tint, "frame_color": s.FrameColor,
 	}
 	keys := make([]string, 0, len(colours))
 	for k := range colours {
@@ -154,6 +263,14 @@ func (s Style) check(where string) error {
 	for k, v := range map[string]*string{"chip": s.Chip, "tabs": s.Tabs} {
 		if v != nil && !contains(capShapes, *v) {
 			return fmt.Errorf("%s %s = %q: one of %s", where, k, *v, strings.Join(capShapes, ", "))
+		}
+	}
+	if s.Frame != nil && !contains(frames, *s.Frame) {
+		return fmt.Errorf("%s frame = %q: one of %s", where, *s.Frame, strings.Join(frames, ", "))
+	}
+	for k, v := range map[string]*string{"header_rule": s.HeaderRule, "footer_rule": s.FooterRule} {
+		if v != nil && utf8.RuneCountInString(*v) != 1 {
+			return fmt.Errorf("%s %s = %q: one character, drawn the width of the glass", where, k, *v)
 		}
 	}
 	if s.TintAmount != nil && (*s.TintAmount < 0 || *s.TintAmount > 100) {
@@ -175,6 +292,11 @@ func checkStyle(base Style, rules []Match) error {
 		if r.State != "" && !contains(States, r.State) {
 			return fmt.Errorf("[[style.match]] %d: state = %q: one of %s", i+1, r.State, strings.Join(States, ", "))
 		}
+		if g := r.Style.geometry(); len(g) > 0 && (r.Program != "" || r.Class != "" || r.State != "") {
+			return fmt.Errorf("[[style.match]] %d: %s takes cells, and a rule on program, class or state flickers: "+
+				"it would resize every program in the workspace each time — set it in a rule on home, workspace, dir, repo or branch "+
+				"(frame_color, and every other colour, may follow a class)", i+1, strings.Join(g, ", "))
+		}
 		if err := r.Style.check(fmt.Sprintf("[[style.match]] %d:", i+1)); err != nil {
 			return err
 		}
@@ -190,10 +312,13 @@ func (c Config) compileStyle() EngineStyle {
 	if c.Home.Color != "" {
 		home := true
 		col := c.Home.Color
-		es.Rules = append(es.Rules, EngineRule{When: When{Home: &home}, Style: Style{Accent: &col}})
+		es.Rules = append(es.Rules, EngineRule{When: When{Home: &home}, Style: Style{Accent: &col}, Source: "[home] color"})
 	}
 	for _, m := range c.Style.Match {
-		es.Rules = append(es.Rules, EngineRule{When: m.When, Style: m.Style})
+		es.Rules = append(es.Rules, EngineRule{When: m.When, Style: m.Style, Source: m.Source})
+	}
+	for _, t := range c.Style.Tab {
+		es.Tabs = append(es.Tabs, EngineTabRule{When: t.When, Name: t.Name, Index: t.Index, Style: t.TabStyle, Source: t.Source})
 	}
 	return es
 }

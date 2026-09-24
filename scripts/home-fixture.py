@@ -63,14 +63,14 @@ def real(p):
 class Rook:
     """A sandboxed engine behind a pyte glass."""
 
-    def __init__(self, conf="", tag="home", cols=100, rows=24, attach=None, dirs=(), front=None):
+    def __init__(self, conf="", tag="home", cols=100, rows=24, attach=None, dirs=(), front=None, top=""):
         self.root = tempfile.mkdtemp(prefix="/tmp/rk-%s-" % tag)
         self.cols, self.rows = cols, rows
         os.makedirs(self.root + "/.config/rook")
         for d in dirs:
             os.makedirs(os.path.join(self.root, d), exist_ok=True)
         with open(self.root + "/.config/rook/rook.toml", "w") as f:
-            f.write('[tmux]\nprefix = "`"\n' + conf)
+            f.write(top + '[tmux]\nprefix = "`"\n' + conf)
         self.env = dict(os.environ)
         for k in ("ROOK_MUX_PANE", "TMUX", "TMUX_PANE", "ROOK_MUX_SOCK"):
             self.env.pop(k, None)
@@ -489,6 +489,130 @@ try:
     check("…and stop when it stops", "(zoom)" not in top(r), repr(top(r)[:24]))
     said = r.rook("class", "main", "+no/slash")
     check("a class that is not a word is refused, and says so", "letters, digits" in said, said)
+finally:
+    r.close()
+
+# ---- 14: geometry: frames and rules take cells, only from static rules
+GEOM = """[[style.match]]
+home = true
+frame = "rail"
+[[style.match]]
+workspace = "boxed"
+frame = "box"
+header_rule = "▔"
+[[style.match]]
+class = "error"
+frame_color = "#ff0000"
+"""
+r = Rook(tag="geom", conf=GEOM, cols=100, rows=20)
+try:
+    rect_of = lambda: r.pane(r.current()["windows"][0]["focus"])["rect"]
+    size_of = lambda: (lambda p: (p["cols"], p["rows"]))(r.pane(r.current()["windows"][0]["focus"]))
+    r.snap("14-geom-home-rail")
+    hr = rect_of()
+    check("home's rail takes the first column: the pane starts at 1", hr["x"] == 1 and hr["w"] == 99, hr)
+    check("…and the rail is drawn in it", r.screen.buffer[5][0].data == "▌", repr(r.screen.buffer[5][0].data))
+    r.keys("`o", settle=0.8)
+    mr = rect_of()
+    check("a space no geometry rule matches is the full width", mr["x"] == 0 and mr["w"] == 100, mr)
+    r.rook("new", "-q", "boxed")
+    r.rook("switch", "boxed")
+    r.settle(1.0)
+    r.snap("14-geom-boxed")
+    br = rect_of()
+    check("a box and a header rule: the panes sit inside both", br["x"] == 1 and br["y"] == 3 and br["w"] == 98, br)
+    check("the rule is under the tab bar, the box's corner under it", r.lines()[1].startswith("▔▔▔") and r.screen.buffer[2][0].data == "╭" and r.screen.buffer[2][99].data == "╮", (repr(r.lines()[1][:6]), r.screen.buffer[2][0].data))
+    before = size_of()
+    edge_before = r.screen.buffer[5][0].fg
+    r.rook("class", "boxed", "+error")
+    r.settle(1.0)
+    r.snap("14-geom-boxed-error")
+    check("a class recolours the frame…", r.screen.buffer[5][0].fg == "ff0000" and edge_before != "ff0000", (edge_before, r.screen.buffer[5][0].fg))
+    check("…and resizes nothing", size_of() == before and rect_of() == br, (before, size_of()))
+finally:
+    r.close()
+
+# ---- 15: rices: shared stylesheets, included; your file has the last word
+RICED = """[[style.match]]
+workspace = "main"
+label = "mine"
+"""
+r = Rook(tag="rice", top='include = ["rices/*.toml"]\n', conf=RICED, cols=100, rows=16, dirs=(".config/rook/rices",))
+rookd = None
+try:
+    rice = r.root + "/.config/rook/rices/a.toml"
+    with open(rice, "w") as f:
+        f.write('[[style.match]]\nhome = true\nlabel = "{icon} RICED"\n[[style.match]]\nworkspace = "main"\nlabel = "theirs"\n')
+    code, out = r.front("reload")
+    r.settle(0.6)
+    check("an included rice styles home", top(r).strip().startswith("⌂ RICED"), repr(top(r)[:16]))
+    r.keys("`o", settle=0.6)
+    check("…and where the file says otherwise, the file wins", top(r).strip().startswith("mine"), repr(top(r)[:10]))
+    code, out = r.front("style")
+    check("rook style names the rice a rule came from", "(" in out and "rices/a.toml #2" in out, out)
+    # rookd watches the rices too: save one, and it applies
+    ROOKD = os.path.join(os.path.dirname(FRONT), "rookd")
+    subprocess.run(["go", "build", "-o", ROOKD, "./cmd/rookd"], cwd=REPO, check=True)
+    rookd = subprocess.Popen([ROOKD, "-addr", "127.0.0.1:0", "-sock", r.sock], env=r.env, cwd=r.root,
+                             stdout=subprocess.DEVNULL, stderr=open(r.root + "/rookd.log", "w"))
+    time.sleep(1.5)
+    r.keys("`o", settle=0.6)  # home again
+    with open(rice, "w") as f:
+        f.write('[[style.match]]\nhome = true\nlabel = "{icon} RESAVED"\n')
+    r.settle(2.5)
+    r.snap("15-rice-resaved")
+    check("rookd sees a rice saved and reloads it", top(r).strip().startswith("⌂ RESAVED"), (repr(top(r)[:16]), open(r.root + "/rookd.log").read()[-300:]))
+    with open(rice, "w") as f:
+        f.write('[keys]\ng = "popup curl evil"\n')
+    r.settle(2.5)
+    check("a rice that tries to bind a key is refused, on the calm bar", "rice" in r.lines()[-1] or "[style]" in r.lines()[-1], repr(r.lines()[-1][:70]))
+    check("…and the look that was running stays", top(r).strip().startswith("⌂ RESAVED"), repr(top(r)[:16]))
+finally:
+    if rookd:
+        rookd.terminate()
+    r.close()
+
+# ---- 16: tabs, styled one by one
+TABS = """[[style.tab]]
+home = true
+name = "docker"
+color = "#89b4fa"
+[[style.tab]]
+home = true
+name = "mongo"
+color = "#a6e3a1"
+[[style.tab]]
+class = "error"
+color = "#f38ba8"
+"""
+r = Rook(tag="tabs", conf=TABS, cols=100, rows=12)
+try:
+    def cell(word):
+        t = top(r)
+        x = t.index(word)
+        return r.screen.buffer[0][x]
+    r.rook("rename", "docker")
+    r.keys("`c", settle=0.6)
+    r.rook("rename", "mongo")
+    r.settle(0.6)
+    r.snap("16-tabs-mongo")
+    m, d = cell("mongo"), cell("docker")
+    check("the selected tab is filled in its colour, the text dark on it", m.bg == "a6e3a1" and m.fg == "11111b", (m.bg, m.fg))
+    check("the other wears its colour toned down, on the bar", d.fg != "89b4fa" and d.bg != "89b4fa" and d.fg not in ("a9b2c0", "a6adc8"), (d.fg, d.bg))
+    r.keys("`1", settle=0.6)
+    d2, m2 = cell("docker"), cell("mongo")
+    check("selecting the other moves the fill with it", d2.bg == "89b4fa" and m2.bg != "a6e3a1", (d2.bg, m2.bg))
+    pid = r.home_ws()["windows"][0]["focus"]
+    r.rook("class", str(pid), "+error")
+    r.settle(0.8)
+    check("a class on a pane in the tab colours that tab, later rule winning", cell("docker").bg == "f38ba8" and cell("mongo").bg != "f38ba8", (cell("docker").bg, cell("mongo").bg))
+    code, out = r.front("style")
+    check("rook style lists each tab and the rules that held for it", "tabs" in out and "docker" in out and "tab:0" in out and "tab:2" in out, out[-400:])
+    r.rook("class", str(pid), "-error")
+    r.keys("`o", settle=0.6)  # main
+    r.rook("rename", "docker")
+    r.settle(0.6)
+    check("a home-only tab rule leaves the same name in a space alone", cell("docker").bg != "89b4fa", cell("docker").bg)
 finally:
     r.close()
 

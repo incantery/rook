@@ -1,0 +1,9 @@
+# 8 · Segmented bar — slanted segments for the chip and the selected
+# tab everywhere, home's in its own blue.
+[style]
+chip = "slant"
+tabs = "slant"
+
+[[style.match]]
+home = true
+accent = "#89b4fa"

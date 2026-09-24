@@ -108,6 +108,45 @@ directory's last part), `{icon}`, and the same in capitals — `{NAME}`
 | `label` | the scope chip; `{name}` when unsaid |
 | `bar_label` | the first thing on the calm bar, in the accent; nothing when unsaid |
 
+## Tabs, one by one
+
+`[[style.tab]]` rules style individual tabs. Each asks about the tab —
+its `name` (a glob), its `index` (from 1), and `program`, `class` and
+`state` as the tab's own: the focused pane's program, the classes on its
+panes, whether it is unread or an agent in it is producing — and about
+the workspace (`home`, `workspace`, `dir`, `repo`, `branch`) the same way
+`[[style.match]]` does. Rules apply in order, a later one winning
+property by property, like everywhere here.
+
+```toml
+[[style.tab]]
+home = true
+name = "docker*"
+color = "#89b4fa"
+
+[[style.tab]]
+program = "mongo*"
+color = "green"
+icon = ""
+label = "{icon} {name}"          # {name} {index} {icon} {program}, and the workspace's
+
+[[style.tab]]
+class = "error"                  # a failing build in any tab turns it red
+color = "#f38ba8"
+```
+
+| property | what it does |
+|---|---|
+| `color` | fills the tab when it is the selected one; toned down toward the bar, it inks the tab when it is not |
+| `color_inactive` | the unselected ink outright |
+| `text` | the selected tab's text; light or dark by the fill when unsaid |
+| `icon`, `label` | the `{icon}` token and the tab's words |
+
+A tab with a colour of its own drops the accent edge — its fill is the
+edge — and keeps `tabs`' caps in its colour. Tab rules are colour and
+words only, so any condition may set them; rices carry them too, and
+`rook style` lists each tab with the rules that held for it.
+
 ## Classes: facts from outside
 
 Rook has no idea what an error is, or a loop that will not stop, and
@@ -166,11 +205,71 @@ opinion about them.
 | `copy` | copy mode is up |
 | `popup` | a popup is over it |
 
-## What a rule cannot do, and why
+## Rices: stylesheets to share
 
-A rule changes colour, glyphs and words — never geometry. The frame
-around the work, a rail down its side, a taller bar: those take cells,
-and a look that changed with a fact would resize every program running
-in the workspace as the fact changed, the one thing rook must never
-cause. They arrive as their own properties, resolved from static
-facts only (docs, next).
+A stylesheet can live in a file of its own and be included:
+
+```toml
+include = ["~/.config/rook/rices/*.toml", "grafana.toml"]   # at the top
+```
+
+Paths are relative to the file that includes them; `~` and globs work
+(a glob matching nothing is fine, a plain path that is not there is
+not). A rice holds `[style]`, `[[style.match]]` and an `include` of its
+own — anything else refuses to load, so a rice cannot bind a key, float
+a program or seed home, and one from anywhere is safe to try. Includes
+nest, eight deep, and a cycle is refused.
+
+The order is the whole story, as everywhere here: every rice's
+`[style]` and rules come first, depth first in the order included,
+then `rook.toml`'s own — your file has the last word. rookd watches
+the rices as it watches `rook.toml`: save one and it applies, or the
+calm bar says why not. `rook style` names the file each rule came from
+(`config:3  … (~/.config/rook/rices/grafana.toml #2)`).
+
+The repository's `rices/` holds your nine sketches from the design
+round and two more — per-repo colours, and looks for an error/loop
+detector's classes — each loaded by the test suite.
+
+## Geometry: what takes cells
+
+Four properties shape the chrome rather than colour it. They take
+cells from the work — the panes are laid out inside what they leave —
+so they are held to one rule of their own.
+
+| property | values | takes |
+|---|---|---|
+| `frame` | `none`, `rail` (a column down the left), `corners` (the four corners marked), `box` (a line all round) | rail 1 column; corners 2 columns; box 2 columns and 2 rows |
+| `frame_color` | a colour, like the others; the accent when unsaid | nothing |
+| `header_rule` | one character, drawn the width of the work under the tab bar: `▔` a double bar, `▀` in `frame_color = "bar"` a taller header | a row |
+| `footer_rule` | the same over the calm bar: `▁`, `━`, `╌` | a row |
+
+```toml
+[[style.match]]
+home = true
+frame = "rail"                  # sketch 4
+
+[[style.match]]
+repo = "github.com/grafana/*"
+frame = "corners"               # sketch 5
+header_rule = "▔"               # sketch 3
+
+[[style.match]]
+class = "error"
+frame_color = "red"             # a colour may follow a class
+```
+
+**Only a rule that cannot flicker may set `frame`, `header_rule` or
+`footer_rule`**: one on `home`, `workspace`, `dir`, `repo` or `branch`.
+A rule that asks about `program`, `class` or `state` may not — a frame
+that came and went with a flickering fact would resize every program in
+the workspace each time it did, the one motion rook must never cause.
+`rook config check` refuses such a rule and says why, and the engine
+ignores the property if one arrives anyway. `frame_color` takes no
+cells, so anything may colour the frame: an error class can turn a
+repository's box red without moving a pane.
+
+The static facts can still change at a person's pace — a `cd` into
+another repository, a branch checked out — and then the workspace is
+laid out again, once, at that moment. Too small a glass (under 10
+columns or 3 rows of work) keeps its cells and draws no frame.

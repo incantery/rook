@@ -1,0 +1,6 @@
+# 7 · Filled header — home's tab bar reads a row and a half tall: a
+# half block in the bar's own colour under it.
+[[style.match]]
+home = true
+header_rule = "▀"
+frame_color = "bar"

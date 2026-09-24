@@ -32,14 +32,23 @@ type Config struct {
 	// Load only refuses what the engine would skip (keys.go).
 	Keys map[string]string `toml:"keys"`
 	Home Home              `toml:"home"`
-	// Style is [style] and its [[style.match]] rules (style.go).
+	// Style is [style] and its [[style.match]] rules (style.go), with
+	// every included rice's ahead of them once Load has read them.
 	Style StyleTable `toml:"style"`
+	// Include names rice files: stylesheets to share (rice.go).
+	Include []string `toml:"include"`
+
+	// Files is every file Load read — this one, then the rices — for
+	// a watcher to look at.
+	Files []string `toml:"-"`
 }
 
 // StyleTable is [style]: the looks everywhere, and the rules over them.
 type StyleTable struct {
 	Style
 	Match []Match `toml:"match"`
+	// Tab is [[style.tab]]: rules for individual tabs.
+	Tab []TabMatch `toml:"tab"`
 }
 
 // Namer is the [namer] table: what gives tabs their names once the
@@ -205,6 +214,13 @@ func Load(path string) (Config, error) {
 		for i, k := range undecoded {
 			keys[i] = k.String()
 		}
+		for _, k := range keys {
+			// TOML puts a key under the last [table] above it: an
+			// include after [tmux] is tmux.include
+			if strings.HasSuffix(k, ".include") {
+				return Config{}, fmt.Errorf("%s: %s: include belongs at the top of the file, above every [table]", path, k)
+			}
+		}
 		return Config{}, fmt.Errorf("%s: unrecognized keys: %s (typo, or a newer rook?)",
 			path, strings.Join(keys, ", "))
 	}
@@ -217,6 +233,21 @@ func Load(path string) (Config, error) {
 	}
 	if err := checkStyle(c.Style.Style, c.Style.Match); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
+	}
+	if err := checkTabs(c.Style.Tab); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", path, err)
+	}
+	// the rices, ahead of this file's own looks: its word is last
+	c.Files = []string{path}
+	if len(c.Include) > 0 {
+		abs, _ := filepath.Abs(path)
+		rb, rr, rt, err := includes(abs, c.Include, 1, map[string]bool{abs: true}, &c.Files)
+		if err != nil {
+			return Config{}, err
+		}
+		c.Style.Style = mergeStyle(rb, c.Style.Style)
+		c.Style.Match = append(rr, c.Style.Match...)
+		c.Style.Tab = append(rt, c.Style.Tab...)
 	}
 	if err := checkHome(c.Home); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)

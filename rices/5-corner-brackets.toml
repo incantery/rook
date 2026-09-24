@@ -1,0 +1,4 @@
+# 5 · Corner brackets — home's work, marked at its four corners.
+[[style.match]]
+home = true
+frame = "corners"
