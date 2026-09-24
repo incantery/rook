@@ -14,6 +14,7 @@ const companionpkg = @import("companion.zig");
 const statefeed = @import("statefeed.zig");
 const proto = @import("proto.zig");
 const config = @import("config.zig");
+const keyspkg = @import("keys.zig");
 const altpkg = @import("altitude.zig");
 const askpkg = @import("ask.zig");
 const homepkg = @import("home.zig");
@@ -276,6 +277,9 @@ pub const Server = struct {
     listener: ptypkg.fd_t,
     sock_path: []const u8,
     prefix_key: u8,
+    /// What each key after the prefix does (keys.zig): rook's
+    /// defaults under the config's [keys].
+    keys: keyspkg.Keys = .{},
     conf: config.Mux = .{},
     /// The design system's roles, built once from the config's accent
     /// (docs/ui-design-system.md). Every chrome painter reads it.
@@ -532,6 +536,7 @@ pub const Server = struct {
             .listener = listener,
             .sock_path = sock_path,
             .prefix_key = config.prefixKey(),
+            .keys = config.keysConfig(),
             .conf = config.muxConfig(),
             .wake_r = pipefds[0],
             .wake_w = pipefds[1],
@@ -3152,122 +3157,119 @@ pub const Server = struct {
     }
 
     fn command(self: *Server, c: *Client, key: u8) void {
-        if (self.popup != null) {
-            switch (key) {
-                'x' => if (self.popupPane()) |p| p.hangup(),
-                'd' => {
-                    self.sendTo(c, @intFromEnum(proto.s2c.exit), "");
-                    c.attached = false;
-                },
-                else => {
-                    if (key == self.prefix_key) self.toFocused(&[_]u8{key});
-                },
-            }
-            self.pending = true;
-            return;
-        }
-        // At the root the space is not on the glass, so the keys that
-        // act on it are not taken: only the root's own, and detach.
-        if (self.at_root and !rootKey(key)) {
+        // the bar drops its pending-key hint whatever the key did
+        defer {
             self.full = true;
             self.pending = true;
+        }
+        const b = self.keys.get(key);
+        // the prefix key itself, when nothing claims it: a double-tap
+        // types it literally
+        if (b.verb == .none) {
+            if (key == self.prefix_key) self.toFocused(&[_]u8{key});
             return;
         }
-        switch (key) {
-            'v', '|' => self.splitPane(true) catch {},
-            '-' => self.splitPane(false) catch {},
-            'h', 'j', 'k', 'l' => _ = self.navigate(key),
-            'c' => self.newWindow(null, null) catch {},
-            'n' => self.selectWindow((self.sess().cur + 1) % self.sess().windows.items.len),
-            'p' => self.selectWindow((self.sess().cur + self.sess().windows.items.len - 1) % self.sess().windows.items.len),
-            '1'...'9' => {
-                const i: usize = key - '1';
-                if (i < self.sess().windows.items.len) self.selectWindow(i);
+        // A popup holds the glass: only closing it and detaching
+        // reach past it.
+        if (self.popup != null) {
+            switch (b.verb) {
+                .kill_pane => if (self.popupPane()) |p| p.hangup(),
+                .detach => self.detach(c),
+                else => {},
+            }
+            return;
+        }
+        // At the root the space is not on the glass, so the verbs that
+        // act on it are not taken: only the root's own, and detach.
+        if (self.at_root and !b.verb.atRoot()) return;
+        self.runVerb(c, b.verb, self.keys.arg(b));
+    }
+
+    fn detach(self: *Server, c: *Client) void {
+        self.sendTo(c, @intFromEnum(proto.s2c.exit), "");
+        c.attached = false;
+    }
+
+    /// One verb of the prefix table (keys.zig). What a popup runs is
+    /// the config's; rook only floats it.
+    fn runVerb(self: *Server, c: *Client, verb: keyspkg.Verb, arg: []const u8) void {
+        switch (verb) {
+            .none => {},
+            .split_right => self.splitPane(true) catch {},
+            .split_down => self.splitPane(false) catch {},
+            .focus_left => _ = self.navigate('h'),
+            .focus_down => _ = self.navigate('j'),
+            .focus_up => _ = self.navigate('k'),
+            .focus_right => _ = self.navigate('l'),
+            .resize_left => self.adjustSplit(.horizontal, -0.05),
+            .resize_right => self.adjustSplit(.horizontal, 0.05),
+            .resize_up => self.adjustSplit(.vertical, -0.05),
+            .resize_down => self.adjustSplit(.vertical, 0.05),
+            .new_window => self.newWindow(null, null) catch {},
+            .next_window => self.selectWindow((self.sess().cur + 1) % self.sess().windows.items.len),
+            .previous_window => self.selectWindow((self.sess().cur + self.sess().windows.items.len - 1) % self.sess().windows.items.len),
+            .select_window => {
+                const n = std.fmt.parseInt(usize, arg, 10) catch return;
+                if (n >= 1 and n - 1 < self.sess().windows.items.len) self.selectWindow(n - 1);
             },
-            // The picker — fzf over `rook ls`, enter switches, ctrl-o
-            // creates the name typed — lives in the Go front door,
-            // where the quoting has a home and the parsing has tests.
-            // Here it is one verb, like the worktree manager. It
-            // floats from home too: picking a space enters it, and
-            // orbit, which held this key for a while, is `:orbit`.
-            's' => self.openPopup(self.popupSized("rook pick")) catch {},
-            'w' => self.openPopup(self.popupSized("rook worktree")) catch {},
-            // Grim: the resident agent, floated over whatever this is.
-            // The popup is only a view of it — grim is a service with a
-            // life of its own (github.com/incantery/grimoire), so
-            // closing this ends nothing. Like the two above it is one
-            // verb here; what grim is, is grim's. It floats from home
-            // too: what you want to ask is not always about a pane.
-            'g' => self.openPopup(self.popupSized("\x1f72x86@124x48\x1fgrim")) catch {},
+            .last_pane => if (self.sess().last_focus) |last| {
+                if (self.pane(last) != null) self.setFocus(last);
+            },
+            .zoom => {
+                self.window().zoomed = !self.window().zoomed;
+                self.relayout() catch {};
+            },
+            .copy_mode => self.scrollStart(),
+            .kill_pane => if (self.focusedPane()) |p| p.hangup(),
+            .detach => self.detach(c),
+            .next_unread => _ = self.jumpUnread(),
+            .inspect => if (!self.at_root) {
+                self.inspect = !self.inspect;
+            },
+            // Out, to rook: home. The panes never pause. From the root
+            // it is idempotent — home again, whatever subview was up.
+            .home => self.goHome(),
             // The root, with the cursor on a section: running work,
-            // or what needs you (`!` is the attention mark).
-            'a' => self.goHomeAt(.running),
-            '!' => self.goHomeAt(.needs),
-            // Vera: her pane, from anywhere; pinned, she stays.
-            't' => self.toggleVera(),
-            'T' => {
+            // or what needs you.
+            .home_running => self.goHomeAt(.running),
+            .home_needs => self.goHomeAt(.needs),
+            // The root in a mode: find, command.
+            .home_find => self.goHomeTyping("/"),
+            .home_command => self.goHomeTyping(":"),
+            // Return jump: back to the space before the last hop.
+            .last_space => if (self.last_sess) |ls| {
+                if (ls < self.sessions.items.len) self.switchSession(ls);
+            },
+            // The companion's panel, from anywhere; pinned, it stays.
+            .companion => self.toggleVera(),
+            .companion_pin => {
                 self.alt.home.vera_pinned = !self.alt.home.vera_pinned;
                 if (self.alt.home.vera_pinned) self.alt.home.vera_open = true;
                 if (!self.at_root) self.vera_keys = self.alt.home.veraShown() and self.alt.home.focus == .vera;
             },
-            // The root in a mode: find, command.
-            '/' => self.goHomeTyping("/"),
-            ':' => self.goHomeTyping(":"),
-            // The legacy side panel, away and back, for a config that
-            // asked for it.
-            'A' => {
+            // The legacy side panel, away and back.
+            .sidebar => {
                 self.side_mode = if (self.side_mode == .hidden) .open else .hidden;
                 self.relayout() catch {};
             },
-            'P' => self.togglePin(),
-            'G' => self.toggleGlobalPin(),
-            ';' => {
-                if (self.sess().last_focus) |last| {
-                    if (self.pane(last) != null) self.setFocus(last);
-                }
-            },
-            'H' => self.adjustSplit(.horizontal, -0.05),
-            'L' => self.adjustSplit(.horizontal, 0.05),
-            'K' => self.adjustSplit(.vertical, -0.05),
-            'J' => self.adjustSplit(.vertical, 0.05),
-            'z' => {
-                self.window().zoomed = !self.window().zoomed;
-                self.relayout() catch {};
-            },
-            '[' => self.scrollStart(),
-            'u' => _ = self.jumpUnread(),
-            // Out, to rook: home. The panes never pause. From the root
-            // it is idempotent — home again, whatever subview was up.
-            'o' => self.goHome(),
-            // Return jump: back to the space before the last hop.
-            0x0f => if (self.last_sess) |ls| {
-                if (ls < self.sessions.items.len) self.switchSession(ls);
-            },
-            'i' => if (!self.at_root) {
-                self.inspect = !self.inspect;
-                self.full = true;
-            },
-            'x' => if (self.focusedPane()) |p| p.hangup(),
-            'd' => {
-                self.sendTo(c, @intFromEnum(proto.s2c.exit), "");
-                c.attached = false;
-            },
-            else => {
-                // the prefix key itself: double-tap types it literally
-                if (key == self.prefix_key) self.toFocused(&[_]u8{key});
-            },
+            .pin => self.togglePin(),
+            .pin_global => self.toggleGlobalPin(),
+            // Whatever the config floats: a picker, an agent, a
+            // manager. The popup is only a view — closing it ends
+            // what it ran, and a program with a life of its own (a
+            // service it attaches to) keeps that life.
+            .popup => self.openPopup(self.popupSized(arg)) catch {},
         }
-        // the bar drops its pending-key hint whatever the key did
-        self.full = true;
-        self.pending = true;
     }
 
-    /// The prefix keys that mean something at the root.
-    fn rootKey(key: u8) bool {
-        return switch (key) {
-            'o', 's', 'g', 'a', '!', 't', 'T', '/', ':', 0x0f, 'd', 'A', 'u' => true,
-            else => false,
-        };
+    /// The prefix chord bound to a verb, as help text writes it —
+    /// "`o", "C-b t" — or null when nothing is bound, and the hint
+    /// is then left out.
+    fn chord(self: *Server, verb: keyspkg.Verb, buf: []u8) ?[]const u8 {
+        const k = self.keys.keyFor(verb) orelse return null;
+        var pk: [8]u8 = undefined;
+        var kb: [8]u8 = undefined;
+        return std.fmt.bufPrint(buf, "{s}{s}", .{ prefixName(self.prefix_key, &pk), keyspkg.keyName(k, &kb) }) catch null;
     }
 
     // ---- scroll mode ----
@@ -4182,9 +4184,9 @@ pub const Server = struct {
         // the corner is measured first: the bar lays out into what
         // is left of it. At home there is no corner: nothing is
         // above it. In a subview, esc is the way home; in a space,
-        // prefix-o is the way out to rook.
+        // The way out to rook, by whatever key the table gives it.
         var corner_buf: [48]u8 = undefined;
-        var pk: [8]u8 = undefined;
+        var hk: [24]u8 = undefined;
         const corner: []const u8 = if (self.at_root)
             (if (self.alt.view == .home) "" else "esc rook")
         else if (self.scrolling)
@@ -4192,7 +4194,7 @@ pub const Server = struct {
         else if (self.window().zoomed)
             "zoom"
         else
-            (std.fmt.bufPrint(&corner_buf, "{s}o rook", .{prefixName(self.prefix_key, &pk)}) catch "rook");
+            (if (self.chord(.home, &hk)) |ch| (std.fmt.bufPrint(&corner_buf, "{s} rook", .{ch}) catch "rook") else "rook");
         const corner_cols = chromepkg.cols(corner) + 1;
 
         if (self.at_root) {
@@ -4602,7 +4604,7 @@ pub const Server = struct {
                 vis += ui.module(out, t, switch (st.home.focus) {
                     .nav => "navigator",
                     .insp => "inspector",
-                    .vera => "vera",
+                    .vera => self.askName(),
                 }, t.muted, false);
             }
             return vis;
@@ -4743,7 +4745,10 @@ pub const Server = struct {
             vis += ui.module(out, t, std.fmt.bufPrint(&b, " · {s} tokens", .{fmtTokens(a, u.tokens)}) catch "", t.muted, false);
             return vis;
         }
-        if (std.mem.eql(u8, name, "vera")) {
+        // The companion's module ("vera", its first name, still reads
+        // as it): nothing when the config names no companion.
+        if (std.mem.eql(u8, name, "companion") or std.mem.eql(u8, name, "vera")) {
+            if (self.conf.companionSlice().len == 0) return vis;
             const st = &self.alt;
             const name_c = self.askName();
             // Hosting her own terminal, rook does not have an opinion
@@ -5097,7 +5102,7 @@ pub const Server = struct {
     /// The companion's name, for the field and the bar.
     fn askName(self: *Server) []const u8 {
         const c = self.conf.companionSlice();
-        return if (c.len > 0) c else "vera";
+        return if (c.len > 0) c else "companion";
     }
 
     /// Keys at the root. The navigator and the inspector take j/k
@@ -6108,17 +6113,30 @@ pub const Server = struct {
     /// Nothing selected: what there is, and what there is to do.
     fn inspQuiet(self: *Server, a: std.mem.Allocator) void {
         const ins = &self.alt.home.insp;
-        var pk: [8]u8 = undefined;
-        const pfx = prefixName(self.prefix_key, &pk);
         ins.line(.{ .kind = .title, .text = "rook", .mark = .none });
         ins.line(.{ .kind = .meta, .text = std.fmt.allocPrint(a, "{d} space{s} · nothing running · nothing needs you", .{ self.sessions.items.len, plural(self.sessions.items.len) }) catch "" });
         ins.line(.{ .kind = .blank });
         ins.line(.{ .kind = .quiet, .text = "a task a producer pushes shows here by its goal; an agent rook sees producing shows by its pane" });
         ins.line(.{ .kind = .blank });
         ins.line(.{ .kind = .section, .text = "to do something" });
-        ins.line(.{ .kind = .kv, .extra = std.fmt.allocPrint(a, "{s}t", .{pfx}) catch "t", .text = "ask vera" });
+        self.inspAskHint(a);
         ins.line(.{ .kind = .kv, .extra = ":new", .text = "a new space, by name" });
         ins.line(.{ .kind = .kv, .extra = "/", .text = "find a space, a task, a tab, a pane" });
+    }
+
+    /// "`t  ask vera": the companion's chord, when one is bound and
+    /// there is a companion to ask.
+    fn inspAskHint(self: *Server, a: std.mem.Allocator) void {
+        if (self.conf.companionSlice().len == 0) return;
+        var cb: [24]u8 = undefined;
+        const ch = self.chord(.companion, &cb) orelse return;
+        self.alt.home.insp.line(.{ .kind = .kv, .extra = a.dupe(u8, ch) catch return, .text = std.fmt.allocPrint(a, "ask {s}", .{self.askName()}) catch "ask" });
+    }
+
+    /// "ask vera about this", in the companion's name; none without one.
+    fn askAct(self: *Server, a: std.mem.Allocator) void {
+        if (self.conf.companionSlice().len == 0) return;
+        self.alt.home.insp.act(.{ .label = std.fmt.allocPrint(a, "ask {s} about this", .{self.askName()}) catch "ask about this", .kind = .ask });
     }
 
     fn inspTask(self: *Server, a: std.mem.Allocator, tk: homepkg.Task, now: i64) void {
@@ -6162,7 +6180,7 @@ pub const Server = struct {
                 ins.line(.{ .kind = .blank });
                 ins.line(.{ .kind = .section, .text = "controls" });
                 ins.act(.{ .label = "run it", .kind = .approval, .action = tk.action, .run = tk.event });
-                ins.act(.{ .label = "ask vera about this", .kind = .ask });
+                self.askAct(a);
                 return;
             },
             .signal => {
@@ -6173,7 +6191,7 @@ pub const Server = struct {
                 ins.line(.{ .kind = .blank });
                 ins.line(.{ .kind = .section, .text = "controls" });
                 ins.act(.{ .label = "go see it", .kind = .go_see });
-                ins.act(.{ .label = "ask vera about this", .kind = .ask });
+                self.askAct(a);
                 return;
             },
             .found => {
@@ -6182,7 +6200,7 @@ pub const Server = struct {
                 ins.line(.{ .kind = .blank });
                 ins.line(.{ .kind = .section, .text = "controls" });
                 ins.act(.{ .label = "open its pane", .kind = .open });
-                ins.act(.{ .label = "ask vera about this", .kind = .ask });
+                self.askAct(a);
                 return;
             },
             .producer => {},
@@ -6278,7 +6296,7 @@ pub const Server = struct {
         for (it.options) |o| ins.act(.{ .label = o.label, .kind = .answer, .run = o.run, .ctrl = o.kind });
         for (it.controls) |c| ins.act(.{ .label = c.label, .kind = .control, .run = c.run, .ctrl = c.kind });
         if (tk.ws != null) ins.act(.{ .label = if (tk.pane != 0) "open its pane" else "open the space", .kind = .open });
-        ins.act(.{ .label = "ask vera about this", .kind = .ask });
+        self.askAct(a);
         if (it.options.len == 0 and it.controls.len == 0 and tk.state != .done) {
             ins.line(.{ .kind = .quiet, .text = "the producer offered no controls for this task; what it supports, it says on the rail" });
         }
@@ -6367,13 +6385,11 @@ pub const Server = struct {
         ins.line(.{ .kind = .blank });
         ins.line(.{ .kind = .section, .text = "controls" });
         ins.act(.{ .label = "enter the space", .kind = .enter });
-        ins.act(.{ .label = "ask vera about this", .kind = .ask });
+        self.askAct(a);
         if (h.tasks_n == 0) {
-            var pk: [8]u8 = undefined;
-            const pfx = prefixName(self.prefix_key, &pk);
             ins.line(.{ .kind = .blank });
             ins.line(.{ .kind = .section, .text = "to do something" });
-            ins.line(.{ .kind = .kv, .extra = std.fmt.allocPrint(a, "{s}t", .{pfx}) catch "t", .text = "ask vera" });
+            self.inspAskHint(a);
             ins.line(.{ .kind = .kv, .extra = ":new", .text = "a new space, by name" });
             ins.line(.{ .kind = .kv, .extra = "/", .text = "find a space, a task, a tab, a pane" });
         }

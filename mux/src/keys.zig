@@ -1,0 +1,329 @@
+//! The prefix table: which key after the prefix does what. Rook ships
+//! the verbs and a multiplexer's bindings for them — splits, focus,
+//! windows, copy mode, rook's own home — and nothing that names a
+//! program. What floats in a popup, which agent, which picker: the
+//! config says, in a [keys] table in the same rook.toml:
+//!
+//!   [keys]
+//!   g = "popup 72x86@124x48 grim"    # a program in a popup, sized
+//!   s = "popup rook pick"
+//!   t = "companion"
+//!   "C-o" = "last-space"
+//!   x = ""                           # unbound
+//!
+//! A key is one printable character or `C-<letter>`; a verb is one of
+//! `verbs` below, with an argument where it takes one. A line the
+//! table cannot read is skipped, not fatal: the Go half is the one that
+//! refuses a bad file, and it only checks that [keys] is a table of
+//! strings.
+const std = @import("std");
+
+pub const Verb = enum {
+    none,
+    split_right,
+    split_down,
+    focus_left,
+    focus_down,
+    focus_up,
+    focus_right,
+    resize_left,
+    resize_down,
+    resize_up,
+    resize_right,
+    new_window,
+    next_window,
+    previous_window,
+    /// arg: the window's number, from 1
+    select_window,
+    last_pane,
+    zoom,
+    copy_mode,
+    kill_pane,
+    detach,
+    next_unread,
+    inspect,
+    home,
+    home_running,
+    home_needs,
+    home_find,
+    home_command,
+    last_space,
+    companion,
+    companion_pin,
+    sidebar,
+    pin,
+    pin_global,
+    /// arg: the popup payload — `\x1fWxH[@MWxMH]\x1f` then the command,
+    /// or the command alone (the form `rook popup` sends)
+    popup,
+
+    /// The config's spelling: `split-right`, not `split_right`.
+    pub fn parse(word: []const u8) ?Verb {
+        var buf: [32]u8 = undefined;
+        if (word.len > buf.len) return null;
+        for (word, 0..) |ch, i| buf[i] = if (ch == '-') '_' else ch;
+        const v = std.meta.stringToEnum(Verb, buf[0..word.len]) orelse return null;
+        return if (v == .none) null else v;
+    }
+
+    /// Whether the verb means something at the root, where no space is
+    /// on the glass: the ways around rook, the popups, and detach.
+    pub fn atRoot(self: Verb) bool {
+        return switch (self) {
+            .home, .home_running, .home_needs, .home_find, .home_command, .last_space, .companion, .companion_pin, .sidebar, .next_unread, .popup, .detach => true,
+            else => false,
+        };
+    }
+};
+
+pub const Binding = struct {
+    verb: Verb = .none,
+    arg_off: u16 = 0,
+    arg_len: u16 = 0,
+};
+
+pub const Keys = struct {
+    slots: [128]Binding = @splat(.{}),
+    arena: [4096]u8 = undefined,
+    arena_len: usize = 0,
+
+    pub fn get(self: *const Keys, key: u8) Binding {
+        return if (key < self.slots.len) self.slots[key] else .{};
+    }
+
+    pub fn arg(self: *const Keys, b: Binding) []const u8 {
+        return self.arena[b.arg_off..][0..b.arg_len];
+    }
+
+    /// The first key bound to a verb, for help text that names it.
+    /// Null when nothing is: the hint is then not shown at all.
+    pub fn keyFor(self: *const Keys, verb: Verb) ?u8 {
+        for (self.slots, 0..) |b, k| {
+            if (b.verb == verb) return @intCast(k);
+        }
+        return null;
+    }
+
+    fn bind(self: *Keys, key: u8, verb: Verb, a: []const u8) void {
+        if (key >= self.slots.len) return;
+        if (self.arena_len + a.len > self.arena.len) return;
+        @memcpy(self.arena[self.arena_len..][0..a.len], a);
+        self.slots[key] = .{ .verb = verb, .arg_off = @intCast(self.arena_len), .arg_len = @intCast(a.len) };
+        self.arena_len += a.len;
+    }
+
+    /// `verb [arg…]` → the slot. An empty string unbinds; a verb the
+    /// table does not know leaves the key as it was.
+    pub fn set(self: *Keys, key: u8, spec: []const u8) void {
+        const s = std.mem.trim(u8, spec, " \t");
+        if (s.len == 0) {
+            if (key < self.slots.len) self.slots[key] = .{};
+            return;
+        }
+        const sp = std.mem.indexOfAny(u8, s, " \t") orelse s.len;
+        const verb = Verb.parse(s[0..sp]) orelse return;
+        const rest = std.mem.trim(u8, s[sp..], " \t");
+        switch (verb) {
+            .popup => {
+                if (rest.len == 0) return;
+                // a leading WxH[@MWxMH] is the size; the rest is the command
+                const w_end = std.mem.indexOfAny(u8, rest, " \t") orelse rest.len;
+                if (w_end < rest.len and isSize(rest[0..w_end])) {
+                    var buf: [512]u8 = undefined;
+                    const cmd = std.mem.trim(u8, rest[w_end..], " \t");
+                    const payload = std.fmt.bufPrint(&buf, "\x1f{s}\x1f{s}", .{ rest[0..w_end], cmd }) catch return;
+                    self.bind(key, verb, payload);
+                } else self.bind(key, verb, rest);
+            },
+            .select_window => {
+                const n = std.fmt.parseInt(u8, rest, 10) catch return;
+                if (n == 0) return;
+                self.bind(key, verb, rest);
+            },
+            else => self.bind(key, verb, ""),
+        }
+    }
+};
+
+/// `72x86` or `72x86@124x48`.
+fn isSize(word: []const u8) bool {
+    var halves = std.mem.splitScalar(u8, word, '@');
+    var n: usize = 0;
+    while (halves.next()) |h| : (n += 1) {
+        if (n > 1) return false;
+        const x = std.mem.indexOfScalar(u8, h, 'x') orelse return false;
+        _ = std.fmt.parseInt(u16, h[0..x], 10) catch return false;
+        _ = std.fmt.parseInt(u16, h[x + 1 ..], 10) catch return false;
+    }
+    return n > 0;
+}
+
+/// A key's config spelling → its byte: one printable character, or
+/// `C-<letter>` for the control key.
+pub fn parseKey(name: []const u8) ?u8 {
+    if (name.len == 1 and name[0] >= 0x20 and name[0] < 0x7f) return name[0];
+    if (name.len == 3 and (name[0] == 'C' or name[0] == 'c') and name[1] == '-') {
+        const ch = std.ascii.toLower(name[2]);
+        if (ch >= 'a' and ch <= 'z') return ch - 'a' + 1;
+    }
+    if (std.ascii.eqlIgnoreCase(name, "space")) return ' ';
+    return null;
+}
+
+/// A key's byte → how help text writes it: `C-o`, or the character.
+pub fn keyName(key: u8, buf: []u8) []const u8 {
+    if (key >= 1 and key <= 26) return std.fmt.bufPrint(buf, "C-{c}", .{key - 1 + 'a'}) catch "C-?";
+    if (key == ' ') return "space";
+    if (key >= 0x20 and key < 0x7f and buf.len > 0) {
+        buf[0] = key;
+        return buf[0..1];
+    }
+    return "?";
+}
+
+/// A multiplexer's bindings and rook's own ways around itself.
+/// Nothing here names a program.
+pub fn defaults() Keys {
+    var k: Keys = .{};
+    const table = [_]struct { u8, []const u8 }{
+        .{ 'v', "split-right" },
+        .{ '|', "split-right" },
+        .{ '-', "split-down" },
+        .{ 'h', "focus-left" },
+        .{ 'j', "focus-down" },
+        .{ 'k', "focus-up" },
+        .{ 'l', "focus-right" },
+        .{ 'H', "resize-left" },
+        .{ 'J', "resize-down" },
+        .{ 'K', "resize-up" },
+        .{ 'L', "resize-right" },
+        .{ 'c', "new-window" },
+        .{ 'n', "next-window" },
+        .{ 'p', "previous-window" },
+        .{ '1', "select-window 1" },
+        .{ '2', "select-window 2" },
+        .{ '3', "select-window 3" },
+        .{ '4', "select-window 4" },
+        .{ '5', "select-window 5" },
+        .{ '6', "select-window 6" },
+        .{ '7', "select-window 7" },
+        .{ '8', "select-window 8" },
+        .{ '9', "select-window 9" },
+        .{ ';', "last-pane" },
+        .{ 'z', "zoom" },
+        .{ '[', "copy-mode" },
+        .{ 'x', "kill-pane" },
+        .{ 'd', "detach" },
+        .{ 'u', "next-unread" },
+        .{ 'i', "inspect" },
+        .{ 'o', "home" },
+        .{ 'a', "home-running" },
+        .{ '!', "home-needs" },
+        .{ '/', "home-find" },
+        .{ ':', "home-command" },
+        .{ 0x0f, "last-space" },
+        .{ 'A', "sidebar" },
+        .{ 'P', "pin" },
+        .{ 'G', "pin-global" },
+    };
+    for (table) |e| k.set(e[0], e[1]);
+    return k;
+}
+
+/// The [keys] table of a rook.toml, over `into` (the defaults, as a
+/// rule). Keys may be bare or quoted — `"C-o"`, `"|"`, `"="` — and a
+/// `#` after the value's closing quote is a comment.
+pub fn parse(toml: []const u8, into: *Keys) void {
+    var in_keys = false;
+    var lines = std.mem.splitScalar(u8, toml, '\n');
+    while (lines.next()) |line| {
+        const t = std.mem.trim(u8, line, " \t\r");
+        if (t.len == 0 or t[0] == '#') continue;
+        if (t[0] == '[') {
+            in_keys = std.mem.eql(u8, t, "[keys]");
+            continue;
+        }
+        if (!in_keys) continue;
+        var name: []const u8 = undefined;
+        var after: []const u8 = undefined;
+        if (t[0] == '"' or t[0] == '\'') {
+            const close = std.mem.indexOfScalarPos(u8, t, 1, t[0]) orelse continue;
+            name = t[1..close];
+            after = std.mem.trimStart(u8, t[close + 1 ..], " \t");
+            if (after.len == 0 or after[0] != '=') continue;
+            after = after[1..];
+        } else {
+            const eq = std.mem.indexOfScalar(u8, t, '=') orelse continue;
+            name = std.mem.trim(u8, t[0..eq], " \t");
+            after = t[eq + 1 ..];
+        }
+        const v = std.mem.trim(u8, after, " \t");
+        if (v.len < 2 or (v[0] != '"' and v[0] != '\'')) continue;
+        const vclose = std.mem.indexOfScalarPos(u8, v, 1, v[0]) orelse continue;
+        const key = parseKey(name) orelse continue;
+        into.set(key, v[1..vclose]);
+    }
+}
+
+pub fn load(toml: []const u8) Keys {
+    var k = defaults();
+    parse(toml, &k);
+    return k;
+}
+
+test "defaults carry no program" {
+    const k = defaults();
+    for (k.slots) |b| try std.testing.expect(b.verb != .popup and b.verb != .companion and b.verb != .companion_pin);
+    try std.testing.expectEqual(Verb.split_right, k.get('v').verb);
+    try std.testing.expectEqual(Verb.last_space, k.get(0x0f).verb);
+    try std.testing.expectEqualStrings("3", k.arg(k.get('3')));
+}
+
+test "a [keys] table binds, rebinds, and unbinds" {
+    var k = defaults();
+    parse(
+        \\[tmux]
+        \\g = "popup nope"
+        \\[keys]
+        \\g = "popup 72x86@124x48 grim"   # the agent
+        \\s = "popup rook pick"
+        \\"C-o" = "home"
+        \\"=" = 'split-down'
+        \\t = "companion"
+        \\x = ""
+        \\q = "no-such-verb"
+        \\[other]
+        \\w = "popup nope"
+    , &k);
+    try std.testing.expectEqual(Verb.popup, k.get('g').verb);
+    try std.testing.expectEqualStrings("\x1f72x86@124x48\x1fgrim", k.arg(k.get('g')));
+    try std.testing.expectEqualStrings("rook pick", k.arg(k.get('s')));
+    try std.testing.expectEqual(Verb.home, k.get(0x0f).verb);
+    try std.testing.expectEqual(Verb.split_down, k.get('=').verb);
+    try std.testing.expectEqual(Verb.companion, k.get('t').verb);
+    try std.testing.expectEqual(Verb.none, k.get('x').verb);
+    try std.testing.expectEqual(Verb.none, k.get('q').verb);
+    try std.testing.expectEqual(Verb.none, k.get('w').verb);
+    try std.testing.expectEqual(@as(?u8, 't'), k.keyFor(.companion));
+    try std.testing.expectEqual(@as(?u8, null), k.keyFor(.companion_pin));
+}
+
+test "a popup whose first word is not a size keeps it" {
+    var k: Keys = .{};
+    k.set('e', "popup 12 monkeys");
+    try std.testing.expectEqualStrings("12 monkeys", k.arg(k.get('e')));
+    k.set('f', "popup 80x90");
+    try std.testing.expectEqualStrings("80x90", k.arg(k.get('f')));
+    k.set('b', "select-window 0");
+    try std.testing.expectEqual(Verb.none, k.get('b').verb);
+}
+
+test "key names" {
+    try std.testing.expectEqual(@as(?u8, 0x0f), parseKey("C-o"));
+    try std.testing.expectEqual(@as(?u8, 0x0f), parseKey("c-O"));
+    try std.testing.expectEqual(@as(?u8, '|'), parseKey("|"));
+    try std.testing.expectEqual(@as(?u8, null), parseKey("C-1"));
+    var b: [4]u8 = undefined;
+    try std.testing.expectEqualStrings("C-o", keyName(0x0f, &b));
+    try std.testing.expectEqualStrings("g", keyName('g', &b));
+}

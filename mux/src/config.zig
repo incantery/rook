@@ -11,13 +11,14 @@
 //!   sidebar = false                # the older spelling: true = open
 //!   sidebar_width = 30             # its width in columns, open
 //!   agents = ["claude"]            # programs the agents rail looks for
+//!                                  # (none unless named)
 //!   bar = true                     # the calm bar: one row at the bottom,
 //!                                  # who holds the focused pane's keys
 //!                                  # left, signals right (false = off)
-//!   zoom_view = "orbit"            # prefix-s: "orbit" draws each space as
+//!   zoom_view = "orbit"            # :orbit: "orbit" draws each space as
 //!                                  # a figure; "ledger" is rows only
 //!   glyphs = "unicode"             # "ascii" for a glass without the marks
-//!   status_home = ["view", "-", "agents", "attention", "blocked", "session", "vera"]
+//!   status_home = ["view", "-", "agents", "attention", "blocked", "session", "companion"]
 //!   status_space = ["input", "-", "working", "attention", "unread", "pins"]
 //!                                  # the calm bar's modules at home and in a
 //!                                  # space; "-" is where the right-aligned
@@ -28,7 +29,7 @@
 //!
 //! and the [companion] table the Go half already reads — the one
 //! resident rook knows by name, so it can say when and where it is
-//! open:
+//! open. Rook names no occupant: without this table there is none.
 //!   [companion]
 //!   command = "vera"               # what summons it; its first word
 //!   program = "vera"               # …or the program outright, when
@@ -36,12 +37,16 @@
 //!                                  # wrapper (`program = ""` = off)
 //!   ask = "vera say -c rook"       # what bare text at rook's home runs,
 //!                                  # the text as its one argument
-//!                                  # (`ask = ""` = no intent door)
+//!                                  # (unset = no intent door)
 //!   chat = "vera chat"             # the companion's own terminal, run in
-//!                                  # vera's panel as a real pane
-//!                                  # (`chat = ""` = rook's own surface)
+//!                                  # its panel as a real pane
+//!                                  # (unset = rook's own surface)
+//!
+//! The [keys] table — what each key after the prefix does — is
+//! keys.zig's, read by `keysConfig`.
 const std = @import("std");
 const chrome = @import("chrome.zig");
+const keyspkg = @import("keys.zig");
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 
@@ -100,17 +105,17 @@ pub const Mux = struct {
     /// a boot with nothing saved opens a clean workspace either way.
     restore: bool = true,
     /// newline-joined foreground program names that mean "an agent is
-    /// running in this pane". The one opinion rook holds about what an
-    /// agent *is*, and the only reason it holds it: so a session
-    /// somebody started by hand still shows up on the agents rail
-    /// instead of being invisible to everything but the tab bar.
+    /// running in this pane", so a session somebody started by hand
+    /// still shows up on the agents rail instead of being invisible to
+    /// everything but the tab bar. Rook names none itself: empty means
+    /// the rail sees only what a producer pushes.
     agents: [256]u8 = @splat(0),
     agents_len: usize = 0,
     /// The companion's program name: the foreground program that
     /// means "the resident is open in this pane". One name, not a
     /// list — the slot is singular by design, and rook reports every
-    /// pane running it. Empty *and set* turns the slot off; unset
-    /// means `default_companion`.
+    /// pane running it. Empty means no companion: rook ships the slot,
+    /// and only the config names an occupant.
     companion: [64]u8 = @splat(0),
     companion_len: usize = 0,
     companion_from: enum { none, name, command, program } = .none,
@@ -140,41 +145,29 @@ pub const Mux = struct {
     status_space: [256]u8 = @splat(0),
     status_space_len: usize = 0,
     /// The intent door: the command bare text at the root runs, with
-    /// the text as its one argument (ask.zig). Unset means the
-    /// companion's own `say`; set empty means no door, and the root
-    /// says so.
+    /// the text as its one argument (ask.zig). Unset means no door,
+    /// and the root says so.
     ask: [256]u8 = @splat(0),
     ask_len: usize = 0,
-    ask_set: bool = false,
     /// The companion's own terminal: the command rook runs, in a pty,
-    /// inside vera's panel. Set empty to keep rook's own one-shot
-    /// surface; unset means the companion's own `chat` while the
-    /// companion is vera.
+    /// inside its panel. Unset keeps rook's own one-shot surface.
     chat: [256]u8 = @splat(0),
     chat_len: usize = 0,
-    chat_set: bool = false,
 
     pub fn ownersSlice(self: *const Mux) []const u8 {
         return self.owners[0..self.owners_len];
     }
 
     pub fn agentsSlice(self: *const Mux) []const u8 {
-        if (self.agents_len == 0) return default_agents;
         return self.agents[0..self.agents_len];
     }
 
     /// The program rook watches for as the companion. Empty means the
-    /// slot is off — either named empty, or the default overridden
-    /// away — and rook then knows nothing about a companion, which is
-    /// a legitimate thing to configure.
+    /// slot is off, and rook then knows nothing about a companion.
     pub fn companionSlice(self: *const Mux) []const u8 {
-        if (self.companion_from == .none) return default_companion;
         return self.companion[0..self.companion_len];
     }
 
-    /// The ask command. Configured outright, else `vera say -c rook`
-    /// while the companion is vera — rook knows her verb and no
-    /// other program's — else nothing.
     pub fn statusHome(self: *const Mux) []const u8 {
         return if (self.status_home_len > 0) self.status_home[0..self.status_home_len] else default_status_home;
     }
@@ -182,21 +175,17 @@ pub const Mux = struct {
         return if (self.status_space_len > 0) self.status_space[0..self.status_space_len] else default_status_space;
     }
 
+    /// The ask command, as the config says it; rook knows no
+    /// program's verbs. Empty means no intent door.
     pub fn askSlice(self: *const Mux) []const u8 {
-        if (self.ask_set) return self.ask[0..self.ask_len];
-        if (std.mem.eql(u8, self.companionSlice(), "vera")) return default_ask;
-        return "";
+        return self.ask[0..self.ask_len];
     }
 
-    /// The chat command: the companion's own terminal, hosted in
-    /// vera's panel. Configured outright, else `vera chat` while the
-    /// companion is vera — the same rule the ask follows, for the
-    /// same reason: rook knows her verbs and no other program's.
-    /// Empty means the panel keeps rook's own surface.
+    /// The chat command: the companion's own terminal, hosted in its
+    /// panel, as the config says it. Empty means the panel keeps
+    /// rook's own surface.
     pub fn chatSlice(self: *const Mux) []const u8 {
-        if (self.chat_set) return self.chat[0..self.chat_len];
-        if (std.mem.eql(u8, self.companionSlice(), "vera")) return default_chat;
-        return "";
+        return self.chat[0..self.chat_len];
     }
 
     /// Precedence, whichever order the lines appear in: `program`
@@ -220,31 +209,25 @@ pub const Mux = struct {
     }
 };
 
-/// What rook looks for when nothing says otherwise. Claude Code names
-/// its binary by version, so `pane.programName` is what makes this a
-/// word rather than "2.1.241".
-pub const default_agents = "claude";
-
-/// The companion when the config names none. Rook ships the slot and
-/// the config names the occupant — vera is the first one, and the one
-/// the slot was cut for, so she is also the default.
-pub const default_companion = "vera";
-
-/// How bare text reaches vera: her one-shot exchange, in a
-/// conversation of rook's own so the next request continues it.
-pub const default_ask = "vera say -c rook";
-
-/// The companion's own terminal, which rook hosts rather than
-/// imitates: mote's screen, streaming, in a pane rook sizes and
-/// keeps the keys around.
-pub const default_chat = "vera chat";
-
 /// The calm bar at home: the view, then ambient health — agents,
-/// what needs you, what failed, the session's spend, the companion.
-pub const default_status_home = "view\n-\nagents\nattention\nblocked\nsession\nvera";
+/// what needs you, what failed, the session's spend, the companion
+/// (when the config names one).
+pub const default_status_home = "view\n-\nagents\nattention\nblocked\nsession\ncompanion";
 /// In a space: who holds the keys, then the signals, with one global
 /// attention count and no more of the dashboard than that.
 pub const default_status_space = "input\n-\nworking\nattention\nunread\npins";
+
+/// The prefix table: rook's defaults under the file's [keys] (keys.zig).
+pub fn keysConfig() keyspkg.Keys {
+    var buf: [8192]u8 = undefined;
+    const home = std.mem.span(getenv("HOME") orelse return keyspkg.defaults());
+    var path_buf: [1024]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buf, "{s}/.config/rook/rook.toml", .{home}) catch return keyspkg.defaults();
+    const f = std.c.fopen(path, "r") orelse return keyspkg.defaults();
+    defer _ = std.c.fclose(f);
+    const n = std.c.fread(&buf, 1, buf.len, f);
+    return keyspkg.load(buf[0..n]);
+}
 
 pub fn muxConfig() Mux {
     var out: Mux = .{};
@@ -294,11 +277,9 @@ pub fn parseMux(toml: []const u8, out: *Mux) void {
             } else if (std.mem.eql(u8, key, "ask")) {
                 out.ask_len = @min(v.len, out.ask.len);
                 @memcpy(out.ask[0..out.ask_len], v[0..out.ask_len]);
-                out.ask_set = true;
             } else if (std.mem.eql(u8, key, "chat")) {
                 out.chat_len = @min(v.len, out.chat.len);
                 @memcpy(out.chat[0..out.chat_len], v[0..out.chat_len]);
-                out.chat_set = true;
             }
             continue;
         }
@@ -396,7 +377,7 @@ test "parseMux" {
     parseMux("[mux]\nrestore = false\n", &r);
     try std.testing.expectEqual(false, r.restore);
     var a: Mux = .{};
-    try std.testing.expectEqualStrings("claude", a.agentsSlice()); // the default
+    try std.testing.expectEqualStrings("", a.agentsSlice()); // rook names no agent
     parseMux("[mux]\nagents = [\"claude\", \"codex\"]\n", &a);
     try std.testing.expectEqualStrings("claude\ncodex", a.agentsSlice());
     var b: Mux = .{};
@@ -429,49 +410,35 @@ test "the status bar's modules are the default until a config names them" {
     try std.testing.expectEqualStrings("input", d.statusSpace());
 }
 
-test "the ask command follows the companion unless said outright" {
+test "the ask and chat doors are the config's, or none" {
     const eq = std.testing.expectEqualStrings;
+    // rook knows no program's verbs, its first companion's included
     var d: Mux = .{};
-    try eq("vera say -c rook", d.askSlice());
-    var other: Mux = .{};
-    parseMux("[companion]\nprogram = \"aider\"\n", &other);
-    try eq("", other.askSlice()); // rook knows no verb of aider's
+    try eq("", d.askSlice());
+    try eq("", d.chatSlice());
+    var vera: Mux = .{};
+    parseMux("[companion]\ncommand = \"vera chat\"\n", &vera);
+    try eq("", vera.askSlice());
+    try eq("", vera.chatSlice());
     var said: Mux = .{};
-    parseMux("[companion]\nprogram = \"aider\"\nask = \"aider --message\"\n", &said);
+    parseMux("[companion]\nprogram = \"aider\"\nask = \"aider --message\"\nchat = \"aider\"\n", &said);
     try eq("aider --message", said.askSlice());
-    var off: Mux = .{};
-    parseMux("[companion]\nask = \"\"\n", &off);
-    try eq("", off.askSlice());
-}
-
-test "the chat command follows the companion the way the ask does" {
-    const eq = std.testing.expectEqualStrings;
-    var d: Mux = .{};
-    try eq("vera chat", d.chatSlice());
-    var other: Mux = .{};
-    parseMux("[companion]\nprogram = \"aider\"\n", &other);
-    try eq("", other.chatSlice()); // rook knows no terminal of aider's
-    var said: Mux = .{};
-    parseMux("[companion]\nprogram = \"aider\"\nchat = \"aider\"\n", &said);
     try eq("aider", said.chatSlice());
-    // set empty is the opt-out: the panel keeps rook's own surface
-    var off: Mux = .{};
-    parseMux("[companion]\nchat = \"\"\n", &off);
-    try eq("", off.chatSlice());
     // and the two doors are independent
     var one: Mux = .{};
-    parseMux("[companion]\nchat = \"\"\n", &one);
+    parseMux("[companion]\nask = \"vera say -c rook\"\n", &one);
     try eq("vera say -c rook", one.askSlice());
+    try eq("", one.chatSlice());
 }
 
 test "the companion slot, named or summoned" {
     const eq = std.testing.expectEqualStrings;
-    // nothing configured: the slot still exists, with its first occupant
+    // nothing configured: the slot is empty — rook names no occupant
     var d: Mux = .{};
-    try eq("vera", d.companionSlice());
+    try eq("", d.companionSlice());
     // the command's first word is the program to watch for
     var c: Mux = .{};
-    parseMux("[companion]\ncommand = \"vera chat\"\nkey = \"g\"\n", &c);
+    parseMux("[companion]\ncommand = \"vera chat\"\n", &c);
     try eq("vera", c.companionSlice());
     // a path is still a program name
     var p: Mux = .{};
@@ -491,20 +458,16 @@ test "the companion slot, named or summoned" {
     try eq("vera", l.companionSlice());
     // with nothing better, the label is what names the occupant
     var only: Mux = .{};
-    parseMux("[companion]\nname = \"vera\"\nkey = \"g\"\n", &only);
+    parseMux("[companion]\nname = \"vera\"\n", &only);
     try eq("vera", only.companionSlice());
-    // named empty: no companion at all, which is a thing to configure
+    // program named empty over a command: no companion at all
     var off: Mux = .{};
-    parseMux("[companion]\nprogram = \"\"\n", &off);
+    parseMux("[companion]\ncommand = \"vera chat\"\nprogram = \"\"\n", &off);
     try eq("", off.companionSlice());
-    // a table that says nothing about the occupant still gets one
-    var bare: Mux = .{};
-    parseMux("[companion]\nkey = \"g\"\n", &bare);
-    try eq("vera", bare.companionSlice());
     // the table only counts under its own header
     var elsewhere: Mux = .{};
     parseMux("[mux]\nname = \"nope\"\n[worktree]\ncommand = \"nope\"\n", &elsewhere);
-    try eq("vera", elsewhere.companionSlice());
+    try eq("", elsewhere.companionSlice());
 }
 
 test "parsePrefix" {

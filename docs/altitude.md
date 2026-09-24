@@ -347,22 +347,38 @@ the accent is left for what is live inside it. (`render.Paint`.)
 
 ## Keys
 
-    prefix-o     home, from anywhere (idempotent at the root)
-    prefix-s     the workspace picker (fzf), from a space or from home
-    prefix-g     grim, floated at 72×86% and at most 124×48 cells: the resident agent's popup, from a space or from home
-    prefix-a     home, cursor on the first running item
-    prefix-!     home, cursor on the first thing that needs you
-    prefix-t     home, the field empty for a request
-    prefix-/     home, finding
-    prefix-:     home, a command
-    prefix-C-o   the space before the last hop
-    prefix-A     the legacy side panel, for a config that asked for it
+Every key after the prefix is a row of the table in
+`mux/src/keys.zig`, and every row can be rebound in `rook.toml`'s
+`[keys]` (`key = "verb [arg]"`, `""` unbinds). Rook's defaults are a
+multiplexer's and its own ways around itself; nothing it binds runs a
+program. At the root:
 
-At the root the space is not on the glass, so the keys that act on
-one (`c`, `v`, `z`, …) are not taken there. `prefix-s` floats the fzf
-picker (`rook pick`) from home as well, and picking a space enters
-it; orbit, which held that key for a while, is `:orbit`. `prefix-a`
-used to cycle the side panel, which `prefix-A` still toggles.
+    prefix-o     home                 home, from anywhere (idempotent at the root)
+    prefix-a     home-running         home, cursor on the first running item
+    prefix-!     home-needs           home, cursor on the first thing that needs you
+    prefix-/     home-find            home, finding
+    prefix-:     home-command         home, a command
+    prefix-C-o   last-space           the space before the last hop
+    prefix-A     sidebar              the legacy side panel, for a config that asked for it
+    prefix-u     next-unread          the oldest thing you have not read
+    prefix-d     detach
+
+What a popup runs, and the companion's panel, are the config's to
+bind. Seth's:
+
+    [keys]
+    s = "popup rook pick"               # the workspace picker (fzf)
+    w = "popup rook worktree"           # grove's manager
+    g = "popup 72x86@124x48 grim"       # grim at 72×86%, at most 124×48 cells
+    t = "companion"                     # the companion's panel
+    T = "companion-pin"
+
+A verb says whether it means anything at the root (`Verb.atRoot`):
+the ways around rook, `popup`, `companion`, and `detach` do; the
+ones that act on a space (`split-right`, `zoom`, …) are not taken
+there. While a popup is up only `kill-pane` (which closes it) and
+`detach` reach past it. The prose above still says `prefix-t` for
+the companion; read it as "the key bound to `companion`".
 
 ## The fixture
 

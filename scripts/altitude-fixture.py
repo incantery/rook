@@ -86,6 +86,12 @@ agents = ["claude", "codex"]
 %s
 [companion]
 program = "vera"
+ask = "vera say -c rook"
+%s
+[keys]
+s = "popup rook pick"
+t = "companion"
+T = "companion-pin"
 %s
 '''
 
@@ -199,16 +205,15 @@ def check(name, ok, extra=""):
 class Rook:
     """A sandboxed engine behind a pyte glass."""
 
-    def __init__(self, cols=120, rows=32, extra_conf="", tag="fixture", vera=True, attach=None, chat=False):
+    def __init__(self, cols=120, rows=32, extra_conf="", tag="fixture", vera=True, attach=None, chat=False, keys_conf=""):
         self.root = tempfile.mkdtemp(prefix="/tmp/rk-%s-" % tag)
         self.cols, self.rows = cols, rows
         os.makedirs(self.root + "/.config/rook")
         with open(self.root + "/.config/rook/rook.toml", "w") as f:
-            # `chat = ""` is the opt-out: the panel draws rook's own
-            # surface instead of hosting her terminal. The frames that
-            # judge that surface ask for it; the chat frames ask for
-            # the default.
-            f.write(CONFIG % (extra_conf, {True: "", False: 'chat = ""'}.get(chat, 'chat = "%s"' % chat)))
+            # No `chat` is rook's own surface in her panel; the chat
+            # frames ask for her terminal by name, since rook names
+            # no program's.
+            f.write(CONFIG % (extra_conf, {True: 'chat = "vera chat"', False: ""}.get(chat, 'chat = "%s"' % chat), keys_conf))
         os.makedirs(self.root + "/bin")
         os.makedirs(self.root + "/lib")
         # real processes with the names the fixture needs: an agent
@@ -942,6 +947,32 @@ def main():
         check("prefix-o from there is still home", r8.state()["scope"] == "root")
     finally:
         r8.close()
+
+    # ---- 29: the prefix table is the config's: rook's defaults
+    # float no program, a [keys] row binds one, and a default can be
+    # rebound or unbound
+    rk = Rook(cols=100, rows=24, tag="keys", attach=["attach", "--space", "main"],
+              keys_conf='e = "popup 50x50 cat"\n"=" = "split-right"\nx = ""')
+    try:
+        mode = lambda: rk.state()["focus"]["mode"]
+        count = lambda: len(rk.state()["panes"])
+        rk.keys("`g", settle=0.5)
+        rk.keys("`w", settle=0.5)
+        check("unbound by the config, prefix-g and prefix-w float nothing: rook binds no program", mode() == "pane", mode())
+        rk.keys("`e", settle=0.8)
+        rk.snap("29-keys-popup")
+        check("a [keys] popup row floats its program", mode() == "popup" and any(l.startswith("│") or "│" in l for l in rk.lines()), mode())
+        rk.keys("`x", settle=0.6)
+        check("x unbound, prefix-x does not reach past the popup", mode() == "popup", mode())
+        rk.keys("\x04", settle=0.8)
+        check("and the popup goes when its program does", mode() == "pane", mode())
+        n = count()
+        rk.keys("`=", settle=0.6)
+        check("a key the defaults leave alone, bound to a split, splits", count() == n + 1, (n, count()))
+        rk.keys("`x", settle=0.6)
+        check("a default unbound with \"\" does nothing", count() == n + 1, (n, count()))
+    finally:
+        rk.close()
 
     # ---- 17: a space literally named rook
     r9 = Rook(cols=100, rows=24, tag="rookspace", attach=["attach", "--space", "rook"])

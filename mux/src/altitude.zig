@@ -138,7 +138,8 @@ pub const commands = [_]CommandSpec{
     .{ .word = "orbit", .cmd = .orbit, .arg = "", .help = "spaces as figures, when the glass has room" },
     .{ .word = "home", .cmd = .home, .arg = "", .help = "rook's home: the conversation and the dashboard" },
     .{ .word = "now", .cmd = .now, .arg = "", .help = "the dashboard: what needs you, what runs, what finished" },
-    .{ .word = "vera", .cmd = .vera, .arg = "", .help = "the conversation, and the composer" },
+    .{ .word = "companion", .cmd = .vera, .arg = "", .help = "the companion's conversation, and the composer" },
+    .{ .word = "vera", .cmd = .vera, .arg = "", .help = "the same as :companion" },
 };
 
 /// One tab of a space, as the figure lists it: the minted name, the

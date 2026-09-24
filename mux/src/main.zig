@@ -84,6 +84,7 @@ test {
     _ = @import("layout.zig");
     _ = @import("proto.zig");
     _ = @import("config.zig");
+    _ = @import("keys.zig");
     _ = @import("chrome.zig");
     _ = @import("companion.zig");
     _ = @import("altitude.zig");

@@ -29,6 +29,10 @@ type Config struct {
 	// must not mean that either reader's keys break the other's.
 	Mux   map[string]any `toml:"mux"`
 	Namer Namer          `toml:"namer"`
+	// Keys is the [keys] table: what each key after the prefix does,
+	// "key" = "verb [arg]". The engine reads it (mux/src/keys.zig);
+	// Load only refuses what the engine would skip (keys.go).
+	Keys map[string]string `toml:"keys"`
 }
 
 // Namer is the [namer] table: what gives tabs their names once the
@@ -64,17 +68,17 @@ type Worktree struct {
 	Link []string `toml:"link"`
 }
 
-// Companion is the resident summoned by prefix+key from anywhere: a
-// popup over whatever you're doing, launched with rook context in its
-// environment (ROOK_SESSION, ROOK_DIR, ROOK_PANE). Rook ships the
-// slot; the config names the occupant — vera first.
+// Companion is the resident rook knows by name, so it can say when
+// and where it is open. Rook ships the slot; only the config names an
+// occupant, and without this table there is none. Which key opens its
+// panel is the [keys] table's (`t = "companion"`).
 type Companion struct {
 	// Command runs inside the popup. Required for the slot to exist.
 	Command string `toml:"command"`
 	// Name labels the popup; defaults to the command's first word.
 	Name string `toml:"name"`
-	// Key is the prefix key that summons it; defaults to "a" (agent).
-	// A key set here wins over rook's default bindings.
+	// Key is accepted and ignored: nothing has read it since the tmux
+	// front door went. Bind the companion in [keys] instead.
 	Key string `toml:"key"`
 	// Program is the foreground program that means "the companion is
 	// open in this pane" — what the engine watches for so `rook
@@ -140,6 +144,9 @@ func Load(path string) (Config, error) {
 		}
 		return Config{}, fmt.Errorf("%s: unrecognized keys: %s (typo, or a newer rook?)",
 			path, strings.Join(keys, ", "))
+	}
+	if err := checkKeys(c.Keys); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
 	return c, nil
 }
