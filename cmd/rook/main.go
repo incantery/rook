@@ -60,6 +60,10 @@ const usage = `rook — the multiplexer, owned
   rook config [check|json|path]  is rook.toml good; the engine's half, compiled; where it is
   rook reload             hand the running server rook.toml as it is now (rookd does this on save)
   rook style [--json]     the stylesheet explained: the facts, which rules held, what won and why
+  rook class [<target>] [+name -name -*] [--ttl 30s]
+                          classes on a pane (id), a workspace (name) or . (the one on the glass),
+                          for [[style.match]] class = …;
+                          no target is this pane inside rook; no names lists them
   rook new [-q] <name> [cwd] [-- cmd...]
                           create/switch workspace; -q makes it without moving you;
                           after -- is what its first pane is born running
@@ -106,7 +110,7 @@ docs/surfaces.md in the repo is the state feed and the rail, in full.
 // verbs the Zig engine owns; rook execs into it verbatim.
 var muxVerbs = map[string]bool{
 	"server": true, "stats": true, "kill": true, "nav": true,
-	"popup": true, "notify": true, "ls": true, "switch": true, "new": true, "close": true,
+	"popup": true, "notify": true, "class": true, "ls": true, "switch": true, "new": true, "close": true,
 	"blocks": true, "raw": true,
 	// the state feed (out) and the side rail's model (in)
 	"state": true, "watch": true, "capture": true, "side": true,

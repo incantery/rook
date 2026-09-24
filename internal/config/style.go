@@ -63,7 +63,16 @@ type When struct {
 	Branch string `toml:"branch" json:"branch,omitempty"`
 	// Program is the focused pane's foreground program.
 	Program string `toml:"program" json:"program,omitempty"`
+	// Class is a class on the workspace or any pane in it — put there
+	// by `rook class`, or by a program with OSC 1337 SetUserVar.
+	Class string `toml:"class" json:"class,omitempty"`
+	// State is one of rook's own facts of the workspace (States).
+	State string `toml:"state" json:"state,omitempty"`
 }
+
+// States are what rook knows of a workspace for itself, as a rule may
+// ask (mux/src/style.zig State).
+var States = []string{"unread", "working", "zoomed", "copy", "popup"}
 
 // Match is one [[style.match]]: its conditions and its looks, side by
 // side in one table.
@@ -163,6 +172,9 @@ func checkStyle(base Style, rules []Match) error {
 		return err
 	}
 	for i, r := range rules {
+		if r.State != "" && !contains(States, r.State) {
+			return fmt.Errorf("[[style.match]] %d: state = %q: one of %s", i+1, r.State, strings.Join(States, ", "))
+		}
 		if err := r.Style.check(fmt.Sprintf("[[style.match]] %d:", i+1)); err != nil {
 			return err
 		}

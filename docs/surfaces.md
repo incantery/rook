@@ -741,6 +741,7 @@ Honest inventory, so this document is not mistaken for a description.
 | the unread channel: `panes[].unread`, the tab's `●`, `found[].unread` on the rail, `prefix-u` / `rook jump` | **built** — `docs/attention.md` |
 | `rook notify`: one marked line on the calm bar, held until a key after it has been read | **built** (`c2s.notify`) — `docs/attention.md` |
 | the config, compiled by the front door (`rook config json`) and read by the engine at boot; `rook reload` / rookd's file watch hand a running server a new one | **built** (`c2s.config`, answered `s2c.text` `ok` or why not) |
+| classes on a workspace or pane (`rook class`, OSC 1337 `SetUserVar=rook_class`), with deadlines; `workspaces[].classes`, `panes[].classes`; the stylesheet's `class` and `state` matchers | **built** (`c2s.class`: `target \x1f ttl-ms \x1f ops`, answered `ok\t<classes>`) — `docs/style.md` |
 | a pane by id from the front door: `read` / `send` / `run` / `key` / `wait` / `split` / `window` / `focus` / `close-pane`, `$ROOK_MUX_PANE` as the caller's id, `rook --skill` | **built** (`c2s.input`, `c2s.pane_cmd`) |
 | resume: `panes[].resume`, kept while its program is in front, saved in the restore file, typed into the rebuilt shell on boot; `[mux] restore` on by default | **built** (`c2s.resume`, state file v2) |
 | `companion.zig` + `Server.scanCompanion` | **built** — the one resident rook watches for by name, published as `companion` and read out loud by `rook companion` |

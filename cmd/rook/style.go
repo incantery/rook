@@ -18,12 +18,14 @@ type styleFeed struct {
 	Scope string `json:"scope"`
 	Style struct {
 		Facts struct {
-			Home      bool   `json:"home"`
-			Workspace string `json:"workspace"`
-			Dir       string `json:"dir"`
-			Repo      string `json:"repo"`
-			Branch    string `json:"branch"`
-			Program   string `json:"program"`
+			Home      bool     `json:"home"`
+			Workspace string   `json:"workspace"`
+			Dir       string   `json:"dir"`
+			Repo      string   `json:"repo"`
+			Branch    string   `json:"branch"`
+			Program   string   `json:"program"`
+			Classes   []string `json:"classes"`
+			States    []string `json:"states"`
 		} `json:"facts"`
 		Rules []struct {
 			Source  string `json:"source"`
@@ -72,7 +74,8 @@ func explain(w io.Writer, st styleFeed, rules []config.EngineRule) {
 		where = "home"
 	}
 	fmt.Fprintf(w, "%s (%s)\n", f.Workspace, where)
-	for _, kv := range [][2]string{{"dir", f.Dir}, {"repo", f.Repo}, {"branch", f.Branch}, {"program", f.Program}} {
+	for _, kv := range [][2]string{{"dir", f.Dir}, {"repo", f.Repo}, {"branch", f.Branch}, {"program", f.Program},
+		{"classes", strings.Join(f.Classes, " ")}, {"states", strings.Join(f.States, " ")}} {
 		v := kv[1]
 		if v == "" {
 			v = "—"
@@ -119,7 +122,8 @@ func whenString(w config.When) string {
 	if w.Home != nil {
 		parts = append(parts, fmt.Sprintf("home = %v", *w.Home))
 	}
-	for _, kv := range [][2]string{{"workspace", w.Workspace}, {"dir", w.Dir}, {"repo", w.Repo}, {"branch", w.Branch}, {"program", w.Program}} {
+	for _, kv := range [][2]string{{"workspace", w.Workspace}, {"dir", w.Dir}, {"repo", w.Repo}, {"branch", w.Branch},
+		{"program", w.Program}, {"class", w.Class}, {"state", w.State}} {
 		if kv[1] != "" {
 			parts = append(parts, fmt.Sprintf("%s = %q", kv[0], kv[1]))
 		}

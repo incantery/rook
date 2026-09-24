@@ -17,6 +17,7 @@ const config = @import("config.zig");
 const keyspkg = @import("keys.zig");
 const sheet = @import("sheet.zig");
 const stylepkg = @import("style.zig");
+const classespkg = @import("classes.zig");
 const ui = @import("ui.zig");
 
 // CLOCK_UPTIME_RAW = 8 on macOS; libc-only monotonic clock.
@@ -223,6 +224,9 @@ pub const NameBy = enum {
 const Session = struct {
     /// The one workspace outside the list of spaces (Server.ensureHome).
     home: bool = false,
+    /// Names anyone put on this workspace (`rook class`, classes.zig),
+    /// for the stylesheet to match.
+    classes: classespkg.Set = .{},
     name: [32]u8 = @splat(0),
     name_len: usize = 0,
     windows: std.ArrayList(*Window) = .empty,
@@ -448,6 +452,12 @@ pub const Server = struct {
     fact_home: bool = false,
     fact_key: u64 = std.math.maxInt(u64),
     fact_ms: i64 = 0,
+    /// the classes on the workspace and its panes, copied out: a pane
+    /// can close between frames, and the names must not go with it
+    fact_class_buf: [1024]u8 = undefined,
+    fact_class: [64][]const u8 = undefined,
+    fact_class_n: usize = 0,
+    fact_states: stylepkg.States = .{},
     /// A second frame builder for what the server paints over the
     /// panes itself: the altitude view, the ownership gate, the
     /// inspector. Its bytes ride the main frame as `Chrome.overlay`.
@@ -1201,7 +1211,10 @@ pub const Server = struct {
             // The stylesheet's facts move without output: a shell that
             // cd'd, a branch checked out elsewhere. Looked at twice a
             // second; only a change earns a frame.
-            if (nowMs() - self.fact_ms > 250) _ = self.refreshFacts();
+            if (nowMs() - self.fact_ms > 250) {
+                self.expireClasses();
+                _ = self.refreshFacts();
+            }
 
             // a resize's SIGWINCH repaint has had time to arrive: force
             // one clean full frame so the settled result is always shown
@@ -1507,6 +1520,7 @@ pub const Server = struct {
                     }
                 },
                 @intFromEnum(proto.c2s.config) => self.reloadConfig(c, msg.payload),
+                @intFromEnum(proto.c2s.class) => self.classCmd(c, msg.payload),
                 @intFromEnum(proto.c2s.popup) => {
                     if (msg.payload.len > 0) self.openPopup(self.popupSized(msg.payload)) catch {};
                 },
@@ -2847,6 +2861,12 @@ pub const Server = struct {
                 }
             }
             if (ev.title or ev.pwd) drift = true;
+            // a program flagging its own pane (SetUserVar=rook_class)
+            if (ev.class) {
+                if (p.classes.apply(ev.class_ops[0..ev.class_ops_len], 0, now)) |moved| {
+                    if (moved) changed = true;
+                } else |_| {}
+            }
         }
         if (changed) {
             _ = self.touch();
@@ -4710,6 +4730,80 @@ pub const Server = struct {
         f.put("\x1b[0m");
     }
 
+    // ---- classes ----
+
+    /// `rook class`: `<target>\x1f<ttl ms>\x1f<ops>`, where the target
+    /// is `p:<pane id>`, `s:<workspace>`, or `.` for the one on the
+    /// glass. Answered `ok\t<classes now>` or why not. Empty ops lists.
+    fn classCmd(self: *Server, c: *Client, payload: []const u8) void {
+        var it = std.mem.splitScalar(u8, payload, 0x1f);
+        const target = it.next() orelse "";
+        const ttl = std.fmt.parseInt(i64, it.next() orelse "0", 10) catch 0;
+        const ops = it.rest();
+        const set: *classespkg.Set = blk: {
+            if (std.mem.eql(u8, target, ".")) {
+                if (self.sessions.items.len == 0) break :blk null;
+                break :blk &self.sess().classes;
+            }
+            if (std.mem.startsWith(u8, target, "p:")) {
+                const id = std.fmt.parseInt(u32, target[2..], 10) catch break :blk null;
+                const p = self.pane(id) orelse break :blk null;
+                break :blk &p.classes;
+            }
+            if (std.mem.startsWith(u8, target, "s:")) {
+                if (std.mem.eql(u8, target[2..], "home")) {
+                    if (self.homeIndex()) |i| break :blk &self.sessions.items[i].classes;
+                }
+                const i = self.sessionNamed(target[2..]) orelse break :blk null;
+                break :blk &self.sessions.items[i].classes;
+            }
+            break :blk null;
+        } orelse {
+            self.sendTo(c, @intFromEnum(proto.s2c.text), "error: no such workspace or pane");
+            return;
+        };
+        const moved = set.apply(ops, ttl, panepkg.epochMs()) catch |e| {
+            self.sendTo(c, @intFromEnum(proto.s2c.text), switch (e) {
+                error.NotAName => "error: a class is letters, digits, - _ . : (31 at most); a ttl is 30s, 5m, 2h",
+                error.Full => "error: 16 classes at most",
+            });
+            return;
+        };
+        if (moved) {
+            self.fact_key = std.math.maxInt(u64);
+            _ = self.touch();
+            self.full = true;
+            self.pending = true;
+        }
+        var out: [700]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&out);
+        w.writeAll("ok\t") catch {};
+        for (set.slice(), 0..) |*cl, i| {
+            if (i > 0) w.writeByte(' ') catch break;
+            w.writeAll(cl.slice()) catch break;
+        }
+        self.sendTo(c, @intFromEnum(proto.s2c.text), w.buffered());
+    }
+
+    /// Drop the classes whose deadline passed. Looked at on the loop's
+    /// quarter-second beat; a lapse is a change like any other.
+    fn expireClasses(self: *Server) void {
+        const now = panepkg.epochMs();
+        var moved = false;
+        for (self.sessions.items) |sn| {
+            if (sn.classes.expire(now)) moved = true;
+        }
+        for (self.panes.items) |p| {
+            if (p.classes.expire(now)) moved = true;
+        }
+        if (moved) {
+            self.fact_key = std.math.maxInt(u64);
+            _ = self.touch();
+            self.full = true;
+            self.pending = true;
+        }
+    }
+
     // ---- the stylesheet's facts ----
 
     /// What the stylesheet asks about, for the workspace on the glass.
@@ -4722,7 +4816,44 @@ pub const Server = struct {
             .branch = self.fact_git.branchSlice(),
             .program = self.fact_prog[0..self.fact_prog_len],
             .home_dir = if (getenv("HOME")) |h| std.mem.span(h) else "",
+            .classes = self.fact_class[0..self.fact_class_n],
+            .states = self.fact_states,
         };
+    }
+
+    /// The workspace's classes and rook's own states of it, into the
+    /// facts: cheap — a walk of its windows — so every refresh does it.
+    fn gatherClasses(self: *Server, sn: *Session) void {
+        var used: usize = 0;
+        self.fact_class_n = 0;
+        const Add = struct {
+            fn one(sv: *Server, u: *usize, name: []const u8) void {
+                if (sv.fact_class_n == sv.fact_class.len or u.* + name.len > sv.fact_class_buf.len) return;
+                for (sv.fact_class[0..sv.fact_class_n]) |c| {
+                    if (std.mem.eql(u8, c, name)) return;
+                }
+                @memcpy(sv.fact_class_buf[u.*..][0..name.len], name);
+                sv.fact_class[sv.fact_class_n] = sv.fact_class_buf[u.*..][0..name.len];
+                sv.fact_class_n += 1;
+                u.* += name.len;
+            }
+        };
+        for (sn.classes.slice()) |*c| Add.one(self, &used, c.slice());
+        var st: stylepkg.States = .{};
+        const now = panepkg.epochMs();
+        for (self.panes.items) |p| {
+            if (!self.paneIn(sn, p.id)) continue;
+            for (p.classes.slice()) |*c| Add.one(self, &used, c.slice());
+            if (p.is_agent) {
+                const lo = p.last_output_ms.load(.acquire);
+                if (lo != 0 and now - lo < chromepkg.working_ms) st.insert(.working);
+            }
+        }
+        if (self.sessionUnread(sn)) st.insert(.unread);
+        if (sn.windows.items.len > 0 and sn.windows.items[sn.cur].zoomed) st.insert(.zoomed);
+        if (self.scrolling) st.insert(.copy);
+        if (self.popup != null) st.insert(.popup);
+        self.fact_states = st;
     }
 
     /// Bring the facts up to date: the workspace, and the focused
@@ -4739,10 +4870,11 @@ pub const Server = struct {
         if (key == self.fact_key and nowMs() - self.fact_ms < 250) return false;
         self.fact_key = key;
         self.fact_ms = nowMs();
-        var before: [1400]u8 = undefined;
+        var before: [3000]u8 = undefined;
         const was = self.factSig(&before);
         const sn = self.sess();
         self.fact_home = sn.home;
+        self.gatherClasses(sn);
         const label = sn.label();
         self.fact_ws_len = @min(label.len, self.fact_ws.len);
         @memcpy(self.fact_ws[0..self.fact_ws_len], label[0..self.fact_ws_len]);
@@ -4768,7 +4900,7 @@ pub const Server = struct {
             self.fact_git_dir_len = dir.len;
             self.fact_git_ms = nowMs();
         }
-        var after: [1400]u8 = undefined;
+        var after: [3000]u8 = undefined;
         const moved_any = !std.mem.eql(u8, was, self.factSig(&after));
         // whoever looked — a frame, the feed, the loop — the look may
         // have changed with the facts, and the glass should show it
@@ -4782,7 +4914,10 @@ pub const Server = struct {
     /// The facts as one string, to tell whether they moved.
     fn factSig(self: *Server, buf: []u8) []const u8 {
         const f = self.facts();
-        return std.fmt.bufPrint(buf, "{}\x00{s}\x00{s}\x00{s}\x00{s}\x00{s}", .{ f.home, f.workspace, f.dir, f.repo, f.branch, f.program }) catch "";
+        var w: std.Io.Writer = .fixed(buf);
+        w.print("{}\x00{s}\x00{s}\x00{s}\x00{s}\x00{s}\x00{d}", .{ f.home, f.workspace, f.dir, f.repo, f.branch, f.program, f.states.bits.mask }) catch return w.buffered();
+        for (f.classes) |c| w.print("\x00{s}", .{c}) catch break;
+        return w.buffered();
     }
 
     // ---- home ----

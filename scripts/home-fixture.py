@@ -434,6 +434,64 @@ try:
 finally:
     r.close()
 
+# ---- 13: classes, put on from outside and from inside a pane
+CLASSES = """[[style.match]]
+class = "error"
+bar = "#aa0000"
+bar_label = "! error"
+[[style.match]]
+class = "build"
+bar_label = "building"
+[[style.match]]
+class = "hot"
+icon = "*"
+label = "{icon} {name}"
+[[style.match]]
+state = "zoomed"
+label = "{name} (zoom)"
+"""
+r = Rook(tag="classes", conf=CLASSES, cols=100, rows=16)
+try:
+    r.keys("`o", settle=0.6)  # into main
+    bar = lambda: r.lines()[-1]
+    ground = lambda: r.screen.buffer[r.rows - 1][60].bg
+    plain = ground()
+    out = r.rook("class", "main", "+error")
+    r.settle(0.6)
+    r.snap("13-class-error")
+    check("a class put on from outside matches a rule: the bar goes red", ground() == "aa0000" and bar().strip().startswith("! error"), (ground(), repr(bar()[:20])))
+    check("rook class answers with what is on it now", out.split() == ["error"], out)
+    check("and lists it when asked", r.rook("class", "main").split() == ["error"])
+    r.rook("class", "main", "-error")
+    r.settle(0.6)
+    check("taken off, the look goes back", ground() == plain and "error" not in bar(), (ground(), repr(bar()[:20])))
+    r.rook("class", "main", "+hot", "--ttl", "1s")
+    r.settle(0.5)
+    check("a class with a ttl is on…", top(r).strip().startswith("* main"), repr(top(r)[:12]))
+    r.settle(1.4)
+    check("…and lapses on its own, and the glass shows it", not top(r).strip().startswith("*") and r.rook("class", "main") == "", (repr(top(r)[:12]), r.rook("class", "main")))
+    # a program flags its own pane: the escape sequence, base64'd
+    pid = r.current()["windows"][0]["focus"]
+    r.rook("run", str(pid), "printf '\\033]1337;SetUserVar=rook_class=%s\\007' $(printf +build | base64)")
+    r.settle(1.0)
+    r.snap("13-class-in-pane")
+    pane_classes = [c["name"] for c in r.pane(pid)["classes"]]
+    check("a program sets a class on its own pane with OSC 1337 SetUserVar", pane_classes == ["build"], pane_classes)
+    check("and a pane's class is its workspace's to match", bar().strip().startswith("building"), repr(bar()[:20]))
+    code, out = r.front("style", "--json")
+    check("rook style lists the classes among the facts", code == 0 and json.loads(out)["facts"]["classes"] == ["build"], out[:200])
+    r.rook("class", str(pid), "-build")
+    r.settle(0.6)
+    check("a pane is a target by its id", "building" not in bar(), repr(bar()[:20]))
+    r.keys("`z", settle=0.8)
+    check("rook's own states match: zoomed", "(zoom)" in top(r), repr(top(r)[:24]))
+    r.keys("`z", settle=0.8)
+    check("…and stop when it stops", "(zoom)" not in top(r), repr(top(r)[:24]))
+    said = r.rook("class", "main", "+no/slash")
+    check("a class that is not a word is refused, and says so", "letters, digits" in said, said)
+finally:
+    r.close()
+
 # ---- 09: the prefix table is the config's
 r = Rook(tag="keys", conf='[keys]\ne = "popup 50x50 cat"\n"=" = "split-right"\nx = ""\n')
 try:

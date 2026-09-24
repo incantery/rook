@@ -6,7 +6,7 @@ const ptypkg = @import("pty.zig");
 
 /// `attach` carries [cols u16][rows u16], then optionally where the
 /// glass lands (client.attach). `resize` carries the geometry alone.
-pub const c2s = enum(u8) { attach = 1, stdin = 2, resize = 3, detach = 4, stats = 5, shutdown = 6, nav = 7, popup = 8, session = 9, blocks = 10, attach_block = 11, block_cmd = 12, state = 13, capture = 14, side = 15, input = 16, pane_cmd = 17, resume_cmd = 18, own = 19, notify = 20, config = 21 };
+pub const c2s = enum(u8) { attach = 1, stdin = 2, resize = 3, detach = 4, stats = 5, shutdown = 6, nav = 7, popup = 8, session = 9, blocks = 10, attach_block = 11, block_cmd = 12, state = 13, capture = 14, side = 15, input = 16, pane_cmd = 17, resume_cmd = 18, own = 19, notify = 20, config = 21, class = 22 };
 pub const s2c = enum(u8) { draw = 1, exit = 2, stats_text = 3, blocks_text = 4, block_created = 5, state_json = 6, ack = 7, text = 8 };
 
 pub fn write(fd: ptypkg.fd_t, kind: u8, payload: []const u8) !void {

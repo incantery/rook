@@ -59,7 +59,27 @@ pub const When = struct {
     repo: []const u8 = "",
     branch: []const u8 = "",
     program: []const u8 = "",
+    /// a class on the workspace or on any pane in it (a glob)
+    class: []const u8 = "",
+    /// one of rook's own states of it (`State`)
+    state: []const u8 = "",
 };
+
+/// What rook knows about a workspace for itself, as a rule can ask it.
+pub const State = enum {
+    /// a pane in it has output nobody has seen
+    unread,
+    /// an agent in it is producing
+    working,
+    /// its current window is zoomed
+    zoomed,
+    /// copy mode is up
+    copy,
+    /// a popup is up over it
+    popup,
+};
+
+pub const States = std.EnumSet(State);
 
 pub const Rule = struct { when: When = .{}, style: Props = .{} };
 
@@ -118,6 +138,9 @@ pub const Facts = struct {
     program: []const u8 = "",
     /// $HOME, for `~` in a `dir` matcher
     home_dir: []const u8 = "",
+    /// the classes on the workspace and on every pane in it
+    classes: []const []const u8 = &.{},
+    states: States = .{},
 };
 
 /// Does a rule's `when` hold for these facts? Every condition said must.
@@ -127,6 +150,17 @@ pub fn matches(w: When, f: Facts) bool {
     if (w.repo.len > 0 and !glob(w.repo, f.repo)) return false;
     if (w.branch.len > 0 and !glob(w.branch, f.branch)) return false;
     if (w.program.len > 0 and !glob(w.program, f.program)) return false;
+    if (w.class.len > 0) {
+        var any = false;
+        for (f.classes) |c| {
+            if (glob(w.class, c)) any = true;
+        }
+        if (!any) return false;
+    }
+    if (w.state.len > 0) {
+        const st = std.meta.stringToEnum(State, w.state) orelse return false;
+        if (!f.states.contains(st)) return false;
+    }
     if (w.dir.len > 0) {
         var buf: [1024]u8 = undefined;
         const pat = if (std.mem.startsWith(u8, w.dir, "~") and f.home_dir.len > 0)
@@ -562,6 +596,28 @@ test "the cascade: rook's rules, the base, then matches in order" {
     try std.testing.expectEqual(t.accent, t.chip_bg); // chip_bg = "accent", after the accent
     try std.testing.expect(!std.meta.eql(t.chrome, ui.Theme.init(chromepkg.mauve, .unicode).chrome)); // tinted
     try std.testing.expectEqual(Cap.round, t.chip_cap);
+}
+
+test "classes and states match" {
+    const doc =
+        \\{"style":{"rules":[
+        \\{"when":{"class":"err*"},"style":{"bar":"#aa0000"}},
+        \\{"when":{"state":"working"},"style":{"bar_label":"working"}},
+        \\{"when":{"class":"error","state":"unread"},"style":{"icon":"!"}}]}}
+    ;
+    var sheet = try Sheet.parse(std.testing.allocator, doc);
+    defer sheet.deinit();
+    const none = resolve(&sheet, .{});
+    try std.testing.expect(none.props.bar == null and none.props.bar_label == null);
+    const cls = [_][]const u8{ "loud", "error" };
+    var st: States = .{};
+    st.insert(.working);
+    const r = resolve(&sheet, .{ .classes = &cls, .states = st });
+    try std.testing.expectEqualStrings("#aa0000", r.props.bar.?);
+    try std.testing.expectEqualStrings("working", r.props.bar_label.?);
+    try std.testing.expect(r.props.icon == null); // error, but nothing unread
+    st.insert(.unread);
+    try std.testing.expectEqualStrings("!", resolve(&sheet, .{ .classes = &cls, .states = st }).props.icon.?);
 }
 
 test "a colour said outright is not tinted over" {

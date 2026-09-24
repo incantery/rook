@@ -6,6 +6,7 @@
 const std = @import("std");
 const vt = @import("ghostty-vt");
 const ptypkg = @import("pty.zig");
+const classespkg = @import("classes.zig");
 
 // Zig 0.16 retired std.Thread.Mutex; os_unfair_lock is the mac-native
 // primitive the pre-tmux app stood on.
@@ -123,9 +124,14 @@ pub const Events = struct {
     prog_pct: i16 = -1,
     title: bool = false,
     pwd: bool = false,
+    /// class ops the program sent about itself (OSC 1337 SetUserVar=
+    /// rook_class, classes.zig), decoded, in the order they came
+    class: bool = false,
+    class_ops: [256]u8 = @splat(0),
+    class_ops_len: usize = 0,
 
     pub fn any(self: *const Events) bool {
-        return self.bell or self.notif or self.progress or self.title or self.pwd;
+        return self.bell or self.notif or self.progress or self.title or self.pwd or self.class;
     }
 };
 
@@ -174,6 +180,11 @@ pub const Pane = struct {
     /// (under lock) until the server takes them. `ev_pending` is the
     /// cheap check the server makes every turn.
     ev: Events = .{},
+    /// Names anyone put on this pane (`rook class`, or the program
+    /// itself); the server's, never the reader thread's.
+    classes: classespkg.Set = .{},
+    /// the reader's watch for SetUserVar=rook_class, across reads
+    class_scan: classespkg.Scanner = .{},
     ev_pending: std.atomic.Value(bool) = .init(false),
     /// Server thread only, from here down: what the feed publishes
     /// about the signals, and the unread channel they feed.
@@ -393,6 +404,20 @@ pub const Pane = struct {
         self.ev_pending.store(true, .release);
     }
 
+    /// A SetUserVar=rook_class the reader found; lock held.
+    fn noteClassOps(self: *Pane, raw: []const u8) void {
+        var db: [256]u8 = undefined;
+        const ops = classespkg.decodeOps(raw, &db);
+        const at = self.ev.class_ops_len;
+        const sep: usize = if (at > 0) 1 else 0;
+        if (at + sep + ops.len > self.ev.class_ops.len) return;
+        if (sep == 1) self.ev.class_ops[at] = ' ';
+        @memcpy(self.ev.class_ops[at + sep ..][0..ops.len], ops);
+        self.ev.class_ops_len = at + sep + ops.len;
+        self.ev.class = true;
+        self.ev_pending.store(true, .release);
+    }
+
     fn effectPwd(h: *Handler) void {
         const self = fromHandler(h);
         self.ev.pwd = true;
@@ -485,6 +510,9 @@ pub const Pane = struct {
             if (total > 0) {
                 self.last_output_ms.store(epochMs(), .release);
                 os_unfair_lock_lock(&self.lock);
+                // ghostty parses SetUserVar and drops it: the class a
+                // program sets on itself is looked for here
+                self.class_scan.scan(buf[0..total], self, noteClassOps);
                 stream.nextSlice(buf[0..total]);
                 // tee the raw batch for block clients; 2MB behind
                 // means the drain stalled — drop and let the server

@@ -32,6 +32,7 @@ const std = @import("std");
 const server = @import("server.zig");
 const chrome = @import("chrome.zig");
 const client = @import("client.zig");
+const classes = @import("classes.zig");
 const ptypkg = @import("pty.zig");
 
 const rename_usage =
@@ -87,6 +88,7 @@ test {
     _ = @import("keys.zig");
     _ = @import("sheet.zig");
     _ = @import("style.zig");
+    _ = @import("classes.zig");
     _ = @import("chrome.zig");
     _ = @import("companion.zig");
     _ = @import("ui.zig");
@@ -484,6 +486,46 @@ pub fn main(init: std.process.Init) !void {
             try joined.appendSlice(gpa, std.mem.span(a));
         }
         try client.notify(path, mark, joined.items);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "class")) {
+        // rook class [<target>] [+name|-name|-*]... [--ttl 30s]
+        // the target is a pane id, a workspace name, or `.` for the one
+        // on the glass; unsaid, it is this pane (inside rook) or `.`
+        var target_buf: [96]u8 = undefined;
+        var target: []const u8 = ".";
+        if (getenv("ROOK_MUX_PANE")) |id| target = std.fmt.bufPrint(&target_buf, "p:{s}", .{std.mem.span(id)}) catch ".";
+        var ttl_ms: i64 = 0;
+        var ops: std.ArrayList(u8) = .empty;
+        defer ops.deinit(gpa);
+        var i: usize = 2;
+        var first = true;
+        while (i < argv.len) : (i += 1) {
+            const a = std.mem.span(argv[i]);
+            if (std.mem.eql(u8, a, "--ttl") and i + 1 < argv.len) {
+                i += 1;
+                ttl_ms = classes.parseTtl(std.mem.span(argv[i])) orelse {
+                    std.debug.print("rook: class: a ttl is 30s, 5m, 2h, 1500ms\n", .{});
+                    return error.BadArgs;
+                };
+                continue;
+            }
+            if (first and a.len > 0 and a[0] != '+' and a[0] != '-') {
+                const is_id = std.fmt.parseInt(u32, a, 10) catch null;
+                target = if (std.mem.eql(u8, a, "."))
+                    "."
+                else if (is_id != null)
+                    (std.fmt.bufPrint(&target_buf, "p:{s}", .{a}) catch ".")
+                else
+                    (std.fmt.bufPrint(&target_buf, "s:{s}", .{a}) catch ".");
+                first = false;
+                continue;
+            }
+            first = false;
+            if (ops.items.len > 0) try ops.append(gpa, ' ');
+            try ops.appendSlice(gpa, a);
+        }
+        try client.class(churn_gpa, path, target, ttl_ms, ops.items);
         return;
     }
     if (std.mem.eql(u8, cmd, "reload")) {

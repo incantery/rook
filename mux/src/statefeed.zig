@@ -72,6 +72,19 @@ fn foundRow(gpa: std.mem.Allocator, out: *std.ArrayList(u8), it: anytype, origin
 }
 
 /// Build the snapshot into `out` (cleared first).
+/// `,"classes":[{"name":"error","until":0}]` — `until` is the epoch
+/// ms it lapses at, 0 for never.
+fn classesJson(gpa: std.mem.Allocator, out: *std.ArrayList(u8), set: anytype) void {
+    out.appendSlice(gpa, ",\"classes\":[") catch return;
+    for (set.slice(), 0..) |*c, i| {
+        if (i > 0) out.append(gpa, ',') catch return;
+        out.appendSlice(gpa, "{\"name\":") catch return;
+        str(gpa, out, c.slice());
+        out.print(gpa, ",\"until\":{d}}}", .{c.until_ms}) catch return;
+    }
+    out.append(gpa, ']') catch return;
+}
+
 fn styleJson(sv: anytype, out: *std.ArrayList(u8)) void {
     const gpa = sv.gpa;
     _ = sv.refreshFacts();
@@ -83,6 +96,20 @@ fn styleJson(sv: anytype, out: *std.ArrayList(u8)) void {
         out.appendSlice(gpa, ",\"" ++ k ++ "\":") catch return;
         str(gpa, out, @field(f, k));
     }
+    out.appendSlice(gpa, ",\"classes\":[") catch return;
+    for (f.classes, 0..) |c, ci| {
+        if (ci > 0) out.append(gpa, ',') catch return;
+        str(gpa, out, c);
+    }
+    out.appendSlice(gpa, "],\"states\":[") catch return;
+    var sfirst = true;
+    var sit = f.states.iterator();
+    while (sit.next()) |st| {
+        if (!sfirst) out.append(gpa, ',') catch return;
+        sfirst = false;
+        str(gpa, out, @tagName(st));
+    }
+    out.append(gpa, ']') catch return;
     out.appendSlice(gpa, "},\"rules\":[") catch return;
     var i: usize = 0;
     while (i < r.n_rules) : (i += 1) {
@@ -226,7 +253,9 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
         str(gpa, out, sn.label());
         // home is here like any workspace, flagged: readers that list
         // the spaces leave it out
-        out.print(gpa, ",\"home\":{s},\"current\":{s},\"windows\":[", .{ boolStr(sn.home), boolStr(si == sv.cur_sess) }) catch return;
+        out.print(gpa, ",\"home\":{s},\"current\":{s}", .{ boolStr(sn.home), boolStr(si == sv.cur_sess) }) catch return;
+        classesJson(gpa, out, &sn.classes);
+        out.appendSlice(gpa, ",\"windows\":[") catch return;
         for (sn.windows.items, 0..) |w, wi| {
             if (wi > 0) out.append(gpa, ',') catch return;
             // `name` is the tab's name: minted once — a person's
@@ -269,7 +298,9 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
         if (i > 0) out.append(gpa, ',') catch return;
         var nb: [64]u8 = undefined;
         var cb: [1024]u8 = undefined;
-        out.print(gpa, "{{\"id\":{d},\"pid\":{d},\"program\":", .{ p.id, p.pid }) catch return;
+        out.print(gpa, "{{\"id\":{d},\"pid\":{d}", .{ p.id, p.pid }) catch return;
+        classesJson(gpa, out, &p.classes);
+        out.appendSlice(gpa, ",\"program\":") catch return;
         str(gpa, out, if (!form.drift) "" else p.fgName(&nb) orelse "shell");
         out.appendSlice(gpa, ",\"cwd\":") catch return;
         str(gpa, out, if (!form.drift) "" else if (p.fgCwd(&cb)) |c| c else "");

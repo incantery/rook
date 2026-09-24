@@ -307,6 +307,43 @@ pub fn reload(gpa: std.mem.Allocator, sock_path: []const u8) !void {
     return error.Timeout;
 }
 
+/// `rook class`: put classes on, take them off, or list them. The
+/// server answers `ok\t<classes now>`, which is printed one a line.
+pub fn class(gpa: std.mem.Allocator, sock_path: []const u8, target: []const u8, ttl_ms: i64, ops: []const u8) !void {
+    const sock = ptypkg.unixConnect(sock_path);
+    if (sock < 0) return error.ConnectFailed;
+    defer ptypkg.closeFd(sock);
+    var pb: [1024]u8 = undefined;
+    const payload = try std.fmt.bufPrint(&pb, "{s}\x1f{d}\x1f{s}", .{ target, ttl_ms, ops });
+    try proto.write(sock, @intFromEnum(proto.c2s.class), payload);
+    _ = ptypkg.setNonblockFd(sock);
+    var reader = proto.Reader.init(gpa);
+    defer reader.deinit();
+    var fds = [1]ptypkg.Pollfd{.{ .fd = sock, .events = ptypkg.POLLIN }};
+    var waited: usize = 0;
+    while (waited < 2000) : (waited += 100) {
+        _ = ptypkg.pollMany(&fds, 1, 100);
+        if (!reader.fill(sock)) return error.ServerGone;
+        while (reader.next()) |msg| {
+            defer reader.consume();
+            if (msg.kind != @intFromEnum(proto.s2c.text)) continue;
+            if (std.mem.startsWith(u8, msg.payload, "ok\t")) {
+                var it = std.mem.tokenizeScalar(u8, msg.payload[3..], ' ');
+                while (it.next()) |c| {
+                    _ = ptypkg.writeAllFd(1, c);
+                    _ = ptypkg.writeAllFd(1, "\n");
+                }
+                return;
+            }
+            _ = ptypkg.writeAllFd(2, "rook: class: ");
+            _ = ptypkg.writeAllFd(2, msg.payload);
+            _ = ptypkg.writeAllFd(2, "\n");
+            return error.ClassRefused;
+        }
+    }
+    return error.Timeout;
+}
+
 /// One capture request on an open socket; the text comes back
 /// allocated with the reader's allocator. `exit` from the server is
 /// its way of saying "no such pane", printed and turned into an error.
