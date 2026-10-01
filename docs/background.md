@@ -29,12 +29,22 @@ that follows a worktree, or says what is listening where.
   otherwise; a plain pane sent back takes the workspace it was in. So
   the foreground key in a workspace brings *its* group, and `rook
   close <workspace>` — which is what removing a worktree runs — hangs
-  its group up with it. A workspace whose last pane merely exited does
+  its group up with it, wherever its panes are: in the background, or
+  brought out into another workspace. A workspace whose last pane merely exited does
   not: only a close on purpose takes the services.
 - **Hidden from the layout, not from you.** The calm bar's `bg` module
   counts what is back there and what has died (`bg 3 · ✕ 1 exited`);
   `rook bg` is the table; `rook blocks` lists them as `bg:<group>`; the
   state feed says `background`, `group` and `service` on every pane.
+- **A group's name is a target**, so it has to be sayable as one: up
+  to 32 bytes, no tab or newline, not a number (that is a pane), not
+  `.`, not starting with `-`. `bg run` and `bg hide -g` refuse the
+  rest. A group that took such a name from its workspace or its
+  directory (a workspace called `5`) is said outright: `rook bg show
+  group:5`.
+- **Rook stays up for what it is keeping.** The last window closing
+  ends the server — unless something is in the background, and then
+  home is seeded and shown instead.
 - **Rook does not supervise.** Nothing is restarted and nothing is
   probed by the engine. A service that exits is *kept* — in the
   background or in the window it was showing in — and said once on
@@ -44,19 +54,34 @@ that follows a worktree, or says what is listening where.
 - **Health is asked of the machine, by the front door.** `rook bg`
   walks each pane's process tree for listening TCP ports (`lsof`), and
   a service that promised a port (`--port`) is `starting` until
-  something answers on it and `healthy` after. No promise, no claim:
-  it is `running`. `--port auto` picks a free port, promises it, and
+  something answers on it and `healthy` after — when it is the
+  pane's own processes listening. A promised port some other process
+  holds is `conflict`, and `bg wait` fails on it at once. A port that
+  answers and that no process of yours can be seen holding (a
+  container's) is taken as the service's. A service that hands its
+  listener to a process that leaves its tree (a daemon) reads
+  `conflict` for the same reason: the port is not the pane's any more. No promise, no claim: it is
+  `running`. `--port auto` picks a free port, promises it, and
   exports it to the command as `$PORT`.
 - **Size.** A pane in the background keeps the size it last had, and
   is resized by the window it comes into.
 - **The unread channel leaves it alone.** A background pane that rings
   a bell is not fetched into your window by `jump`.
 - **Rook always has something to show.** The last pane placed anywhere
-  is refused; home, emptied, starts over as it does when closed.
+  is refused, and so is a workspace's last window pane while it has
+  pinned panes; a group that is every pane there is goes back whole or
+  not at all. Home, emptied, starts over as it does when closed.
+- **A service that has exited is a zombie process until its pane is
+  closed** — rook keeps the pid so nothing else can be mistaken for it
+  — and a service that forks a daemon and exits has left rook: it
+  reads `exited`, and nothing here stops the daemon.
 - **It is saved.** The restore file has a `bg group\tby\tport\tcwd\t
   command` line per pane: a service is run again, in the background —
   wherever it was — and a plain pane is a shell there again. A dead
-  service is not saved.
+  service is not saved. A command of several lines is one line there,
+  its newlines escaped; a directory whose name has a tab or a newline
+  in it is not written, and the pane comes back where the server
+  started.
 
 ## The verbs
 
@@ -90,7 +115,7 @@ the groups, for a popup: `B = "popup rook bg pick"`.
 `rook bg --json` rows: `id`, `pid`, `group`, `place` (`bg`, `window`,
 `pin`), `workspace`, `window`, `program`, `command`, `by`, `port`,
 `cwd`, `bornMs`, `exited`, `exitMs`, `lastOutputMs`, `ports`, `health`
-(`starting`, `healthy`, `running`, `exited`).
+(`starting`, `healthy`, `conflict`, `running`, `exited`).
 
 The state feed (`rook watch`) is the push channel: a service exiting
 is a snapshot with `panes[].exited` true and `service.exitMs` set, and
@@ -102,4 +127,7 @@ right on the first line it gets — there is no event to have missed.
 
 `scripts/bg-fixture.py` drives a sandboxed engine through a real glass:
 run, health and ports, show and hide, the keys, the last pane, death
-and kill, closing a workspace, restore, `--port auto`.
+and kill, closing a workspace, restore, `--port auto` — and what
+stress testing broke: labels, a stolen port, eighty services, a group
+shown elsewhere, a dead pane, the whole group or none, a pin, the last
+window, a restore file past 64 KB.

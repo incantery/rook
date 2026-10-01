@@ -154,6 +154,10 @@ pub const Pane = struct {
     /// liveness that a worktree scan cannot see (an agent thinking
     /// writes no files; a long test run is not stale).
     last_output_ms: std.atomic.Value(i64) = .init(0),
+    /// Wall-clock ms something was last typed into this pane through
+    /// the front door (`rook send/run/key`), 0 if never: with the last
+    /// output, what a shot waits to go quiet.
+    last_input_ms: i64 = 0,
     cols: u16,
     rows: u16,
     /// Server's self-pipe write end: one byte per parsed batch wakes
@@ -214,6 +218,10 @@ pub const Pane = struct {
     back_cmd: []u8 = &.{},
     resume_prog: [64]u8 = @splat(0),
     resume_prog_len: usize = 0,
+    /// A resume restored from the state file and not yet tied to the
+    /// program it starts (`setResumeRestored`).
+    resume_unbound: bool = false,
+    resume_bind_ms: i64 = 0,
     /// A command to type into the shell once it is up — a restored
     /// pane's resume — and the deadline to type it by even if the
     /// shell has said nothing. Owned; freed once typed.
@@ -265,8 +273,28 @@ pub const Pane = struct {
     }
 
     pub fn setGroup(self: *Pane, name: []const u8) void {
-        self.group_len = @min(name.len, self.group.len);
-        @memcpy(self.group[0..self.group_len], name[0..self.group_len]);
+        self.group_len = label(&self.group, name);
+    }
+
+    pub fn setBy(self: *Pane, who: []const u8) void {
+        self.by_len = label(&self.by, who);
+    }
+
+    /// A label as it is kept: cut to fit on a codepoint boundary, and
+    /// with no control byte in it — it is written into the restore
+    /// file and the wire, a line and a tab-separated field at a time.
+    fn label(into: *[32]u8, said: []const u8) usize {
+        var n: usize = @min(said.len, into.len);
+        // do not end inside a codepoint
+        while (n > 0 and n < said.len and said[n] & 0xc0 == 0x80) n -= 1;
+        for (said[0..n], 0..) |ch, i| into[i] = if (ch < 0x20 or ch == 0x7f) '_' else ch;
+        // it is published as JSON: bytes that are not UTF-8 are not kept
+        if (!std.unicode.utf8ValidateSlice(into[0..n])) {
+            for (into[0..n]) |*ch| {
+                if (ch.* >= 0x80) ch.* = '_';
+            }
+        }
+        return n;
     }
 
     pub fn ownerName(self: *const Pane) []const u8 {
@@ -708,6 +736,7 @@ pub const Pane = struct {
     /// kernel buffer, and the overflow waits here until POLLOUT. A
     /// pane more than 16MB behind is not coming back; drop input.
     pub fn write(self: *Pane, bytes: []const u8) void {
+        if (self.exited.load(.acquire)) return; // nobody is reading
         const backlog = self.in_buf.items.len - self.in_off;
         if (backlog > 16 * 1024 * 1024) return;
         self.in_buf.appendSlice(self.gpa, bytes) catch return;
@@ -799,6 +828,7 @@ pub const Pane = struct {
     /// foreground program is written down beside it, so the promise
     /// dies with the program that made it.
     pub fn setResume(self: *Pane, cmd: []const u8) void {
+        self.resume_unbound = false;
         if (self.back_cmd.len > 0) self.gpa.free(self.back_cmd);
         self.back_cmd = &.{};
         self.resume_prog_len = 0;
@@ -816,6 +846,15 @@ pub const Pane = struct {
     /// saves, and what the feed publishes.
     pub fn resumeLive(self: *Pane) []const u8 {
         if (self.back_cmd.len == 0) return "";
+        if (self.resume_unbound) {
+            if (self.resume_bind_ms == 0 or epochMs() < self.resume_bind_ms) return self.back_cmd;
+            self.resume_unbound = false;
+            var bb: [64]u8 = undefined;
+            if (self.fgName(&bb)) |fg| {
+                @memcpy(self.resume_prog[0..fg.len], fg);
+                self.resume_prog_len = fg.len;
+            }
+        }
         if (self.resume_prog_len == 0) return self.back_cmd;
         var nb: [64]u8 = undefined;
         const fg = self.fgName(&nb) orelse return "";
@@ -835,12 +874,31 @@ pub const Pane = struct {
     /// up) or the deadline passed. True when it was typed.
     pub fn bootIfReady(self: *Pane, now: i64) bool {
         if (self.boot.len == 0) return false;
-        if (self.last_output_ms.load(.acquire) == 0 and now < self.boot_by_ms) return false;
+        // The prompt is up when the shell has spoken and then gone
+        // quiet: typed at its first byte, the command lands before the
+        // shell's line editor is reading and is thrown away.
+        const said = self.last_output_ms.load(.acquire);
+        const ready = said != 0 and epochMs() - said >= 200;
+        if (!ready and now < self.boot_by_ms) return false;
         self.write(self.boot);
         self.write("\r");
         self.gpa.free(self.boot);
         self.boot = &.{};
+        // the resume it restored is the program this starts: named
+        // once it has had a moment to be the one in front
+        if (self.resume_unbound) self.resume_bind_ms = epochMs() + 2000;
         return true;
+    }
+
+    /// A restored pane's resume: the promise as it was saved, before
+    /// the program that made it is running again. It is bound to that
+    /// program a moment after the command is typed (`bootIfReady`);
+    /// until then it stands.
+    pub fn setResumeRestored(self: *Pane, cmd: []const u8) void {
+        self.setResume(cmd);
+        self.resume_prog_len = 0;
+        self.resume_unbound = self.back_cmd.len > 0;
+        self.resume_bind_ms = 0;
     }
 
     pub fn deinit(self: *Pane) void {

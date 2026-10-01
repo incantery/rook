@@ -75,6 +75,27 @@ const usage = `rook — the multiplexer, owned
   rook state | watch      the state feed: one snapshot, or one per change
   rook read <id> [-n N]   a pane as plain text: the viewport, or its last N lines
                           (capture is the same verb, viewport only)
+  rook shot [<id>] [--ansi|--json|--png FILE] [--size WxH] [--settle MS] [--timeout MS]
+                          what is on the glass — tabs, panes, seams, the bar — as text,
+                          text with its colours, runs of styled cells as JSON, or a
+                          picture; with an id, that pane's own grid. --size is the
+                          glass of a server no terminal is attached to. Taken once
+                          what it shows has been still for --settle (80), or at
+                          --timeout (1000) regardless (docs/shot.md)
+  rook find [<id>] <text> | --regex RE  [--row N] [--json]
+                          where text is on the screen: cell, width, and how it is drawn
+  rook expect [<id>] <text> [--row N] [--fg #rrggbb] [--bg …] [--bold] [--inverse]
+              [--no-text S] [--line-bg …] [--cursor X,Y] [--count N] [--timeout MS]
+                          look until it holds, or the timeout (3000): status 0, or 1 with
+                          the reason and the screen. The assertion a test is made of
+  rook click [<id>] <text> | X,Y  [--right] [--double]
+                          click it, in a program that takes the mouse
+  rook play start [NAME] [--size WxH] [--cwd DIR] [-- <cmd...>]
+                          a program under test: a server of its own with no terminal,
+                          the program in its pane; prints the session's name
+  rook play -s NAME <verb…>   any rook verb, on that session (or export ROOK_PLAY=NAME);
+                          . is the pane under test. ls | stop NAME | trace NAME | attach NAME
+                          (docs/play.md)
   rook send|run|key <id> …  type into a pane (run adds Enter; key names keys)
   rook wait <id> --match S | --quiet MS [--timeout MS]
   rook split|window <id> [--down] [--focus] [--cwd DIR]
@@ -123,7 +144,7 @@ var muxVerbs = map[string]bool{
 	"popup": true, "notify": true, "class": true, "ls": true, "switch": true, "new": true, "close": true,
 	"blocks": true, "raw": true,
 	// the state feed (out) and the side rail's model (in)
-	"state": true, "watch": true, "capture": true, "side": true,
+	"state": true, "watch": true, "capture": true, "side": true, "shot": true,
 	// a pane, by id: read it, type into it, wait on it, open beside it
 	"read": true, "send": true, "run": true, "key": true, "wait": true,
 	"split": true, "window": true, "focus": true, "jump": true, "close-pane": true,
@@ -140,6 +161,15 @@ func main() {
 		execMux(nil)
 	}
 	var err error
+	// $ROOK_PLAY names a `rook play` session: every verb is that
+	// session's, without saying so each time.
+	if name := os.Getenv("ROOK_PLAY"); name != "" && args[0] != "play" && args[0] != "help" && args[0] != "--help" && args[0] != "version" && args[0] != "--skill" && args[0] != "skill" {
+		if err := playDo(name, args); err != nil {
+			fmt.Fprintln(os.Stderr, "rook:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	switch {
 	case args[0] == ".":
 		// The space for this directory: named the way `rook new` would
@@ -175,6 +205,16 @@ func main() {
 		err = runStyle(args[1:])
 	case args[0] == "bg":
 		err = runBg(args[1:])
+	case args[0] == "shot":
+		err = runShot(args[1:])
+	case args[0] == "play":
+		err = runPlay(args[1:])
+	case args[0] == "find":
+		err = runFind(args[1:])
+	case args[0] == "expect":
+		err = runExpect(args[1:])
+	case args[0] == "click":
+		err = runClick(args[1:])
 	case muxVerbs[args[0]]:
 		execMux(args)
 	default:

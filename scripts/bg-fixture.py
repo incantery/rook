@@ -19,6 +19,13 @@ a pty decoded with pyte, and asserts on the glass, the state feed and
   07-close     closing a workspace takes its group with it
   08-restore   a service is run again, in the background, after a restart
   09-auto      `--port auto` hands out a port as $PORT
+  10-hard      what stress testing broke: labels, a stolen port, eighty
+               services, close and a group shown elsewhere, a dead
+               pane, the whole group or none, a pin, the last window
+  11-big       a restore file past 64KB
+  12-round2    a directory named to forge restore lines, a command of
+               several lines, group:NAME, a 160KB state snapshot, a pin
+               whose workspace lost its last window pane
 
 Exit status 1 when an assertion fails. Needs `pip install pyte`.
 """
@@ -305,6 +312,181 @@ try:
     sid = json.loads(out)["pane"] if code == 0 else None
     row = until(lambda: next((x for x in r.bg() if x["id"] == sid and x["health"] == "healthy"), None))
     check("--port auto hands a free port to the service as $PORT", row is not None and row["port"] > 0 and row["port"] in row["ports"] and ("PORT=%d" % row["port"]) in err, (err, r.bg()))
+finally:
+    r.close()
+
+# ---- 10: what broke under stress, and must not again
+r = Rook(conf=SPACE, tag="hard")
+try:
+    first = r.placed()[0]
+    # labels: what cannot be said as a target, or would break the wire
+    # or the restore file, is refused when it is given
+    for bad, why in (("tab\there", "a tab"), ("line\nbreak", "a newline"), ("x" * 33, "33 bytes"),
+                     ("123", "a number"), ("-dash", "a leading dash"), (".", "a dot")):
+        code, _, err = r.front("bg", "run", "-g", bad, "--", "sleep", "5")
+        check("a group with %s is refused" % why, code == 1 and "group" in err, (code, err))
+    check("nothing was started by any of them", r.bg() == [], r.bg())
+    code, _, err = r.front("bg", "run", "--cwd", "/nonexistent/dir", "--", "pwd")
+    check("a directory that is not there is refused", code == 1 and "no directory" in err, (code, err))
+    os.makedirs(r.root + "/sub", exist_ok=True)
+    rel = r.run("-g", "rel", "--cwd", "sub", "--", "pwd; sleep 60")
+    time.sleep(0.4)
+    check("a relative --cwd is the caller's", r.front("read", str(rel))[1].strip().endswith("/sub"), r.front("read", str(rel))[1])
+    code, _, err = r.front("bg", "run", "--port", "auto")
+    check("--port auto with no command is usage, not a service", code == 1 and r.bg() == [x for x in r.bg() if x["group"] == "rel"], (code, err))
+    code, out, err = r.front("bg", "run", "-g", "own", "--", "echo", "--port", "auto")
+    own = json.loads(out)["pane"] if code == 0 else None
+    time.sleep(0.4)
+    check("a --port auto in the service's own words is the service's", own and "--port auto" in r.front("read", str(own))[1] and "PORT=" not in err, (err, r.front("read", str(own))[1]))
+    r.front("bg", "kill", "own")
+    r.front("bg", "kill", "rel")
+
+    # a port somebody else holds is not this service's health
+    held = socket.socket()
+    held.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    held.bind(("127.0.0.1", 0))
+    held.listen(1)
+    stolen = r.run("-g", "stolen", "--port", str(held.getsockname()[1]), "--", "sleep", "60")
+    row = next(x for x in r.bg() if x["id"] == stolen)
+    check("a promised port held by another process is a conflict", row["health"] == "conflict", row)
+    code, _, err = r.front("bg", "wait", "stolen", "--timeout", "3000")
+    check("and `bg wait` says so at once", code == 1 and "held by" in err, (code, err))
+    held.close()
+    r.front("bg", "kill", "stolen")
+    check("`bg wait` refuses a negative timeout", r.front("bg", "wait", "x", "--timeout", "-5")[0] == 1)
+
+    # many: a group is not capped at what a small buffer holds
+    for i in range(80):
+        r.front("bg", "run", "-g", "many", "--", "sleep", "300")
+    check("eighty services are eighty rows", len([x for x in r.bg() if x["group"] == "many"]) == 80)
+    r.front("bg", "kill", "many")
+    check("one kill takes the whole group", until(lambda: not [x for x in r.bg() if x["group"] == "many"], 15), len(r.bg()))
+
+    # close takes the group wherever its panes are
+    code, out, _ = r.front("new", "-q", "w2", r.root)
+    w2 = json.loads(out)["pane"]
+    s1 = r.run("-g", "w2", "--", "sleep", "300")
+    s2 = r.run("-g", "w2", "--", "sleep", "300")
+    r.front("bg", "show", str(s2))  # into the workspace on the glass, not w2
+    r.front("close", "w2")
+    check("closing a workspace takes its group's panes shown elsewhere too", until(lambda: r.pane(s1) is None and r.pane(s2) is None and r.pane(w2) is None), r.bg())
+
+    # a dead pane takes no typing
+    dead = r.run("-g", "dead", "--", "true")
+    until(lambda: next((x for x in r.bg() if x["id"] == dead and x["exited"]), None))
+    code, _, err = r.front("run", str(dead), "echo hi")
+    check("typing at a dead service is refused", code == 1 and "exited" in err, (code, err))
+    r.front("bg", "kill", "dead")
+
+    # a group goes back whole or not at all
+    code, out, _ = r.front("split", str(first))
+    other = json.loads(out)["pane"]
+    r.front("bg", "hide", str(first), "-g", "all")
+    r.front("bg", "show", "all")
+    r.front("bg", "hide", str(other), "-g", "all")
+    r.front("bg", "show", "all")
+    code, _, err = r.front("bg", "hide", "all")
+    check("hiding every pane there is refuses, and sends none back", code == 1 and sorted(r.placed()) == sorted([first, other]), (code, err, r.placed()))
+
+    # a workspace's last window pane stays while it has pinned panes:
+    # this crashed the server
+    r.front("focus", str(other))
+    r.keys("`P")
+    st = r.state()
+    pinned = [p for w in st["workspaces"] for p in w["pins"]]
+    check("the pin key docked a pane", len(pinned) == 1, st["workspaces"])
+    left = [x for x in (first, other) if x not in pinned][0]
+    code, _, err = r.front("bg", "hide", str(left))
+    check("the last window pane of a workspace with a pin is refused", code == 1 and "last pane" in err and r.front("state")[0] == 0, (code, err))
+    r.keys("`P")
+
+    # the last window closes with services running: rook stays up
+    svc = r.run("-g", "keep", "--", "sleep", "300")
+    for pid_ in r.placed():
+        r.front("close-pane", str(pid_))
+    alive = until(lambda: r.front("state")[0] == 0 and any(w.get("home") for w in r.state()["workspaces"]))
+    check("the last window closing does not end a server with services running", alive and r.pane(svc) is not None and not r.pane(svc)["exited"], r.front("state")[2])
+finally:
+    r.close()
+
+# ---- 11: a restore file bigger than any one buffer
+r = Rook(conf='[mux]\nstartup = "last-space"\nrestore = true\n', tag="bigrestore")
+try:
+    big = "sleep 300; : " + "z" * 4000
+    for i in range(20):
+        r.front("bg", "run", "-g", "big", "--", big)
+    time.sleep(1.5)
+    r.stop()
+    size = os.path.getsize(r.sock + ".state")
+    r.boot()
+    rows = [x for x in r.bg() if x["group"] == "big"]
+    check("a restore file past 64KB comes back whole (%d bytes)" % size, size > 70000 and len(rows) == 20 and all(x["command"] == big for x in rows), (size, len(rows), sorted(set(len(x["command"]) for x in rows))))
+finally:
+    r.close()
+
+# ---- 12: the second round of stress
+r = Rook(conf='[mux]\nstartup = "last-space"\nrestore = true\n', tag="round2")
+try:
+    first = r.placed()[0]
+    # a directory can be named anything; the restore file is lines
+    evil = os.path.join(r.root, "ev\nbg inj\t\t0\t/tmp\ttouch %s; sleep 60" % os.path.join(r.root, "INJECTED"))
+    os.makedirs(evil)
+    hostile = r.run("-g", "hostile", "--", "cd %s/ev* && exec sleep 300" % r.root)
+    multi = r.run("-g", "multi", "--", "echo one\nprintf 'a\\\\b\\n'\nsleep 300")
+    # a group named for a workspace that is a number is said outright
+    code, out, _ = r.front("new", "-q", "5", r.root)
+    five = json.loads(out)["pane"]
+    num = r.run("--", "sleep", "300", pane=five)
+    check("a group named for a numeric workspace is reached as group:5", r.pane(num).get("group") == "5" and r.front("bg", "show", "group:5")[0] == 0 and num in r.placed(), r.pane(num))
+    r.front("bg", "hide", "group:5")
+    # a long, multibyte directory name as the default group is cut on a character
+    longdir = os.path.join(r.root, "a" + "\u00e9" * 17)
+    os.makedirs(longdir)
+    p = subprocess.run([FRONT, "bg", "run", "--", "sleep", "300"], env=r.env, cwd=longdir, capture_output=True, text=True)
+    raw = subprocess.run([FRONT, "state"], env=r.env, capture_output=True).stdout
+    try:
+        raw.decode("utf-8")
+        valid = True
+    except UnicodeDecodeError:
+        valid = False
+    check("a default group cut at 32 bytes is still UTF-8 in the feed", p.returncode == 0 and valid, p.stderr)
+    # the feed, past what one read holds
+    for i in range(40):
+        r.front("bg", "run", "-g", "fat", "--", "sleep 300; : " + "y" * 4000)
+    code, out, err = r.front("state")
+    check("a state snapshot past 160KB comes back whole (%d bytes)" % len(out), code == 0 and len(out) > 160000 and json.loads(out)["pid"] > 0, (code, err[:80]))
+    r.front("bg", "kill", "fat")
+    until(lambda: not [x for x in r.bg() if x["group"] == "fat"], 15)
+    time.sleep(1.5)
+    r.stop()
+    saved = open(r.sock + ".state").read()
+    check("a directory with a newline in its name is not written into the restore file", "bg inj" not in saved and "INJECTED" not in saved, saved)
+    r.boot()
+    time.sleep(1.0)
+    check("and nothing it named ran on restart", not os.path.exists(os.path.join(r.root, "INJECTED")) and not [x for x in r.bg() if x["group"] == "inj"], r.bg())
+    back = [x for x in r.bg() if x["group"] == "multi"]
+    check("a command of several lines is saved and run again whole", len(back) == 1 and back[0]["command"] == "echo one\nprintf 'a\\\\b\\n'\nsleep 300" and not back[0]["exited"], back)
+    time.sleep(0.5)
+    check("and it ran as it was written", "one" in r.front("read", str(back[0]["id"]))[1] and "a\\b" in r.front("read", str(back[0]["id"]))[1], r.front("read", str(back[0]["id"]))[1])
+
+    # a workspace's pinned pane is not left nowhere when its last
+    # window pane closes: it becomes the window
+    code, out, _ = r.front("new", "beta", r.root)
+    b1 = json.loads(out)["pane"]
+    code, out, _ = r.front("split", str(b1), "--focus")
+    b2 = json.loads(out)["pane"]
+    r.keys("`P")
+    st = r.state()
+    beta = next(w for w in st["workspaces"] if w["name"] == "beta")
+    check("the pin key docked the focused pane", beta["pins"] == [b2], beta)
+    r.front("close-pane", str(b1))
+    ok = until(lambda: r.pane(b1) is None)
+    st = r.state()
+    beta = next((w for w in st["workspaces"] if w["name"] == "beta"), None)
+    check("its last window pane closed: the pinned pane is its window now", beta is not None and beta["pins"] == [] and b2 in r.placed(st) and r.pane(b2) is not None, beta)
+    every = set(p["id"] for p in st["panes"])
+    somewhere = set(r.placed(st)) | set(p for w in st["workspaces"] for p in w["pins"]) | set(p["id"] for p in st["panes"] if p["background"])
+    check("every pane is somewhere: a window, a rail, or the background", every == somewhere, sorted(every - somewhere))
 finally:
     r.close()
 

@@ -42,8 +42,10 @@ type bgPane struct {
 
 	// Ports are the TCP ports the pane's processes listen on.
 	Ports []int `json:"ports"`
-	// Health is exited, healthy (the promised port answers), starting
-	// (it does not yet), or running (no port was promised).
+	// Health is exited, healthy (the promised port answers, and it is
+	// this pane's own processes answering), starting (nothing answers
+	// yet), conflict (something else holds the promised port), or
+	// running (no port was promised).
 	Health string `json:"health"`
 }
 
@@ -77,43 +79,40 @@ func runBg(args []string) error {
 // as the port the service promises, and to the service as $PORT.
 func bgAutoPort(args []string) []string {
 	out := slices.Clone(args)
-	for i := 1; i+1 < len(out); i++ {
+	// rook's own options end at `--` or at the first word that is not
+	// one: past that it is the service's command line, and a `--port
+	// auto` in there is the service's
+	at, auto := len(out), -1
+	for i := 1; i < len(out); i++ {
 		if out[i] == "--" {
+			at = i + 1
 			break
 		}
-		if out[i] != "--port" || out[i+1] != "auto" {
-			continue
-		}
-		l, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "rook: bg run: no free port:", err)
-			os.Exit(1)
-		}
-		port := l.Addr().(*net.TCPAddr).Port
-		l.Close()
-		out[i+1] = strconv.Itoa(port)
-		// the command starts after the options: at `--`, else at the
-		// first word that is not one
-		at := len(out)
-		for j := 1; j < len(out); j++ {
-			if out[j] == "--" {
-				at = j + 1
-				break
-			}
-			if strings.HasPrefix(out[j], "-") {
-				j++ // its value
-				continue
-			}
-			at = j
+		if !strings.HasPrefix(out[i], "-") {
+			at = i
 			break
 		}
-		// exported in the shell the command runs under, so the command
-		// line itself can say $PORT
-		env := []string{"export PORT=" + strconv.Itoa(port) + ";"}
-		out = append(out[:at:at], append(env, out[at:]...)...)
-		fmt.Fprintf(os.Stderr, "rook: PORT=%d\n", port)
-		break
+		if out[i] == "--port" && i+1 < len(out) && out[i+1] == "auto" {
+			auto = i + 1
+		}
+		i++ // its value
 	}
+	if auto < 0 || at >= len(out) {
+		return out // no auto, or no command: the engine says which
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "rook: bg run: no free port:", err)
+		os.Exit(1)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+	out[auto] = strconv.Itoa(port)
+	// exported in the shell the command runs under, so the command
+	// line itself can say $PORT
+	env := []string{"export PORT=" + strconv.Itoa(port) + ";"}
+	out = append(out[:at:at], append(env, out[at:]...)...)
+	fmt.Fprintf(os.Stderr, "rook: PORT=%d\n", port)
 	return out
 }
 
@@ -129,6 +128,12 @@ func bgPanes() ([]bgPane, error) {
 	}
 	listening := listeners()
 	kids := children()
+	owned := map[int]bool{} // every port some process of this user listens on
+	for _, ports := range listening {
+		for _, port := range ports {
+			owned[port] = true
+		}
+	}
 	for i := range panes {
 		p := &panes[i]
 		p.Ports = []int{}
@@ -144,7 +149,7 @@ func bgPanes() ([]bgPane, error) {
 			}
 			sort.Ints(p.Ports)
 		}
-		p.Health = health(*p)
+		p.Health = health(*p, owned)
 	}
 	sort.SliceStable(panes, func(a, b int) bool {
 		if panes[a].Group != panes[b].Group {
@@ -156,13 +161,21 @@ func bgPanes() ([]bgPane, error) {
 }
 
 // health is what "running" is worth: a service that promised a port
-// is healthy when something answers on it.
-func health(p bgPane) string {
+// is healthy when something answers on it — and it is its own. A port
+// held by a process that is not in the pane's tree is a conflict, not
+// health: the service has not got the port it promised. A port that
+// answers and that nobody of this user's can be seen holding (a
+// container's, published by another user's daemon) is taken as its.
+func health(p bgPane, owned map[int]bool) string {
 	switch {
 	case p.Exited:
 		return "exited"
 	case p.Port == 0:
 		return "running"
+	case slices.Contains(p.Ports, p.Port):
+		return "healthy"
+	case owned[p.Port]:
+		return "conflict"
 	case answers(p.Port):
 		return "healthy"
 	}
@@ -321,8 +334,8 @@ func bgWhat(p bgPane) string {
 	if what == "" {
 		what = p.Program
 	}
-	if len(what) > 60 {
-		what = what[:59] + "…"
+	if r := []rune(what); len(r) > 60 {
+		what = string(r[:59]) + "…"
 	}
 	return what
 }
@@ -332,31 +345,40 @@ func bgWhat(p bgPane) string {
 // `--exit` waits for the exit instead: the watch on a thing that is
 // meant to end.
 func bgWait(args []string) error {
+	const usage = "usage: rook bg wait <pane>|<group> [--exit] [--timeout MS]"
 	target, timeout, forExit := "", time.Duration(0), false
 	for i := 0; i < len(args); i++ {
 		switch {
-		case args[i] == "--timeout" && i+1 < len(args):
+		case args[i] == "--timeout":
+			if i+1 >= len(args) {
+				return fmt.Errorf("bg wait: --timeout needs milliseconds")
+			}
 			ms, err := strconv.Atoi(args[i+1])
-			if err != nil {
-				return fmt.Errorf("bg wait: --timeout is milliseconds")
+			if err != nil || ms < 0 {
+				return fmt.Errorf("bg wait: --timeout is milliseconds, 0 for no limit")
 			}
 			timeout = time.Duration(ms) * time.Millisecond
 			i++
 		case args[i] == "--exit":
 			forExit = true
 		case strings.HasPrefix(args[i], "-") && args[i] != ".":
-			return fmt.Errorf("bg wait: unknown option %s", args[i])
+			return fmt.Errorf("bg wait: unknown option %s\n%s", args[i], usage)
+		case target != "":
+			return fmt.Errorf("bg wait: one target, a pane or a group")
 		default:
 			target = args[i]
 		}
 	}
 	if target == "" {
-		return fmt.Errorf("usage: rook bg wait <pane>|<group> [--exit] [--timeout MS]")
+		return fmt.Errorf("%s", usage)
 	}
 	if target == "." {
-		target = os.Getenv("ROOK_MUX_PANE")
+		if target = os.Getenv("ROOK_MUX_PANE"); target == "" {
+			return fmt.Errorf("bg wait: not inside a rook pane, so there is no current one")
+		}
 	}
 	start := time.Now()
+	seen := false
 	for {
 		panes, err := bgPanes()
 		if err != nil {
@@ -364,13 +386,19 @@ func bgWait(args []string) error {
 		}
 		var mine []bgPane
 		for _, p := range panes {
-			if strconv.Itoa(p.ID) == target || p.Group == target {
+			if strconv.Itoa(p.ID) == target || p.Group == target || "group:"+p.Group == target {
 				mine = append(mine, p)
 			}
 		}
 		if len(mine) == 0 {
+			// waited for to end, and gone: closed on purpose is ended
+			if forExit && seen {
+				fmt.Println("[]")
+				return nil
+			}
 			return fmt.Errorf("bg wait: nothing called %s", target)
 		}
+		seen = true
 		ready, exited := 0, 0
 		for _, p := range mine {
 			switch p.Health {
@@ -378,6 +406,11 @@ func bgWait(args []string) error {
 				exited++
 			case "healthy", "running":
 				ready++
+			case "conflict":
+				if !forExit {
+					json.NewEncoder(os.Stdout).Encode(mine)
+					return fmt.Errorf("bg wait: port %d is held by something that is not pane %d", p.Port, p.ID)
+				}
 			}
 		}
 		if forExit && exited == len(mine) {
@@ -436,7 +469,7 @@ func bgPick() error {
 	for _, g := range order {
 		r := groups[g]
 		var st []string
-		for _, k := range []string{"exited", "starting", "healthy", "running"} {
+		for _, k := range []string{"exited", "conflict", "starting", "healthy", "running"} {
 			if r.states[k] > 0 {
 				st = append(st, fmt.Sprintf("%d %s", r.states[k], k))
 			}

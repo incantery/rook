@@ -23,7 +23,7 @@ func TestUsageNamesEveryEngineVerb(t *testing.T) {
 // exist: a skill that names a verb the front door refuses is worse
 // than none.
 func TestSkillTeachesRealVerbs(t *testing.T) {
-	for _, verb := range []string{"read", "send", "run", "key", "wait", "split", "window", "focus", "jump", "close-pane", "state", "watch", "blocks"} {
+	for _, verb := range []string{"read", "send", "run", "key", "wait", "split", "window", "focus", "jump", "close-pane", "state", "watch", "blocks", "shot"} {
 		if !muxVerbs[verb] {
 			t.Errorf("skill verb %q is not an engine verb", verb)
 		}

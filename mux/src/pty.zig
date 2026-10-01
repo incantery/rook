@@ -111,6 +111,7 @@ extern "c" fn tcgetpgrp(fd: fd_t) pid_t;
 extern "c" fn usleep(us: u32) c_int;
 extern "c" fn __error() *c_int;
 const EAGAIN = 35; // macOS EAGAIN == EWOULDBLOCK
+const EINTR: c_int = 4;
 
 fn errno() c_int {
     return __error().*;
@@ -509,8 +510,12 @@ pub fn writeAllFd(fd: fd_t, bytes: []const u8) bool {
             continue;
         }
         if (n < 0) {
-            // EAGAIN: wait for writability; anything else is fatal.
-            if (pollOne(fd, POLLOUT, 1000) & POLLERR != 0) return false;
+            // EAGAIN: wait for writability; anything else is fatal — a
+            // reader that went away (EPIPE) most of all: polling a
+            // dead pipe for room returns at once, forever.
+            const e = errno();
+            if (e != EAGAIN and e != EINTR) return false;
+            if (pollOne(fd, POLLOUT, 1000) & (POLLERR | POLLHUP) != 0) return false;
             continue;
         }
         return false;

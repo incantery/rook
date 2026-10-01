@@ -19,6 +19,7 @@
 //!   rook split <id> [--down] [--focus] [--cwd DIR]   a pane beside/below it
 //!   rook window <id> [--focus] [--cwd DIR]           a new window in its workspace
 //!   rook focus <id> / rook jump / rook close-pane <id>
+//!   rook shot [<pane>] [--ansi|--json] [--size WxH] [--settle MS]   the glass as a grid: what is shown
 //!   rook bg ls | run | hide | show | kill   the background: panes in no window
 //!                       (docs/background.md; the front door adds ports and `wait`)
 //!   rook resume <id> <cmd...>  how to bring the pane's program back after a restart
@@ -213,8 +214,7 @@ pub fn main(init: std.process.Init) !void {
             for (argv[3..]) |a| {
                 const name = std.mem.span(a);
                 try bytes.appendSlice(gpa, keyBytes(name) orelse {
-                    std.debug.print("rook key: unknown key {s}\n", .{name});
-                    return error.BadArgs;
+                    fail("rook key: unknown key {s}  (enter esc tab space backspace delete insert up down left right home end pageup pagedown shift-tab f1…f12 ctrl-<letter>, or one character)\n", .{name});
                 });
             }
         } else {
@@ -224,7 +224,7 @@ pub fn main(init: std.process.Init) !void {
             }
             if (std.mem.eql(u8, cmd, "run")) try bytes.append(gpa, '\r');
         }
-        try client.send(churn_gpa, path, id, bytes.items);
+        try client.send(churn_gpa, path, id, bytes.items, std.mem.eql(u8, cmd, "key"));
         return;
     }
     if (std.mem.eql(u8, cmd, "wait")) {
@@ -561,13 +561,14 @@ pub fn main(init: std.process.Init) !void {
                     i += 1;
                 } else if (std.mem.eql(u8, a, "--port") and val != null) {
                     port = val.?;
-                    _ = std.fmt.parseInt(u16, port, 10) catch {
-                        std.debug.print("rook bg run: --port is a number (or `auto`, at the front door)\n", .{});
-                        return error.BadArgs;
-                    };
+                    // `auto` reaches here only when there was no command
+                    // for the front door to hand a port to
+                    if (std.mem.eql(u8, port, "auto")) fail("usage: rook bg run [-g group] [--by who] [--port N|auto] [--cwd dir] [--] <command...>\n", .{});
+                    if (!allDigits(port) or (std.fmt.parseInt(u16, port, 10) catch null) == null) fail("rook bg run: --port is a number up to 65535, or auto\n", .{});
                     i += 1;
                 } else if (std.mem.eql(u8, a, "--cwd") and val != null) {
                     dir = val.?;
+                    if (dir.len == 0) fail("rook bg run: --cwd is a directory\n", .{});
                     i += 1;
                 } else if (std.mem.eql(u8, a, "--")) {
                     i += 1;
@@ -577,16 +578,41 @@ pub fn main(init: std.process.Init) !void {
                     return error.BadArgs;
                 } else break;
             }
+            // labels are a line and a field on the wire and in the
+            // restore file
+            for ([_][]const u8{ group, by, dir }) |word| {
+                if (std.mem.indexOfAny(u8, word, "\t\n\r") != null) fail("rook bg run: no tab or newline in a group, --by or the directory\n", .{});
+            }
+            if (group.len > 32 or by.len > 32) fail("rook bg run: a group and --by are at most 32 bytes\n", .{});
+            if (!std.unicode.utf8ValidateSlice(group) or !std.unicode.utf8ValidateSlice(by)) fail("rook bg run: a group and --by are UTF-8\n", .{});
+            if (group.len > 0 and !groupName(group)) fail("rook bg run: a group is a name: not a number, not `.`, and not starting with `-`\n", .{});
+            // the directory: the caller's own when relative, and there
+            var dir_abs: [1024]u8 = undefined;
+            if (dir.len > 0 and dir[0] != '/') {
+                var here: [1024]u8 = undefined;
+                const base: []const u8 = if (getcwd(&here, here.len)) |c| std.mem.span(c) else "";
+                dir = std.fmt.bufPrint(&dir_abs, "{s}/{s}", .{ base, dir }) catch fail("rook bg run: --cwd is too long\n", .{});
+            }
+            if (dir.len >= 1000) fail("rook bg run: --cwd is too long\n", .{});
+            if (dir.len > 0) {
+                var dz: [1024]u8 = undefined;
+                @memcpy(dz[0..dir.len], dir);
+                dz[dir.len] = 0;
+                if (access(@ptrCast(&dz), 1) != 0) fail("rook bg run: no directory to start in at {s}\n", .{dir});
+            }
             if (i >= argv.len) {
                 std.debug.print("usage: rook bg run [-g group] [--by who] [--port N|auto] [--cwd dir] [--] <command...>\n", .{});
                 return error.BadArgs;
             }
             const caller: []const u8 = if (getenv("ROOK_MUX_PANE")) |id| std.mem.span(id) else "";
             try payload.print(gpa, "r{s}\t{s}\t{s}\t{s}\t{s}\t", .{ caller, group, by, port, dir });
+            const cmd_at = payload.items.len;
             for (argv[i..], 0..) |a, j| {
                 if (j > 0) try payload.append(gpa, ' ');
                 try payload.appendSlice(gpa, std.mem.span(a));
             }
+            // it is published in the state feed, which is JSON
+            if (!std.unicode.utf8ValidateSlice(payload.items[cmd_at..])) fail("rook bg run: the command is not UTF-8\n", .{});
         } else if (std.mem.eql(u8, sub, "hide") or std.mem.eql(u8, sub, "show") or std.mem.eql(u8, sub, "kill")) {
             var target: []const u8 = "";
             var group: []const u8 = "";
@@ -607,8 +633,7 @@ pub fn main(init: std.process.Init) !void {
                 } else if (sub[0] == 's' and std.mem.eql(u8, a, "--focus")) {
                     flags |= 2;
                 } else if (a.len > 1 and a[0] == '-') {
-                    std.debug.print("rook bg {s}: unknown option {s}\n", .{ sub, a });
-                    return error.BadArgs;
+                    fail("rook bg {s}: unknown option {s}  (a group named like one is `group:{s}`)\n", .{ sub, a, a });
                 } else if (target.len == 0) {
                     target = a;
                 } else {
@@ -616,6 +641,9 @@ pub fn main(init: std.process.Init) !void {
                     return error.BadArgs;
                 }
             }
+            if (group.len > 32 or std.mem.indexOfAny(u8, group, "\t\n\r") != null) fail("rook bg hide: a group is at most 32 bytes, with no tab or newline\n", .{});
+            if (group.len > 0 and !groupName(group)) fail("rook bg hide: a group is a name: not a number, not `.`, and not starting with `-`\n", .{});
+            if (!std.unicode.utf8ValidateSlice(group)) fail("rook bg hide: a group is UTF-8\n", .{});
             // hide with nothing said is this pane
             if (target.len == 0 and sub[0] == 'h') target = ".";
             if (target.len == 0) {
@@ -623,7 +651,11 @@ pub fn main(init: std.process.Init) !void {
                 return error.BadArgs;
             }
             try payload.append(gpa, sub[0]);
-            const is_pane = std.mem.eql(u8, target, ".") or (std.fmt.parseInt(u32, target, 10) catch null) != null;
+            // `group:NAME` says a group outright: one named for a
+            // workspace called `5`, or a directory called `-x`
+            const said_group = std.mem.startsWith(u8, target, "group:");
+            if (said_group) target = target["group:".len..];
+            const is_pane = !said_group and (std.mem.eql(u8, target, ".") or allDigits(target));
             if (is_pane) {
                 try payload.print(gpa, "p:{d}", .{try paneArgLoud(target)});
             } else {
@@ -639,6 +671,64 @@ pub fn main(init: std.process.Init) !void {
             return error.BadArgs;
         }
         try client.bg(churn_gpa, path, payload.items);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "shot")) {
+        // rook shot [<pane>] [--ansi|--json] [--size WxH] [--settle MS] [--timeout MS]
+        // What is on the glass — chrome and all — as text; with a pane,
+        // that pane's own grid. --size is the glass of a server nobody
+        // is attached to. --settle is how long what is shown must have
+        // been still (no key sent, no resize, no output) before the
+        // shot is taken; --timeout is when it is taken regardless.
+        const shot_usage = "usage: rook shot [<pane>] [--ansi|--json|--png FILE] [--size WxH] [--settle MS] [--timeout MS]\n";
+        var form: u8 = 't';
+        var id: u32 = 0;
+        var cols: u16 = 0;
+        var rows: u16 = 0;
+        var settle: u32 = 80;
+        var timeout: u32 = 1000;
+        var i: usize = 2;
+        while (i < argv.len) : (i += 1) {
+            const a = std.mem.span(argv[i]);
+            const val: ?[]const u8 = if (i + 1 < argv.len) std.mem.span(argv[i + 1]) else null;
+            if (std.mem.eql(u8, a, "--ansi")) {
+                form = 'a';
+            } else if (std.mem.eql(u8, a, "--json")) {
+                form = 'j';
+            } else if (std.mem.eql(u8, a, "--text")) {
+                form = 't';
+            } else if (std.mem.eql(u8, a, "--size") and val != null) {
+                const x = std.mem.indexOfScalar(u8, val.?, 'x') orelse val.?.len;
+                if (x < val.?.len and allDigits(val.?[0..x]) and allDigits(val.?[x + 1 ..])) {
+                    cols = std.fmt.parseInt(u16, val.?[0..x], 10) catch 0;
+                    rows = std.fmt.parseInt(u16, val.?[x + 1 ..], 10) catch 0;
+                }
+                if (cols == 0 or rows == 0) fail("rook shot: --size is WxH in cells, 20x6 to 500x300\n", .{});
+                i += 1;
+            } else if ((std.mem.eql(u8, a, "--settle") or std.mem.eql(u8, a, "--timeout")) and val != null) {
+                if (!allDigits(val.?)) fail("rook shot: {s} is milliseconds\n", .{a});
+                const ms = std.fmt.parseInt(u32, val.?, 10) catch fail("rook shot: {s} is milliseconds\n", .{a});
+                if (ms > 600_000) fail("rook shot: {s} is at most 600000\n", .{a});
+                if (a[2] == 's') settle = ms else timeout = ms;
+                i += 1;
+            } else if (std.mem.eql(u8, a, "--size") or std.mem.eql(u8, a, "--settle") or std.mem.eql(u8, a, "--timeout")) {
+                fail("rook shot: {s} needs a value\n", .{a});
+            } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
+                _ = ptypkg.writeAllFd(1, shot_usage);
+                return;
+            } else if (a.len > 1 and a[0] == '-') {
+                fail("rook shot: unknown option {s}\n" ++ shot_usage, .{a});
+            } else {
+                if (id != 0) fail("rook shot: one pane, or none for the whole glass\n", .{});
+                id = paneArg(a) catch fail("rook shot: a pane is a number, or . for the one you are in\n", .{});
+                if (id == 0) fail("rook shot: no such pane\n", .{});
+            }
+        }
+        client.shot(churn_gpa, path, form, id, cols, rows, settle, timeout) catch |e| switch (e) {
+            error.ConnectFailed => fail("rook shot: no server on {s}\n", .{path}),
+            error.Timeout, error.ServerGone => fail("rook shot: the server did not answer\n", .{}),
+            else => return e,
+        };
         return;
     }
     if (std.mem.eql(u8, cmd, "reload")) {
@@ -723,6 +813,13 @@ pub fn main(init: std.process.Init) !void {
     try client.attach(churn_gpa, path, dest.items);
 }
 
+/// A mistake at the prompt: said once, on stderr, and status 1 — with
+/// no Zig error name after it.
+fn fail(comptime fmt: []const u8, args: anytype) noreturn {
+    std.debug.print(fmt, args);
+    ptypkg.exit_(1);
+}
+
 /// Fork+exec ourselves as the `server` verb, detached from this tty.
 extern "c" fn open(path: [*:0]const u8, flags: c_int, mode: c_int) c_int;
 extern "c" fn _NSGetExecutablePath(buf: [*]u8, size: *u32) c_int;
@@ -771,10 +868,38 @@ fn paneArg(arg: []const u8) !u32 {
             return error.BadArgs;
         };
     }
+    // digits and nothing else: parseInt would take `1_6` and `+17`
+    if (!allDigits(arg)) {
+        std.debug.print("rook: a pane is a number, or `.` for this one\n", .{});
+        return error.BadArgs;
+    }
     return std.fmt.parseInt(u32, arg, 10) catch {
         std.debug.print("rook: a pane is a number, or `.` for this one\n", .{});
         return error.BadArgs;
     };
+}
+
+fn allDigits(word: []const u8) bool {
+    if (word.len == 0) return false;
+    for (word) |ch| {
+        if (ch < '0' or ch > '9') return false;
+    }
+    return true;
+}
+
+/// A group's name has to be sayable as a `bg` target: a number is a
+/// pane, `.` is this pane, and a leading dash is an option.
+fn groupName(word: []const u8) bool {
+    return word.len > 0 and !allDigits(word) and word[0] != '-' and !std.mem.eql(u8, word, ".");
+}
+
+extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
+
+test "group names and pane numbers" {
+    const t = std.testing;
+    try t.expect(groupName("web") and groupName("conferences-multi") and groupName("v2"));
+    try t.expect(!groupName("123") and !groupName("-g") and !groupName(".") and !groupName(""));
+    try t.expect(allDigits("16") and !allDigits("1_6") and !allDigits("+17") and !allDigits(""));
 }
 
 /// The bytes a named key sends a program: the legacy encoding every
@@ -792,6 +917,13 @@ fn keyBytes(name: []const u8) ?[]const u8 {
         .{ .n = "home", .b = "\x1b[H" },      .{ .n = "end", .b = "\x1b[F" },
         .{ .n = "pageup", .b = "\x1b[5~" },   .{ .n = "pagedown", .b = "\x1b[6~" },
         .{ .n = "shift-tab", .b = "\x1b[Z" },
+        .{ .n = "insert", .b = "\x1b[2~" },
+        .{ .n = "f1", .b = "\x1bOP" },       .{ .n = "f2", .b = "\x1bOQ" },
+        .{ .n = "f3", .b = "\x1bOR" },       .{ .n = "f4", .b = "\x1bOS" },
+        .{ .n = "f5", .b = "\x1b[15~" },     .{ .n = "f6", .b = "\x1b[17~" },
+        .{ .n = "f7", .b = "\x1b[18~" },     .{ .n = "f8", .b = "\x1b[19~" },
+        .{ .n = "f9", .b = "\x1b[20~" },     .{ .n = "f10", .b = "\x1b[21~" },
+        .{ .n = "f11", .b = "\x1b[23~" },    .{ .n = "f12", .b = "\x1b[24~" },
     };
     for (table) |t| {
         if (std.ascii.eqlIgnoreCase(name, t.n)) return t.b;

@@ -187,6 +187,11 @@ type Tmux struct {
 
 // Path returns where the config file lives, whether or not it exists.
 func Path() (string, error) {
+	// $ROOK_CONFIG names the file outright: a server started for a test
+	// (`rook play`) reads its own, without moving anybody's config home.
+	if p := os.Getenv("ROOK_CONFIG"); p != "" {
+		return p, nil
+	}
 	dir := os.Getenv("XDG_CONFIG_HOME")
 	if dir == "" {
 		home, err := os.UserHomeDir()

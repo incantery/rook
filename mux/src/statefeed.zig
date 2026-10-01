@@ -364,6 +364,9 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
             boolStr(p.wantsMouse()),
             boolStr(p.exited.load(.acquire)),
         }) catch return;
+        // how the program asked for mouse events to be written: SGR
+        // (1006), or the original three bytes — what `rook click` sends
+        if (p.wantsMouse()) out.print(gpa, ",\"mouseFormat\":\"{s}\"", .{if (p.modeSet(.mouse_format_sgr)) "sgr" else "x10"}) catch return;
         // What the program said to its terminal, published as it was
         // said. The title and the pwd move with output, and a
         // progress bar moves with the work, so they are drift; a

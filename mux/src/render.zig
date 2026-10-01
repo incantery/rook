@@ -124,12 +124,16 @@ pub const Frame = struct {
         rows: u16,
         chrome: Chrome,
         full: bool,
+        /// start from an empty glass (inside the synchronized update,
+        /// so a terminal that honours it shows no blank frame)
+        clear: bool,
         cursor_override: ?CursorOverride,
         popup: ?struct { pane: u32, rect: layoutpkg.Rect },
     ) []const u8 {
         self.buf.clearRetainingCapacity();
         self.put(csi ++ "?2026h" ++ csi ++ "?25l");
         self.put(csi ++ "0m");
+        if (clear) self.put(csi ++ "2J");
 
         var cursor: ?struct { x: u16, y: u16 } = null;
         var cursor_style: []const u8 = csi ++ "0 q";
@@ -364,42 +368,7 @@ pub const Frame = struct {
     /// frame this file just wrote.
     pub fn plainText(self: *Frame, pane: *panepkg.Pane) []const u8 {
         self.buf.clearRetainingCapacity();
-        const rs = &pane.rs;
-        const row_cells = rs.row_data.items(.cells);
-        for (0..rs.rows) |y| {
-            const raws = row_cells[y].items(.raw);
-            const graphemes = row_cells[y].items(.grapheme);
-            const start = self.buf.items.len;
-            var trimmed = start;
-            for (0..rs.cols) |x| {
-                const raw = &raws[x];
-                if (raw.wide == .spacer_tail) continue; // the head cell carried it
-                const cp: u21 = switch (raw.content_tag) {
-                    .codepoint, .codepoint_grapheme => raw.content.codepoint.data,
-                    else => 0,
-                };
-                if (cp <= 32) {
-                    self.put(" ");
-                    continue;
-                }
-                var cbuf: [4]u8 = undefined;
-                const n = std.unicode.utf8Encode(cp, &cbuf) catch {
-                    self.put(" ");
-                    continue;
-                };
-                self.put(cbuf[0..n]);
-                if (raw.content_tag == .codepoint_grapheme) {
-                    for (graphemes[x]) |extra| {
-                        var eb: [4]u8 = undefined;
-                        const en = std.unicode.utf8Encode(extra, &eb) catch continue;
-                        self.put(eb[0..en]);
-                    }
-                }
-                trimmed = self.buf.items.len;
-            }
-            self.buf.shrinkRetainingCapacity(trimmed);
-            self.put("\n");
-        }
+        gridText(self.gpa, &self.buf, &pane.rs);
         return self.buf.items;
     }
 
@@ -483,6 +452,242 @@ pub const Frame = struct {
     }
 };
 
+/// One cell's codepoint, 0 for a blank, and null for the tail of a
+/// wide glyph (its head cell carried it).
+fn cellCp(raw: anytype) ?u21 {
+    if (raw.wide == .spacer_tail) return null;
+    const cp: u21 = switch (raw.content_tag) {
+        .codepoint, .codepoint_grapheme => raw.content.codepoint.data,
+        else => 0,
+    };
+    // a control byte in a cell (DEL, typed at a pane) shows as nothing
+    return if (cp <= 32 or cp == 0x7f) 0 else cp;
+}
+
+/// A cell's glyph as UTF-8, a blank as one space.
+fn putCell(gpa: std.mem.Allocator, out: *std.ArrayList(u8), cp: u21, raw: anytype, extras: []const u21) void {
+    var cbuf: [4]u8 = undefined;
+    const n = if (cp == 0) 0 else std.unicode.utf8Encode(cp, &cbuf) catch 0;
+    if (n == 0) {
+        out.append(gpa, ' ') catch {};
+        return;
+    }
+    out.appendSlice(gpa, cbuf[0..n]) catch {};
+    if (raw.content_tag == .codepoint_grapheme) {
+        for (extras) |extra| {
+            var eb: [4]u8 = undefined;
+            const en = std.unicode.utf8Encode(extra, &eb) catch continue;
+            out.appendSlice(gpa, eb[0..en]) catch {};
+        }
+    }
+}
+
+/// A grid as plain text: one line per row, trailing blanks trimmed.
+/// A pane's (`Frame.plainText`), or the whole glass's (`rook shot`).
+pub fn gridText(gpa: std.mem.Allocator, out: *std.ArrayList(u8), rs: *vt.RenderState) void {
+    const row_cells = rs.row_data.items(.cells);
+    for (0..rs.rows) |y| {
+        const raws = row_cells[y].items(.raw);
+        const graphemes = row_cells[y].items(.grapheme);
+        var trimmed = out.items.len;
+        for (0..rs.cols) |x| {
+            const cp = cellCp(&raws[x]) orelse continue;
+            putCell(gpa, out, cp, &raws[x], if (raws[x].content_tag == .codepoint_grapheme) graphemes[x] else &.{});
+            if (cp != 0) trimmed = out.items.len;
+        }
+        out.shrinkRetainingCapacity(trimmed);
+        out.append(gpa, '\n') catch {};
+    }
+}
+
+fn sgrBytes(gpa: std.mem.Allocator, out: *std.ArrayList(u8), s: Sgr) void {
+    out.appendSlice(gpa, csi ++ "0") catch {};
+    if (s.bold) out.appendSlice(gpa, ";1") catch {};
+    if (s.faint) out.appendSlice(gpa, ";2") catch {};
+    if (s.italic) out.appendSlice(gpa, ";3") catch {};
+    if (s.underline) out.appendSlice(gpa, ";4") catch {};
+    if (s.inverse) out.appendSlice(gpa, ";7") catch {};
+    if (s.invisible) out.appendSlice(gpa, ";8") catch {};
+    if (s.strikethrough) out.appendSlice(gpa, ";9") catch {};
+    if (s.fg) |c| out.print(gpa, ";38;2;{d};{d};{d}", .{ c.r, c.g, c.b }) catch {};
+    if (s.bg) |c| out.print(gpa, ";48;2;{d};{d};{d}", .{ c.r, c.g, c.b }) catch {};
+    out.append(gpa, 'm') catch {};
+}
+
+/// A grid as text with its colours: one line per row, SGR runs, each
+/// line reset at its end — `cat` it into a terminal and it is the
+/// picture.
+pub fn gridAnsi(gpa: std.mem.Allocator, out: *std.ArrayList(u8), rs: *vt.RenderState) void {
+    const row_cells = rs.row_data.items(.cells);
+    for (0..rs.rows) |y| {
+        const raws = row_cells[y].items(.raw);
+        const styles = row_cells[y].items(.style);
+        const graphemes = row_cells[y].items(.grapheme);
+        var last: Sgr = .{};
+        for (0..rs.cols) |x| {
+            const raw = &raws[x];
+            const cp = cellCp(raw) orelse continue;
+            const st: vt.Style = if (raw.style_id != 0) styles[x] else .{};
+            const sgr = Sgr.from(st, raw, &rs.colors);
+            if (!sgr.eql(last)) {
+                sgrBytes(gpa, out, sgr);
+                last = sgr;
+            }
+            putCell(gpa, out, cp, raw, if (raw.content_tag == .codepoint_grapheme) graphemes[x] else &.{});
+        }
+        out.appendSlice(gpa, csi ++ "0m\n") catch {};
+    }
+}
+
+fn jsonStr(gpa: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) void {
+    out.append(gpa, '"') catch return;
+    for (s) |c| switch (c) {
+        '"' => out.appendSlice(gpa, "\\\"") catch return,
+        '\\' => out.appendSlice(gpa, "\\\\") catch return,
+        0...31 => out.print(gpa, "\\u{x:0>4}", .{c}) catch return,
+        else => out.append(gpa, c) catch return,
+    };
+    out.append(gpa, '"') catch return;
+}
+
+fn jsonRgb(gpa: std.mem.Allocator, out: *std.ArrayList(u8), key: []const u8, c: ?vt.color.RGB) void {
+    const v = c orelse return;
+    out.print(gpa, ",\"{s}\":\"#{x:0>2}{x:0>2}{x:0>2}\"", .{ key, v.r, v.g, v.b }) catch {};
+}
+
+/// A grid as JSON, for a program that asserts on what is shown:
+///   {"cols":N,"rows":N,"cursor":{"x","y","visible"},
+///    "panes":[{"id","x","y","w","h","focused"}],     (the glass only)
+///    "lines":[{"y":0,"text":"…","bg":"#rrggbb","runs":[{"x":0,"w":4,"text":"main",
+///      "fg":"#rrggbb","bg":"#rrggbb","bold":true}]}]}
+/// A run is a stretch of cells in one style, `x` and `w` in cells: one
+/// character a cell, except a run marked `"cluster":true`, which is one
+/// glyph — a wide one, or several codepoints — in its `w` cells. A
+/// colour that is absent is the terminal's own; a flag that is absent
+/// is off. Blank stretches in the default style are left out, and a
+/// default-style run ends at its last glyph. A line's own `bg` is there
+/// when one background runs edge to edge.
+pub fn gridJson(gpa: std.mem.Allocator, out: *std.ArrayList(u8), rs: *vt.RenderState, extra: []const u8) void {
+    out.print(gpa, "{{\"cols\":{d},\"rows\":{d},\"cursor\":", .{ rs.cols, rs.rows }) catch return;
+    if (rs.cursor.viewport) |v| {
+        out.print(gpa, "{{\"x\":{d},\"y\":{d},\"visible\":{s}}}", .{ v.x, v.y, if (rs.cursor.visible) "true" else "false" }) catch return;
+    } else out.appendSlice(gpa, "null") catch return;
+    out.appendSlice(gpa, extra) catch return;
+    out.appendSlice(gpa, ",\"lines\":[") catch return;
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(gpa);
+    const row_cells = rs.row_data.items(.cells);
+    for (0..rs.rows) |y| {
+        const raws = row_cells[y].items(.raw);
+        const styles = row_cells[y].items(.style);
+        const graphemes = row_cells[y].items(.grapheme);
+        if (y > 0) out.append(gpa, ',') catch return;
+        out.print(gpa, "{{\"y\":{d},\"text\":", .{y}) catch return;
+        // the line, trimmed
+        text.clearRetainingCapacity();
+        var trimmed: usize = 0;
+        for (0..rs.cols) |x| {
+            const cp = cellCp(&raws[x]) orelse continue;
+            putCell(gpa, &text, cp, &raws[x], if (raws[x].content_tag == .codepoint_grapheme) graphemes[x] else &.{});
+            if (cp != 0) trimmed = text.items.len;
+        }
+        jsonStr(gpa, out, text.items[0..trimmed]);
+        // one background edge to edge: the row is a filled bar
+        var row_bg: ?vt.color.RGB = null;
+        for (0..rs.cols) |cx| {
+            const st: vt.Style = if (raws[cx].style_id != 0) styles[cx] else .{};
+            const sg = Sgr.from(st, &raws[cx], &rs.colors);
+            const bg = if (sg.inverse) (sg.fg orelse rs.colors.foreground) else sg.bg;
+            if (bg == null or (cx > 0 and !std.meta.eql(row_bg, bg))) {
+                row_bg = null;
+                break;
+            }
+            row_bg = bg;
+        }
+        jsonRgb(gpa, out, "bg", row_bg);
+        out.appendSlice(gpa, ",\"runs\":[") catch return;
+        // the runs
+        var n_runs: usize = 0;
+        var x: usize = 0;
+        while (x < rs.cols) {
+            const st0: vt.Style = if (raws[x].style_id != 0) styles[x] else .{};
+            const sgr = Sgr.from(st0, &raws[x], &rs.colors);
+            const x0 = x;
+            text.clearRetainingCapacity();
+            var inked = false;
+            // A cell that is not one codepoint in one column — a wide
+            // glyph, a grapheme of several codepoints — is a run of its
+            // own, marked `cluster`: a reader counts cells by counting
+            // characters everywhere else, and must not have to know
+            // this terminal's width table to stay in step.
+            var cluster = false;
+            while (x < rs.cols) : (x += 1) {
+                const raw = &raws[x];
+                const st: vt.Style = if (raw.style_id != 0) styles[x] else .{};
+                if (!Sgr.from(st, raw, &rs.colors).eql(sgr)) break;
+                const cp = cellCp(raw) orelse continue;
+                const special = raw.wide == .wide or raw.content_tag == .codepoint_grapheme;
+                if (special and x != x0) break;
+                if (cp != 0) inked = true;
+                putCell(gpa, &text, cp, raw, if (raw.content_tag == .codepoint_grapheme) graphemes[x] else &.{});
+                if (special) {
+                    cluster = true;
+                    x += 1;
+                    while (x < rs.cols and raws[x].wide == .spacer_tail) x += 1;
+                    break;
+                }
+            }
+            if (!inked and sgr.eql(.{})) continue;
+            // a run in the default style ends at its last glyph: the
+            // blanks after it are nothing
+            var run_text: []const u8 = text.items;
+            var run_w = x - x0;
+            if (sgr.eql(.{})) {
+                while (run_text.len > 0 and run_text[run_text.len - 1] == ' ') {
+                    run_text = run_text[0 .. run_text.len - 1];
+                    run_w -= 1;
+                }
+            }
+            if (n_runs > 0) out.append(gpa, ',') catch return;
+            n_runs += 1;
+            out.print(gpa, "{{\"x\":{d},\"w\":{d},\"text\":", .{ x0, run_w }) catch return;
+            jsonStr(gpa, out, run_text);
+            if (cluster) out.appendSlice(gpa, ",\"cluster\":true") catch return;
+            jsonRgb(gpa, out, "fg", sgr.fg);
+            jsonRgb(gpa, out, "bg", sgr.bg);
+            inline for (.{ "bold", "faint", "italic", "underline", "inverse", "strikethrough", "invisible" }) |flag| {
+                if (@field(sgr, flag)) out.appendSlice(gpa, ",\"" ++ flag ++ "\":true") catch return;
+            }
+            out.append(gpa, '}') catch return;
+        }
+        out.appendSlice(gpa, "]}") catch return;
+    }
+    out.appendSlice(gpa, "]}\n") catch return;
+}
+
+/// The glass a frame would paint, as a grid: a terminal of that size
+/// fed the frame's own bytes. What `rook shot` reads is therefore what
+/// the render path wrote, not a second opinion of it.
+pub const Shadow = struct {
+    term: vt.Terminal,
+    rs: vt.RenderState = .empty,
+    gpa: std.mem.Allocator,
+
+    pub fn init(self: *Shadow, gpa: std.mem.Allocator, io: std.Io, cols: u16, rows: u16, frame: []const u8) !void {
+        self.* = .{ .gpa = gpa, .term = try .init(io, gpa, .{ .cols = cols, .rows = rows, .max_scrollback_bytes = 0 }) };
+        errdefer self.term.deinit(gpa);
+        var stream: vt.TerminalStream = .init(.{ .handler = self.term.vtHandler(), .allocator = gpa });
+        defer stream.deinit();
+        stream.nextSlice(frame);
+        try self.rs.update(gpa, &self.term);
+    }
+
+    pub fn deinit(self: *Shadow) void {
+        self.rs.deinit(self.gpa);
+        self.term.deinit(self.gpa);
+    }
+};
+
 fn neighborAt(placed: []const layoutpkg.Placed, x: u16, y: u16) ?u32 {
     for (placed) |p| {
         if (p.rect.x == x and y >= p.rect.y and y < p.rect.y + p.rect.h) return p.pane;
@@ -513,6 +718,8 @@ const Sgr = struct {
     inverse: bool = false,
     strikethrough: bool = false,
     faint: bool = false,
+    /// SGR 8, conceal: the cell has its glyph and does not show it.
+    invisible: bool = false,
 
     fn from(st: vt.Style, raw: anytype, colors: anytype) Sgr {
         var s: Sgr = .{
@@ -522,12 +729,14 @@ const Sgr = struct {
             .inverse = st.flags.inverse,
             .strikethrough = st.flags.strikethrough,
             .faint = st.flags.faint,
+            .invisible = st.flags.invisible,
         };
-        if (st.bg(raw, &colors.palette)) |bg| {
-            if (!bg.eql(colors.background)) s.bg = bg;
-        }
-        const fg = st.fg(.{ .default = colors.foreground, .palette = &colors.palette });
-        if (!fg.eql(colors.foreground)) s.fg = fg;
+        // A colour is the terminal's own when the program named none —
+        // not when the one it named happens to equal a default: white
+        // text and a black fill a program asked for are asked for,
+        // whatever the terminal behind the glass calls its own.
+        if (st.bg(raw, &colors.palette)) |bg| s.bg = bg;
+        if (st.fg_color != .none) s.fg = st.fg(.{ .default = colors.foreground, .palette = &colors.palette });
         return s;
     }
 
@@ -542,6 +751,7 @@ const Sgr = struct {
         if (self.italic) f.put(";3");
         if (self.underline) f.put(";4");
         if (self.inverse) f.put(";7");
+        if (self.invisible) f.put(";8");
         if (self.strikethrough) f.put(";9");
         if (self.fg) |c| f.print(";38;2;{d};{d};{d}", .{ c.r, c.g, c.b });
         if (self.bg) |c| f.print(";48;2;{d};{d};{d}", .{ c.r, c.g, c.b });

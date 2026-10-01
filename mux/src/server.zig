@@ -84,6 +84,12 @@ const Client = struct {
     /// the markers arrive on its stdin, and across reads, because a
     /// long paste is split by every 4 KB the glass manages to read.
     paste: Paste = .{},
+    /// A `rook shot` waiting for the glass to go quiet: the request as
+    /// it came, how long quiet is, and when to stop waiting and shoot.
+    shot_wait: bool = false,
+    shot_req: [9]u8 = undefined,
+    shot_quiet: i64 = 0,
+    shot_deadline: i64 = 0,
 };
 
 /// A bracketed paste on the way in, as the glass sends it: ESC[200~
@@ -306,6 +312,14 @@ pub const Server = struct {
     /// forward into a window by group or one at a time. In the order
     /// they went back, so the last is the one most lately sent.
     shelf: std.ArrayList(u32) = .empty,
+    /// The size composed for while no glass is attached (`rook shot
+    /// --size`): a test's glass, or an agent's. A real one overrides it.
+    virtual_glass: ?proto.Geometry = null,
+    /// The next frame starts from an empty glass. A layout moves
+    /// seams, frames and bars, and a full repaint paints only where
+    /// things are now: without this the cells nothing covers any more
+    /// keep what was there — the last workspace's frame, a seam's end.
+    clear: bool = false,
     /// Column of the rail/window seam in the current layout, if any,
     /// and the row it starts on.
     dock_x: ?u16 = null,
@@ -696,12 +710,12 @@ pub const Server = struct {
     /// Close the named session: hang up every pane in it; reap does
     /// the accounting and the view falls back if it was current.
     fn closeSession(self: *Server, name: []const u8) void {
-        // What it kept in the background goes with it: a group is named
+        // Its group goes with it, wherever its panes are — in the
+        // background, or brought out into another workspace: a group is named
         // for the workspace it serves, and a workspace closed on purpose
         // must not leave its services holding their ports.
-        for (self.shelf.items) |id| {
-            const p = self.pane(id) orelse continue;
-            if (std.mem.eql(u8, p.groupName(), name)) self.closePane(p);
+        for (self.panes.items) |p| {
+            if (p.group_len > 0 and std.mem.eql(u8, p.groupName(), name)) self.closePane(p);
         }
         for (self.sessions.items) |sn| {
             if (sn.home or !std.mem.eql(u8, sn.label(), name)) continue;
@@ -1043,7 +1057,7 @@ pub const Server = struct {
     }
 
     pub fn geometry(self: *Server) proto.Geometry {
-        var g: proto.Geometry = .{ .cols = 80, .rows = 24 };
+        var g: proto.Geometry = self.virtual_glass orelse .{ .cols = 80, .rows = 24 };
         for (self.clients.items) |c| {
             if (c.attached) g = .{ .cols = c.cols, .rows = c.rows };
         }
@@ -1155,7 +1169,11 @@ pub const Server = struct {
         for (self.placed.items) |pl| {
             if (self.leasedBy(pl.pane) != null) continue; // a block client owns this geometry; the TUI crops
             if (self.pane(pl.pane)) |p| {
-                if (p.cols != pl.rect.w or p.rows != pl.rect.h) p.resize(pl.rect.w, pl.rect.h);
+                if (p.cols != pl.rect.w or p.rows != pl.rect.h) {
+                    p.resize(pl.rect.w, pl.rect.h);
+                    // told its size changed: something asked of it
+                    p.last_input_ms = panepkg.epochMs();
+                }
             }
         }
         if (self.popupPane()) |p| {
@@ -1163,6 +1181,7 @@ pub const Server = struct {
             if (p.cols != r.w -| 2 or p.rows != r.h -| 2) p.resize(r.w -| 2, r.h -| 2);
         }
         self.full = true;
+        self.clear = true;
         self.pending = true;
         self.state_dirty = true;
         self.blocks_check_ms = 0; // push the new table promptly
@@ -1201,6 +1220,10 @@ pub const Server = struct {
             if (self.refresh_at != 0) {
                 const dt = self.refresh_at - nowMs();
                 timeout = @intCast(std.math.clamp(dt, 0, timeout));
+            }
+            // a shot waiting on quiet is looked at every few ms
+            for (self.clients.items) |c| {
+                if (c.shot_wait) timeout = @min(timeout, 5);
             }
             const n = ptypkg.pollMany(fds.items.ptr, @intCast(fds.items.len), timeout);
             if (n < 0) continue;
@@ -1249,6 +1272,7 @@ pub const Server = struct {
             try self.reap();
             self.forwardTees();
             self.pollSignals();
+            self.serveShots();
             // Restored panes type their resume command once the shell
             // is up — as a person would, into the shell's own
             // environment, so the shell is still there when it exits.
@@ -1343,6 +1367,7 @@ pub const Server = struct {
     fn dropClient(self: *Server, i: usize) void {
         const c = self.clients.items[i];
         const had_lease = c.lease and c.block != null;
+        const was_glass = c.attached;
         ptypkg.closeFd(c.fd);
         c.reader.deinit();
         c.out.deinit(self.gpa);
@@ -1350,7 +1375,9 @@ pub const Server = struct {
         _ = self.clients.swapRemove(i);
         self.updateTees();
         // a departing lease holder hands geometry back to the TUI
-        if (had_lease) self.relayout() catch {};
+        // and a departing glass takes its size with it: what is left
+        // is laid out for the glass that remains, or for none
+        if ((had_lease or was_glass) and self.sessions.items.len > 0) self.relayout() catch {};
     }
 
     /// Frame a message onto the client's outbound queue and push what
@@ -1457,15 +1484,29 @@ pub const Server = struct {
                         }
                     }
                 },
-                @intFromEnum(proto.c2s.input) => {
+                @intFromEnum(proto.c2s.input), @intFromEnum(proto.c2s.key) => {
                     // [id u32][bytes] → typed into that pane, as if at
                     // its keyboard: the view snaps to now first, the
                     // same as a keystroke from the glass.
                     if (msg.payload.len >= 4) {
                         const id = std.mem.readInt(u32, msg.payload[0..4], .little);
                         if (self.pane(id)) |p| {
+                            if (p.held) {
+                                self.sendTo(c, @intFromEnum(proto.s2c.exit), "that pane's program has exited; nothing is reading");
+                                continue;
+                            }
                             p.scrollBottom();
-                            p.write(msg.payload[4..]);
+                            p.last_input_ms = panepkg.epochMs();
+                            // named keys (`rook key`) go in the encoding
+                            // the program asked for: a curses program in
+                            // application cursor mode reads ESC O B for
+                            // down, and ESC [ B as a bare escape
+                            var kb: [1024]u8 = undefined;
+                            const typed = if (msg.kind == @intFromEnum(proto.c2s.key) and p.modeSet(.cursor_keys))
+                                appCursorKeys(msg.payload[4..], &kb)
+                            else
+                                msg.payload[4..];
+                            p.write(typed);
                             _ = self.touch();
                             self.ack(c);
                             self.pending = true;
@@ -1571,6 +1612,7 @@ pub const Server = struct {
                 @intFromEnum(proto.c2s.config) => self.reloadConfig(c, msg.payload),
                 @intFromEnum(proto.c2s.class) => self.classCmd(c, msg.payload),
                 @intFromEnum(proto.c2s.bg) => self.bgCmd(c, msg.payload),
+                @intFromEnum(proto.c2s.shot) => self.shotCmd(c, msg.payload),
                 @intFromEnum(proto.c2s.popup) => {
                     if (msg.payload.len > 0) self.openPopup(self.popupSized(msg.payload)) catch {};
                 },
@@ -3052,6 +3094,7 @@ pub const Server = struct {
     fn detach(self: *Server, c: *Client) void {
         self.sendTo(c, @intFromEnum(proto.s2c.exit), "");
         c.attached = false;
+        self.relayout() catch {};
     }
 
     /// One verb of the prefix table (keys.zig). What a popup runs is
@@ -3410,6 +3453,9 @@ pub const Server = struct {
                 if (!p.held) {
                     p.held = true;
                     p.exit_ms = panepkg.epochMs();
+                    // nothing reads what is typed at it now
+                    p.in_buf.clearRetainingCapacity();
+                    p.in_off = 0;
                     var sb: [200]u8 = undefined;
                     const cmd = chromepkg.clip(p.svc, 60);
                     self.say('f', std.fmt.bufPrint(&sb, "bg {s}: {s} exited  (rook bg)", .{ p.groupName(), cmd }) catch "a background pane exited");
@@ -3434,6 +3480,15 @@ pub const Server = struct {
         }
         if (removed) self.updateTees();
         if (home_left) self.leftHome();
+        // The last window closed with panes still in the background:
+        // rook does not end under what it was asked to keep running.
+        // Home is what there is to show.
+        if (removed and self.sessions.items.len == 0 and self.shelf.items.len > 0 and !self.shutdown) {
+            if (self.ensureHome()) |h| {
+                self.cur_sess = h;
+                self.say('-', "the last window closed; what is in the background is still running  (rook bg)");
+            } else |_| {}
+        }
         if (removed and self.sessions.items.len > 0) try self.relayout();
     }
 
@@ -3483,6 +3538,22 @@ pub const Server = struct {
                     self.gpa.destroy(w);
                     _ = sn.windows.orderedRemove(wi);
                     if (sn.cur >= sn.windows.items.len and sn.cur > 0) sn.cur -= 1;
+                    // Its last window is gone and it has pinned panes:
+                    // the first of them is its window now. A workspace
+                    // that went with panes still on its rail left them
+                    // running and nowhere.
+                    if (sn.windows.items.len == 0 and sn.pins.items.len > 0) {
+                        const pin = sn.pins.orderedRemove(0);
+                        if (self.gpa.create(Window)) |nw| {
+                            nw.* = .{ .layout = layoutpkg.Layout.init(self.gpa), .seen_ms = panepkg.epochMs() };
+                            if (nw.layout.seed(pin)) |_| {
+                                nw.focused = pin;
+                                sn.windows.append(self.gpa, nw) catch self.gpa.destroy(nw);
+                            } else |_| self.gpa.destroy(nw);
+                        } else |_| {}
+                        if (sn.focus_pin == pin) sn.focus_pin = null;
+                        sn.cur = 0;
+                    }
                     if (sn.windows.items.len == 0) {
                         const was_home = sn.home;
                         const was_cur = si == self.cur_sess;
@@ -3513,17 +3584,38 @@ pub const Server = struct {
 
     // ---- the background ----
 
-    /// Is this pane the only one placed anywhere? Rook always has
-    /// something to show, so that one stays where it is.
-    fn onlyPlaced(self: *Server, id: u32) bool {
-        if (self.global_pins.items.len > 0) return false;
-        if (self.sessions.items.len != 1) return false;
-        const sn = self.sessions.items[0];
-        // home starts itself over when it is emptied
-        if (sn.home) return false;
-        if (sn.pins.items.len > 0 or sn.windows.items.len != 1) return false;
-        const w = sn.windows.items[0];
-        return w.layout.isSingle() and w.layout.contains(id);
+    /// Would taking this pane out of its window leave something that
+    /// must not be left: no workspace at all — rook always has
+    /// something to show — or a workspace's pinned panes with no
+    /// workspace under them? A window's last pane takes the window, and
+    /// a workspace's last window takes the workspace.
+    fn mustStay(self: *Server, id: u32) bool {
+        for (self.sessions.items) |sn| {
+            for (sn.windows.items) |w| {
+                if (!w.layout.contains(id)) continue;
+                if (!w.layout.isSingle() or sn.windows.items.len > 1) return false;
+                if (sn.pins.items.len > 0) return true;
+                // home, emptied, starts itself over
+                if (sn.home) return false;
+                return self.sessions.items.len == 1;
+            }
+        }
+        return false;
+    }
+
+    /// Would sending all of these back leave no workspace with a pane
+    /// in a window? Home does not count against it: emptied, it starts
+    /// itself over.
+    fn wouldEmpty(self: *Server, ids: []const u32) bool {
+        for (self.sessions.items) |sn| {
+            if (sn.home) return false;
+            for (sn.windows.items) |w| {
+                for (self.panes.items) |p| {
+                    if (w.layout.contains(p.id) and !containsId(ids, p.id)) return false;
+                }
+            }
+        }
+        return true;
     }
 
     /// Send a pane to the background: out of its window or its rail,
@@ -3532,9 +3624,9 @@ pub const Server = struct {
     fn shelve(self: *Server, id: u32, group: []const u8) error{ NoPane, Popup, Last, OutOfMemory }!void {
         const p = self.pane(id) orelse return error.NoPane;
         if (self.popup == id) return error.Popup;
+        if (!containsId(self.shelf.items, id) and self.mustStay(id)) return error.Last;
         if (group.len > 0) p.setGroup(group);
         if (containsId(self.shelf.items, id)) return;
-        if (self.onlyPlaced(id)) return error.Last;
         if (p.group_len == 0) {
             const from = if (self.placeOf(id)) |at| at.workspace else "";
             var home = false;
@@ -3619,7 +3711,7 @@ pub const Server = struct {
     /// together goes back together.
     fn backgroundFocused(self: *Server) void {
         const p = self.focusedPane() orelse return;
-        var buf: [64]u32 = undefined;
+        var buf: [1024]u32 = undefined;
         var ids: []const u32 = &.{p.id};
         if (p.group_len > 0) ids = self.groupPanes(p.groupName(), true, &buf);
         var sent: usize = 0;
@@ -3650,7 +3742,7 @@ pub const Server = struct {
             self.say('-', "nothing in the background");
             return;
         }
-        var buf: [64]u32 = undefined;
+        var buf: [1024]u32 = undefined;
         var ids = self.groupPanes(self.sess().label(), false, &buf);
         if (ids.len == 0 or self.sess().home) {
             const last = self.pane(self.shelf.items[self.shelf.items.len - 1]) orelse return;
@@ -3729,21 +3821,22 @@ pub const Server = struct {
                     dir_buf[dir.len] = 0;
                     break :blk @ptrCast(&dir_buf);
                 } else null;
-                var gb: [32]u8 = undefined;
+                // copied whole: the label is cut where it is kept, on a
+                // codepoint, not here
+                var gb: [256]u8 = undefined;
                 const g = gb[0..@min(group.len, gb.len)];
                 @memcpy(g, group[0..g.len]);
                 const id = self.startService(g, dir_z, cmd_z) catch
                     return self.sendTo(c, no, "bg run: could not start the pane");
                 if (self.pane(id)) |p| {
-                    p.by_len = @min(by.len, p.by.len);
-                    @memcpy(p.by[0..p.by_len], by[0..p.by_len]);
+                    p.setBy(by);
                     p.port = port;
                 }
                 self.replyCreated(c, id);
             },
             'h', 's', 'k' => {
                 const target = bgTarget(words.next() orelse "") orelse return self.sendTo(c, no, "bg: no such target");
-                var buf: [64]u32 = undefined;
+                var buf: [1024]u32 = undefined;
                 var one: [1]u32 = undefined;
                 var ids: []const u32 = &.{};
                 switch (target) {
@@ -3777,12 +3870,20 @@ pub const Server = struct {
                 switch (op) {
                     'h' => {
                         const group = words.next() orelse "";
+                        // a group goes back whole or not at all
+                        if (target == .group and self.wouldEmpty(ids)) return self.sendTo(c, no, "bg hide: that is every pane there is to show; nothing was sent back");
                         for (ids) |id| {
-                            self.shelve(id, group) catch |e| return self.sendTo(c, no, switch (e) {
-                                error.Last => "bg hide: the last pane stays, or there would be nothing left to show",
-                                error.Popup => "bg hide: a popup is not a pane to keep",
-                                else => "bg hide: could not",
-                            });
+                            self.shelve(id, group) catch |e| {
+                                // what went back before this one did go back
+                                self.state_dirty = true;
+                                self.full = true;
+                                self.pending = true;
+                                return self.sendTo(c, no, switch (e) {
+                                    error.Last => "bg hide: the last pane stays: there would be nothing left to show, or its workspace's pins would have no workspace",
+                                    error.Popup => "bg hide: a popup is not a pane to keep",
+                                    else => "bg hide: could not",
+                                });
+                            };
                         }
                     },
                     's' => {
@@ -3866,6 +3967,28 @@ pub const Server = struct {
     }
 
     fn redraw(self: *Server) !void {
+        if (try self.compose()) |bytes| self.ship(bytes);
+    }
+
+    /// A frame to every attached glass.
+    fn ship(self: *Server, bytes: []const u8) void {
+        var shipped = false;
+        for (self.clients.items) |c| {
+            if (!c.attached) continue;
+            self.sendTo(c, @intFromEnum(proto.s2c.draw), bytes);
+            self.bytes_sent += bytes.len;
+            shipped = true;
+        }
+        if (shipped) {
+            self.frames_sent += 1;
+            self.lat.frame();
+        }
+    }
+
+    /// The next frame's bytes, or null when nothing on the glass
+    /// changed. A frame composed must be shipped: composing consumes
+    /// the panes' dirty rows.
+    fn compose(self: *Server) !?[]const u8 {
         if (self.popup != null) self.full = true; // popups sit over dirty math
         // Under a popup the chrome is under the scrim too: the bars
         // and the root's canvas are built on the faded theme for this
@@ -3940,7 +4063,7 @@ pub const Server = struct {
             @memcpy(self.bar_last[0..self.bar_last_len], bar_bytes[0..self.bar_last_len]);
         }
 
-        if (!any_dirty) return;
+        if (!any_dirty) return null;
 
         // What the server paints over the panes itself. Built fresh
         // each frame it is needed: all three are human-rate views.
@@ -3979,18 +4102,159 @@ pub const Server = struct {
             (cur_over orelse renderpkg.CursorOverride{ .x = 0, .y = 0, .hidden = true })
         else
             cur_over;
-        const bytes = self.frame.build(self.panes.items, placed, self.focusedId(), g.cols, body, chrome, self.full, cur, if (self.popup) |id| .{ .pane = id, .rect = self.popupRect() } else null);
+        const bytes = self.frame.build(self.panes.items, placed, self.focusedId(), g.cols, body, chrome, self.full, self.full and self.clear, cur, if (self.popup) |id| .{ .pane = id, .rect = self.popupRect() } else null);
+        if (self.full) self.clear = false;
         self.full = false;
-        var shipped = false;
-        for (self.clients.items) |c| {
-            if (!c.attached) continue;
-            self.sendTo(c, @intFromEnum(proto.s2c.draw), bytes);
-            self.bytes_sent += bytes.len;
-            shipped = true;
+        return bytes;
+    }
+
+    /// `rook shot`: what is on the glass, as a grid. [form u8][pane
+    /// u32][cols u16][rows u16], then optionally [quiet u32][timeout
+    /// u32]. The form is `t` text, `a` text with its colours (SGR),
+    /// `j` JSON runs — or `z`, which sets the size of the glass a
+    /// server nobody is attached to composes for. Pane 0 is the whole
+    /// glass, chrome and all: a full frame is composed, shipped as any
+    /// frame is, and read back through a terminal of the glass's size,
+    /// so the shot is what the render path wrote. A pane by id is that
+    /// pane's own grid, wherever it is — in a hidden window or in the
+    /// background.
+    ///
+    /// `quiet` is the settle: the shot is taken once nothing it shows
+    /// has been typed into, resized or written to for that many ms —
+    /// at once when that is already so, and at `timeout` regardless.
+    /// A key sent and a shot asked for is therefore the frame after
+    /// the program answered the key, without a sleep in between.
+    fn shotCmd(self: *Server, c: *Client, payload: []const u8) void {
+        const no = @intFromEnum(proto.s2c.exit);
+        if (payload.len < 9) return self.sendTo(c, no, "shot: short request");
+        const form = payload[0];
+        const id = std.mem.readInt(u32, payload[1..5], .little);
+        const want: proto.Geometry = .{
+            .cols = std.mem.readInt(u16, payload[5..7], .little),
+            .rows = std.mem.readInt(u16, payload[7..9], .little),
+        };
+        if (form == 'z') {
+            if (want.cols < 20 or want.rows < 6 or want.cols > 500 or want.rows > 300) return self.sendTo(c, no, "shot: a size is 20x6 to 500x300");
+            if (self.attachedCount() > 0) {
+                const g = self.geometry();
+                if (g.cols == want.cols and g.rows == want.rows) return self.ack(c);
+                var eb: [120]u8 = undefined;
+                return self.sendTo(c, no, std.fmt.bufPrint(&eb, "shot: a glass is attached at {d}x{d}; --size is for a server nobody is looking at", .{ g.cols, g.rows }) catch "shot: a glass is attached");
+            }
+            self.virtual_glass = want;
+            self.relayout() catch {};
+            _ = self.touch();
+            return self.ack(c);
         }
-        if (shipped) {
-            self.frames_sent += 1;
-            self.lat.frame();
+        if (id != 0 and self.pane(id) == null) return self.sendTo(c, no, "no such pane");
+        if (payload.len >= 17) {
+            const quiet: i64 = std.mem.readInt(u32, payload[9..13], .little);
+            const timeout: i64 = std.mem.readInt(u32, payload[13..17], .little);
+            if (quiet > 0 and !self.shotQuiet(id, quiet)) {
+                c.shot_wait = true;
+                @memcpy(&c.shot_req, payload[0..9]);
+                c.shot_quiet = quiet;
+                c.shot_deadline = panepkg.epochMs() + timeout;
+                return;
+            }
+        }
+        self.shotNow(c, form, id);
+    }
+
+    /// Has what a shot would show been still for `quiet` ms: nothing
+    /// typed into, resized, or written by the panes on the glass (or
+    /// the one pane asked for)?
+    fn shotQuiet(self: *Server, id: u32, quiet: i64) bool {
+        // Each pane on its own: what was asked of its program — a key,
+        // a new size — and what it last said. One asked and not yet
+        // answered is given four settles to answer (a program can take a
+        // moment); once it has, one settle of silence is its frame. The
+        // glass is still when every pane on it is: a shell that echoed
+        // a key is not the answer of the program beside it.
+        const now = panepkg.epochMs();
+        for (self.panes.items) |p| {
+            const shown = if (id != 0) p.id == id else blk: {
+                if (self.popup == p.id) break :blk true;
+                for (self.placed.items) |pl| {
+                    if (pl.pane == p.id) break :blk true;
+                }
+                break :blk false;
+            };
+            if (!shown or p.held) continue;
+            const asked = p.last_input_ms;
+            const said = p.last_output_ms.load(.acquire);
+            if (asked > said) {
+                if (now - asked < 4 * quiet) return false;
+            } else if (now - said < quiet) return false;
+        }
+        return true;
+    }
+
+    /// The shots that were waiting: taken when quiet, or out of time.
+    fn serveShots(self: *Server) void {
+        for (self.clients.items) |c| {
+            if (!c.shot_wait or c.dead) continue;
+            const id = std.mem.readInt(u32, c.shot_req[1..5], .little);
+            if (panepkg.epochMs() < c.shot_deadline and self.shotQuiet(id, c.shot_quiet)) {} else if (panepkg.epochMs() < c.shot_deadline) continue;
+            c.shot_wait = false;
+            self.shotNow(c, c.shot_req[0], id);
+        }
+    }
+
+    fn shotNow(self: *Server, c: *Client, form: u8, id: u32) void {
+        const no = @intFromEnum(proto.s2c.exit);
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(self.gpa);
+        if (id != 0) {
+            const p = self.pane(id) orelse return self.sendTo(c, no, "no such pane");
+            p.snapshot() catch return self.sendTo(c, no, "shot: could not read the pane");
+            self.dumpGrid(&out, &p.rs, form, "");
+            // the snapshot took its dirty rows: if it is on the glass,
+            // the glass is owed them
+            for (self.placed.items) |pl| {
+                if (pl.pane == id) {
+                    self.full = true;
+                    self.pending = true;
+                }
+            }
+        } else {
+            const g = self.geometry();
+            // a full frame, read back on a terminal that starts empty —
+            // so no clear is owed for the shot's sake, and an attached
+            // glass gets a repaint, not a blank
+            self.full = true;
+            const bytes = (self.compose() catch null) orelse return self.sendTo(c, no, "shot: nothing composed");
+            self.ship(bytes);
+            var shadow: renderpkg.Shadow = undefined;
+            shadow.init(self.gpa, self.io, g.cols, g.rows, bytes) catch return self.sendTo(c, no, "shot: out of memory");
+            defer shadow.deinit();
+            // where each pane is on that glass, so a reader can go from
+            // a cell to the pane it belongs to and back
+            var extra: std.ArrayList(u8) = .empty;
+            defer extra.deinit(self.gpa);
+            extra.appendSlice(self.gpa, ",\"panes\":[") catch {};
+            for (self.placed.items, 0..) |pl, i| {
+                if (i > 0) extra.append(self.gpa, ',') catch {};
+                extra.print(self.gpa, "{{\"id\":{d},\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d},\"focused\":{s}}}", .{
+                    pl.pane, pl.rect.x, pl.rect.y, pl.rect.w, pl.rect.h, if (pl.pane == self.focusedId()) "true" else "false",
+                }) catch {};
+            }
+            if (self.popup) |pid| {
+                const r = self.popupRect();
+                if (self.placed.items.len > 0) extra.append(self.gpa, ',') catch {};
+                extra.print(self.gpa, "{{\"id\":{d},\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d},\"focused\":true,\"popup\":true}}", .{ pid, r.x + 1, r.y + 1, r.w -| 2, r.h -| 2 }) catch {};
+            }
+            extra.append(self.gpa, ']') catch {};
+            self.dumpGrid(&out, &shadow.rs, form, extra.items);
+        }
+        self.sendTo(c, @intFromEnum(proto.s2c.text), out.items);
+    }
+
+    fn dumpGrid(self: *Server, out: *std.ArrayList(u8), rs: *vt.RenderState, form: u8, extra: []const u8) void {
+        switch (form) {
+            'a' => renderpkg.gridAnsi(self.gpa, out, rs),
+            'j' => renderpkg.gridJson(self.gpa, out, rs, extra),
+            else => renderpkg.gridText(self.gpa, out, rs),
         }
     }
 
@@ -4226,10 +4490,17 @@ pub const Server = struct {
             const back = containsId(self.shelf.items, p.id);
             if (p.svc.len == 0 and !back) continue;
             if (p.held or p.exited.load(.acquire)) continue;
-            if (std.mem.indexOfScalar(u8, p.svc, '\n') != null) continue;
             var cb: [1024]u8 = undefined;
-            const cwd: []const u8 = if (p.fgCwd(&cb)) |cc| cc else "";
-            out.print(self.gpa, "bg {s}\t{s}\t{d}\t{s}\t{s}\n", .{ p.groupName(), p.by[0..p.by_len], p.port, cwd, p.svc }) catch return;
+            const cwd: []const u8 = fileField(if (p.fgCwd(&cb)) |cc| cc else "");
+            out.print(self.gpa, "bg {s}\t{s}\t{d}\t{s}\t", .{ p.groupName(), p.by[0..p.by_len], p.port, cwd }) catch return;
+            // the command is the rest of the line, its newlines and
+            // backslashes escaped: a script of several lines is one
+            for (p.svc) |ch| switch (ch) {
+                '\n' => out.appendSlice(self.gpa, "\\n") catch return,
+                '\\' => out.appendSlice(self.gpa, "\\\\") catch return,
+                else => out.append(self.gpa, ch) catch return,
+            };
+            out.append(self.gpa, '\n') catch return;
             if (p.svc.len == 0) {
                 const back_cmd = p.resumeLive();
                 if (back_cmd.len > 0 and std.mem.indexOfScalar(u8, back_cmd, '\n') == null) {
@@ -4247,7 +4518,7 @@ pub const Server = struct {
         var cwd: []const u8 = "";
         var back: []const u8 = "";
         if (self.pane(id)) |p| {
-            if (p.fgCwd(&cwd_buf)) |c| cwd = c;
+            if (p.fgCwd(&cwd_buf)) |c| cwd = fileField(c);
             back = p.resumeLive();
         }
         try out.appendSlice(self.gpa, kind);
@@ -4265,8 +4536,12 @@ pub const Server = struct {
     /// nothing to restore (caller seeds the default session).
     fn restoreState(self: *Server) !bool {
         if (self.state_path[0] == 0) return false;
-        var buf: [64 * 1024]u8 = undefined;
-        const data = ptypkg.readFileSmall(@ptrCast(&self.state_path), &buf) orelse return false;
+        // all of it or none: a file cut at the buffer's end would bring
+        // a service back running half its command
+        const buf = try self.gpa.alloc(u8, 4 * 1024 * 1024);
+        defer self.gpa.free(buf);
+        const data = ptypkg.readFileSmall(@ptrCast(&self.state_path), buf) orelse return false;
+        if (data.len == buf.len) return false;
         var lines = std.mem.splitScalar(u8, data, '\n');
         const head = lines.next() orelse return false;
         if (!std.mem.eql(u8, head, "v1") and !std.mem.eql(u8, head, "v2")) return false;
@@ -4301,7 +4576,7 @@ pub const Server = struct {
                     if (cmd.len > 0) {
                         p.setBoot(cmd, boot_by);
                         // it is the pane's promise again once it is typed
-                        p.setResume(cmd);
+                        p.setResumeRestored(cmd);
                     }
                 }
                 continue;
@@ -4313,7 +4588,8 @@ pub const Server = struct {
                 const by = f.next() orelse "";
                 const port = std.fmt.parseInt(u16, f.next() orelse "", 10) catch 0;
                 const dir = f.next() orelse "";
-                const cmd = f.rest();
+                const cmd = unescapeCmd(self.gpa, f.rest()) catch continue;
+                defer self.gpa.free(cmd);
                 var cwd_z: [1024]u8 = undefined;
                 const cwd_arg: ?[*:0]const u8 = if (dir.len > 0 and dir.len < cwd_z.len) blk: {
                     @memcpy(cwd_z[0..dir.len], dir);
@@ -4331,8 +4607,7 @@ pub const Server = struct {
                     p.setGroup(group);
                     try self.shelf.append(self.gpa, p.id);
                 }
-                p.by_len = @min(by.len, p.by.len);
-                @memcpy(p.by[0..p.by_len], by[0..p.by_len]);
+                p.setBy(by);
                 p.port = port;
                 last_pane = p;
                 continue;
@@ -5784,6 +6059,58 @@ pub const Server = struct {
 /// Text into an OSC payload: control bytes (which would end or
 /// corrupt the sequence) are dropped; everything else, UTF-8
 /// included, rides through.
+/// Named cursor keys in application mode (DECCKM): ESC [ A becomes
+/// ESC O A, for the arrows, home and end. Anything else passes.
+fn appCursorKeys(bytes: []const u8, buf: []u8) []const u8 {
+    if (bytes.len > buf.len) return bytes;
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < bytes.len) : (i += 1) {
+        buf[n] = bytes[i];
+        if (bytes[i] == '[' and i > 0 and bytes[i - 1] == 0x1b and i + 1 < bytes.len and std.mem.indexOfScalar(u8, "ABCDHF", bytes[i + 1]) != null) buf[n] = 'O';
+        n += 1;
+    }
+    return buf[0..n];
+}
+
+test "named cursor keys in application mode" {
+    var b: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("\x1bOB\x1bOA", appCursorKeys("\x1b[B\x1b[A", &b));
+    try std.testing.expectEqualStrings("\x1b[3~\x1b[Z\r", appCursorKeys("\x1b[3~\x1b[Z\r", &b));
+}
+
+/// A value as a field of the restore file, which is lines of
+/// tab-separated words: one with a tab or a newline in it — a
+/// directory can be named anything — is left out rather than written,
+/// since what follows it would be read as fields and lines of its own.
+fn fileField(s: []const u8) []const u8 {
+    return if (std.mem.indexOfAny(u8, s, "\t\n\r") != null) "" else s;
+}
+
+/// A service's command back from the restore file: `\n` and `\\`.
+fn unescapeCmd(gpa: std.mem.Allocator, s: []const u8) ![]u8 {
+    var out = try gpa.alloc(u8, s.len);
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] == '\\' and i + 1 < s.len) {
+            i += 1;
+            out[n] = if (s[i] == 'n') '\n' else s[i];
+        } else out[n] = s[i];
+        n += 1;
+    }
+    return gpa.realloc(out, n) catch out[0..n];
+}
+
+test "restore-file fields" {
+    const t = std.testing;
+    try t.expectEqualStrings("/tmp/a b", fileField("/tmp/a b"));
+    try t.expectEqualStrings("", fileField("/tmp/ev\nbg inj\t\t0"));
+    const back = try unescapeCmd(t.allocator, "echo one\\nsleep 5; printf 'a\\\\b'");
+    defer t.allocator.free(back);
+    try t.expectEqualStrings("echo one\nsleep 5; printf 'a\\b'", back);
+}
+
 fn oscText(out: *std.ArrayList(u8), s: []const u8) void {
     for (s) |ch| {
         if (ch < 0x20 or ch == 0x7f) continue;

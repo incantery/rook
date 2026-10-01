@@ -152,8 +152,9 @@ fn stateFeed(gpa: std.mem.Allocator, sock_path: []const u8, subscribe: bool) !vo
     var reader = proto.Reader.init(gpa);
     defer reader.deinit();
     var fds = [1]ptypkg.Pollfd{.{ .fd = sock, .events = ptypkg.POLLIN }};
-    var waited: usize = 0;
-    while (subscribe or waited < 2000) : (waited += 100) {
+    // by the clock: a large snapshot arrives in many reads
+    const give_up = nowMs() + 5000;
+    while (subscribe or nowMs() < give_up) {
         _ = ptypkg.pollMany(&fds, 1, 100);
         if (!reader.fill(sock)) return if (subscribe) {} else error.ServerGone;
         while (reader.next()) |msg| {
@@ -353,8 +354,8 @@ fn captureOn(reader: *proto.Reader, sock: ptypkg.fd_t, id: u32, lines: u32) ![]c
     std.mem.writeInt(u32, b[4..8], lines, .little);
     try proto.write(sock, @intFromEnum(proto.c2s.capture), &b);
     var fds = [1]ptypkg.Pollfd{.{ .fd = sock, .events = ptypkg.POLLIN }};
-    var waited: usize = 0;
-    while (waited < 2000) : (waited += 100) {
+    const give_up = nowMs() + 5000;
+    while (nowMs() < give_up) {
         _ = ptypkg.pollMany(&fds, 1, 100);
         if (!reader.fill(sock)) return error.ServerGone;
         while (reader.next()) |msg| {
@@ -390,7 +391,7 @@ fn printAck(serial: u64) void {
 }
 
 /// One-shot: type bytes into a pane by id, as if at its keyboard.
-pub fn send(gpa: std.mem.Allocator, sock_path: []const u8, id: u32, bytes: []const u8) !void {
+pub fn send(gpa: std.mem.Allocator, sock_path: []const u8, id: u32, bytes: []const u8, named: bool) !void {
     const sock = ptypkg.unixConnect(sock_path);
     if (sock < 0) return error.ConnectFailed;
     defer ptypkg.closeFd(sock);
@@ -400,7 +401,8 @@ pub fn send(gpa: std.mem.Allocator, sock_path: []const u8, id: u32, bytes: []con
     std.mem.writeInt(u32, &b, id, .little);
     try payload.appendSlice(gpa, &b);
     try payload.appendSlice(gpa, bytes);
-    try proto.write(sock, @intFromEnum(proto.c2s.input), payload.items);
+    // named keys are the server's to encode for the program's modes
+    try proto.write(sock, @intFromEnum(if (named) proto.c2s.key else proto.c2s.input), payload.items);
     _ = ptypkg.setNonblockFd(sock);
     var reader = proto.Reader.init(gpa);
     defer reader.deinit();
@@ -562,8 +564,8 @@ pub fn bg(gpa: std.mem.Allocator, sock_path: []const u8, payload: []const u8) !v
     var reader = proto.Reader.init(gpa);
     defer reader.deinit();
     var fds = [1]ptypkg.Pollfd{.{ .fd = sock, .events = ptypkg.POLLIN }};
-    var waited: usize = 0;
-    while (waited < 3000) : (waited += 100) {
+    const give_up = nowMs() + 5000;
+    while (nowMs() < give_up) {
         _ = ptypkg.pollMany(&fds, 1, 100);
         if (!reader.fill(sock)) return error.ServerGone;
         while (reader.next()) |msg| {
@@ -594,6 +596,59 @@ pub fn bg(gpa: std.mem.Allocator, sock_path: []const u8, payload: []const u8) !v
         }
     }
     return error.Timeout;
+}
+
+/// One-shot: `rook shot` (Server.shotCmd). With a size, the glass is
+/// set to it first; then the grid is asked for, to be taken once what
+/// it shows has been quiet for `quiet_ms` (or at `timeout_ms`), and
+/// printed.
+pub fn shot(gpa: std.mem.Allocator, sock_path: []const u8, form: u8, id: u32, cols: u16, rows: u16, quiet_ms: u32, timeout_ms: u32) !void {
+    // A test starts a server and shoots: give a server that is still
+    // coming up a second to be there.
+    var sock = ptypkg.unixConnect(sock_path);
+    var tries: usize = 0;
+    while (sock < 0 and tries < 20) : (tries += 1) {
+        _ = usleep(50_000);
+        sock = ptypkg.unixConnect(sock_path);
+    }
+    if (sock < 0) return error.ConnectFailed;
+    defer ptypkg.closeFd(sock);
+    _ = ptypkg.setNonblockFd(sock);
+    var reader = proto.Reader.init(gpa);
+    defer reader.deinit();
+    var req: [17]u8 = undefined;
+    std.mem.writeInt(u32, req[1..5], id, .little);
+    std.mem.writeInt(u16, req[5..7], cols, .little);
+    std.mem.writeInt(u16, req[7..9], rows, .little);
+    std.mem.writeInt(u32, req[9..13], quiet_ms, .little);
+    std.mem.writeInt(u32, req[13..17], timeout_ms, .little);
+    var steps: [2]u8 = .{ 'z', form };
+    for (steps[(if (cols == 0) 1 else 0)..]) |step| {
+        req[0] = step;
+        try proto.write(sock, @intFromEnum(proto.c2s.shot), &req);
+        var fds = [1]ptypkg.Pollfd{.{ .fd = sock, .events = ptypkg.POLLIN }};
+        // by the clock: a large answer arrives in many reads, and a
+        // count of wakeups would run out long before the time did
+        const give_up = nowMs() + @as(i64, timeout_ms) + 5000;
+        var done = false;
+        while (!done and nowMs() < give_up) {
+            _ = ptypkg.pollMany(&fds, 1, 50);
+            if (!reader.fill(sock)) return error.ServerGone;
+            while (reader.next()) |msg| {
+                defer reader.consume();
+                switch (msg.kind) {
+                    @intFromEnum(proto.s2c.text) => {
+                        _ = ptypkg.writeAllFd(1, msg.payload);
+                        return;
+                    },
+                    @intFromEnum(proto.s2c.ack) => done = true,
+                    @intFromEnum(proto.s2c.exit) => return refused(msg.payload),
+                    else => {},
+                }
+            }
+        }
+        if (!done) return error.Timeout;
+    }
 }
 
 /// Wait on a pane: until `match` appears in its last `lines` lines,
