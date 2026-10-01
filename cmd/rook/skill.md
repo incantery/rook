@@ -62,6 +62,28 @@ on either brings the new pane in front of the person; leave it off
 for background work. `rook close-pane ID` hangs a pane up. Close only
 what you opened.
 
+## Services in the background
+
+Something the person needs running but not on their screen — a dev
+server for the worktree they are about to try, a watch that must
+outlive your session — goes in the background: a pane in no window.
+
+```sh
+id=$(rook bg run --by "$YOU" --port 8081 -- npm run dev | python3 -c 'import json,sys; print(json.load(sys.stdin)["pane"])')
+rook bg run --port auto -- 'vite --port $PORT'   # rook picks a free port, exports $PORT
+rook bg wait "$id" --timeout 60000   # 0 once the port answers; 1 if it exited or timed out
+rook read "$id" -n 80                # its log, without bringing it forward
+rook bg --json                       # every row: group, health, ports, place, by, command
+rook bg kill "$id"                   # or a group name
+```
+
+The group is your pane's workspace unless `-g NAME` says otherwise, and
+closing that workspace stops the group. After `--` the words run under
+one shell: quote what must stay together. A service that exits is kept
+and reported (`health: exited`); read it, then `rook bg kill` it. Tell
+the person what is up and where (`rook notify`), and leave bringing it
+forward (`rook bg show GROUP`, their `prefix-B`) to them unless asked.
+
 ## Type into a pane
 
 ```sh

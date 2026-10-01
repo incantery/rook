@@ -19,6 +19,8 @@
 //!   rook split <id> [--down] [--focus] [--cwd DIR]   a pane beside/below it
 //!   rook window <id> [--focus] [--cwd DIR]           a new window in its workspace
 //!   rook focus <id> / rook jump / rook close-pane <id>
+//!   rook bg ls | run | hide | show | kill   the background: panes in no window
+//!                       (docs/background.md; the front door adds ports and `wait`)
 //!   rook resume <id> <cmd...>  how to bring the pane's program back after a restart
 //!   rook own <id> <actor> | --paused <actor> | --release | --request | --take
 //!                       who holds a pane's keyboard (docs/altitude.md at 8a9daf9)
@@ -526,6 +528,117 @@ pub fn main(init: std.process.Init) !void {
             try ops.appendSlice(gpa, a);
         }
         try client.class(churn_gpa, path, target, ttl_ms, ops.items);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "bg")) {
+        // rook bg ls                         the table, as JSON (the front
+        //                                    door prints it for a person)
+        // rook bg run [-g GROUP] [--by WHO] [--port N] [--cwd DIR] [--] <command...>
+        // rook bg hide [<pane>|<group>] [-g GROUP]
+        // rook bg show <pane>|<group> [--space NAME] [--window] [--focus]
+        // rook bg kill <pane>|<group>
+        // A target that is a number, or `.`, is a pane; any other word
+        // is a group.
+        const sub: []const u8 = if (argv.len > 2) std.mem.span(argv[2]) else "ls";
+        var payload: std.ArrayList(u8) = .empty;
+        if (std.mem.eql(u8, sub, "ls")) {
+            try payload.append(gpa, 'l');
+        } else if (std.mem.eql(u8, sub, "run")) {
+            var group: []const u8 = "";
+            var by: []const u8 = "";
+            var port: []const u8 = "";
+            var cwd_buf: [1024]u8 = undefined;
+            var dir: []const u8 = if (getcwd(&cwd_buf, cwd_buf.len)) |c| std.mem.span(c) else "";
+            var i: usize = 3;
+            while (i < argv.len) : (i += 1) {
+                const a = std.mem.span(argv[i]);
+                const val: ?[]const u8 = if (i + 1 < argv.len) std.mem.span(argv[i + 1]) else null;
+                if ((std.mem.eql(u8, a, "-g") or std.mem.eql(u8, a, "--group")) and val != null) {
+                    group = val.?;
+                    i += 1;
+                } else if (std.mem.eql(u8, a, "--by") and val != null) {
+                    by = val.?;
+                    i += 1;
+                } else if (std.mem.eql(u8, a, "--port") and val != null) {
+                    port = val.?;
+                    _ = std.fmt.parseInt(u16, port, 10) catch {
+                        std.debug.print("rook bg run: --port is a number (or `auto`, at the front door)\n", .{});
+                        return error.BadArgs;
+                    };
+                    i += 1;
+                } else if (std.mem.eql(u8, a, "--cwd") and val != null) {
+                    dir = val.?;
+                    i += 1;
+                } else if (std.mem.eql(u8, a, "--")) {
+                    i += 1;
+                    break;
+                } else if (a.len > 0 and a[0] == '-') {
+                    std.debug.print("rook bg run: unknown option {s}\n", .{a});
+                    return error.BadArgs;
+                } else break;
+            }
+            if (i >= argv.len) {
+                std.debug.print("usage: rook bg run [-g group] [--by who] [--port N|auto] [--cwd dir] [--] <command...>\n", .{});
+                return error.BadArgs;
+            }
+            const caller: []const u8 = if (getenv("ROOK_MUX_PANE")) |id| std.mem.span(id) else "";
+            try payload.print(gpa, "r{s}\t{s}\t{s}\t{s}\t{s}\t", .{ caller, group, by, port, dir });
+            for (argv[i..], 0..) |a, j| {
+                if (j > 0) try payload.append(gpa, ' ');
+                try payload.appendSlice(gpa, std.mem.span(a));
+            }
+        } else if (std.mem.eql(u8, sub, "hide") or std.mem.eql(u8, sub, "show") or std.mem.eql(u8, sub, "kill")) {
+            var target: []const u8 = "";
+            var group: []const u8 = "";
+            var space: []const u8 = "";
+            var flags: u8 = 0;
+            var i: usize = 3;
+            while (i < argv.len) : (i += 1) {
+                const a = std.mem.span(argv[i]);
+                const val: ?[]const u8 = if (i + 1 < argv.len) std.mem.span(argv[i + 1]) else null;
+                if (sub[0] == 'h' and (std.mem.eql(u8, a, "-g") or std.mem.eql(u8, a, "--group")) and val != null) {
+                    group = val.?;
+                    i += 1;
+                } else if (sub[0] == 's' and std.mem.eql(u8, a, "--space") and val != null) {
+                    space = val.?;
+                    i += 1;
+                } else if (sub[0] == 's' and std.mem.eql(u8, a, "--window")) {
+                    flags |= 1;
+                } else if (sub[0] == 's' and std.mem.eql(u8, a, "--focus")) {
+                    flags |= 2;
+                } else if (a.len > 1 and a[0] == '-') {
+                    std.debug.print("rook bg {s}: unknown option {s}\n", .{ sub, a });
+                    return error.BadArgs;
+                } else if (target.len == 0) {
+                    target = a;
+                } else {
+                    std.debug.print("rook bg {s}: one target, a pane or a group\n", .{sub});
+                    return error.BadArgs;
+                }
+            }
+            // hide with nothing said is this pane
+            if (target.len == 0 and sub[0] == 'h') target = ".";
+            if (target.len == 0) {
+                std.debug.print("usage: rook bg {s} <pane>|<group>\n", .{sub});
+                return error.BadArgs;
+            }
+            try payload.append(gpa, sub[0]);
+            const is_pane = std.mem.eql(u8, target, ".") or (std.fmt.parseInt(u32, target, 10) catch null) != null;
+            if (is_pane) {
+                try payload.print(gpa, "p:{d}", .{try paneArgLoud(target)});
+            } else {
+                try payload.print(gpa, "g:{s}", .{target});
+            }
+            switch (sub[0]) {
+                'h' => try payload.print(gpa, "\t{s}", .{group}),
+                's' => try payload.print(gpa, "\t{d}\t{s}", .{ flags, space }),
+                else => {},
+            }
+        } else {
+            std.debug.print("usage: rook bg [ls|run|hide|show|kill] …\n", .{});
+            return error.BadArgs;
+        }
+        try client.bg(churn_gpa, path, payload.items);
         return;
     }
     if (std.mem.eql(u8, cmd, "reload")) {

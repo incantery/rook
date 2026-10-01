@@ -236,6 +236,38 @@ pub const Pane = struct {
     owner: [32]u8 = @splat(0),
     owner_len: usize = 0,
     own_since_ms: i64 = 0,
+    /// The background group this pane belongs to (docs/background.md):
+    /// the name a set of panes goes to the background and comes back
+    /// under — a worktree's services. It stays on the pane wherever
+    /// the pane is, so what was brought forward can be sent back whole.
+    group: [32]u8 = @splat(0),
+    group_len: usize = 0,
+    /// What `rook bg run` started this pane running, when it did.
+    /// Owned. A pane with one is a service: it is restored by running
+    /// it again, and when it exits the pane is kept (`held`) so the
+    /// reason it died can still be read.
+    svc: []u8 = &.{},
+    born_ms: i64 = 0,
+    /// Who started it, in their own word (`--by vera`), and the port
+    /// it said it would answer on (0 = none said): what "healthy" is
+    /// measured against. Labels; the engine only carries them.
+    by: [32]u8 = @splat(0),
+    by_len: usize = 0,
+    port: u16 = 0,
+    /// A service whose program has exited: nothing runs here, but the
+    /// screen and the history stay until somebody closes it (`drop`).
+    held: bool = false,
+    drop: bool = false,
+    exit_ms: i64 = 0,
+
+    pub fn groupName(self: *const Pane) []const u8 {
+        return self.group[0..self.group_len];
+    }
+
+    pub fn setGroup(self: *Pane, name: []const u8) void {
+        self.group_len = @min(name.len, self.group.len);
+        @memcpy(self.group[0..self.group_len], name[0..self.group_len]);
+    }
 
     pub fn ownerName(self: *const Pane) []const u8 {
         return self.owner[0..self.owner_len];
@@ -816,6 +848,7 @@ pub const Pane = struct {
         _ = ptypkg.Pty.wait(self.pid);
         if (self.back_cmd.len > 0) self.gpa.free(self.back_cmd);
         if (self.boot.len > 0) self.gpa.free(self.boot);
+        if (self.svc.len > 0) self.gpa.free(self.svc);
         if (self.clip_buf.len > 0) self.gpa.free(self.clip_buf);
         self.in_buf.deinit(self.gpa);
         self.tee_buf.deinit(self.gpa);

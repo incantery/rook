@@ -80,6 +80,16 @@ const usage = `rook — the multiplexer, owned
   rook split|window <id> [--down] [--focus] [--cwd DIR]
   rook focus <id> | jump  bring a pane forward; jump = the oldest unread one
   rook close-pane <id>    hang a pane up
+  rook bg [--json]        the background: panes that run in no window — group, state,
+                          ports, where each is (docs/background.md)
+  rook bg run [-g GROUP] [--by WHO] [--port N|auto] [--cwd DIR] -- <cmd...>
+                          start a service there; the group is this workspace unless said;
+                          --port is what "healthy" means (auto picks one, as $PORT)
+  rook bg hide [<id>|<group>] [-g GROUP]    send a pane, or a group's panes, back
+  rook bg show <id>|<group> [--space NAME] [--window] [--focus]
+                          bring them into the window on the glass, or that space's
+  rook bg wait <id>|<group> [--exit] [--timeout MS]   until healthy, or until it ends
+  rook bg kill <id>|<group> | rook bg pick  hang them up; the picker to bind
   rook resume <id> <cmd>  how to bring the pane's program back after a restart
   rook own <id> <actor> | --paused <actor> | --release | --request | --take
                           who holds a pane's keyboard (docs/altitude.md at 8a9daf9)
@@ -163,6 +173,8 @@ func main() {
 		err = runReload()
 	case args[0] == "style":
 		err = runStyle(args[1:])
+	case args[0] == "bg":
+		err = runBg(args[1:])
 	case muxVerbs[args[0]]:
 		execMux(args)
 	default:

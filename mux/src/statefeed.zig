@@ -326,6 +326,28 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
         out.appendSlice(gpa, ",\"cwd\":") catch return;
         str(gpa, out, if (!form.drift) "" else if (p.fgCwd(&cb)) |c| c else "");
         out.print(gpa, ",\"cols\":{d},\"rows\":{d}", .{ p.cols, p.rows }) catch return;
+        // The background (docs/background.md): the group a pane goes
+        // back and comes forward under, whether it is back there now —
+        // running, in no window — and, for a service, what it was
+        // started as, by whom, and the port it said it would answer on.
+        // `exited` on a service is the event: the pane is kept so the
+        // reason can be read, and `exitMs` is when.
+        if (p.group_len > 0) {
+            out.appendSlice(gpa, ",\"group\":") catch return;
+            str(gpa, out, p.groupName());
+        }
+        var back = false;
+        for (sv.shelf.items) |sid| {
+            if (sid == p.id) back = true;
+        }
+        out.print(gpa, ",\"background\":{s}", .{boolStr(back)}) catch return;
+        if (p.svc.len > 0) {
+            out.appendSlice(gpa, ",\"service\":{\"command\":") catch return;
+            str(gpa, out, p.svc);
+            out.appendSlice(gpa, ",\"by\":") catch return;
+            str(gpa, out, p.by[0..p.by_len]);
+            out.print(gpa, ",\"port\":{d},\"bornMs\":{d},\"exitMs\":{d}}}", .{ p.port, p.born_ms, p.exit_ms }) catch return;
+        }
         // where it is on the glass right now, if it is placed at all
         var rect: ?@TypeOf(sv.placed.items[0].rect) = null;
         for (sv.placed.items) |pl| {

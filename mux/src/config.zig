@@ -88,7 +88,7 @@ pub const Mux = struct {
 
 /// Who holds the keys, then the signals, with one global attention
 /// count and no more of a dashboard than that.
-pub const default_status_space = "input\n-\nworking\nattention\nunread\npins";
+pub const default_status_space = "input\n-\nworking\nattention\nunread\nbg\npins";
 
 /// Home: the one workspace outside the list of spaces, a key away
 /// from any of them (docs/home.md). Rook seeds it from here when it

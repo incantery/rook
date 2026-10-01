@@ -18,6 +18,7 @@ var Verbs = []string{
 	"next-unread", "inspect",
 	"home", "last-space",
 	"sidebar", "pin", "pin-global",
+	"background", "foreground",
 	"popup",
 }
 

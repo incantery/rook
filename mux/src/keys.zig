@@ -45,6 +45,8 @@ pub const Verb = enum {
     sidebar,
     pin,
     pin_global,
+    background,
+    foreground,
     /// arg: the popup payload — `\x1fWxH[@MWxMH]\x1f` then the command,
     /// or the command alone (the form `rook popup` sends)
     popup,
@@ -204,6 +206,8 @@ pub fn defaults() Keys {
         .{ 'A', "sidebar" },
         .{ 'P', "pin" },
         .{ 'G', "pin-global" },
+        .{ 'b', "background" },
+        .{ 'B', "foreground" },
     };
     for (table) |e| k.set(e[0], e[1]);
     return k;

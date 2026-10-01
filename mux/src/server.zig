@@ -300,6 +300,12 @@ pub const Server = struct {
     /// out of, so the dock can say `⊕g claude · from vera` at
     /// altitude. Parallel to nothing — looked up by pane id.
     pin_origins: std.ArrayList(PinOrigin) = .empty,
+    /// The background (docs/background.md): panes that run and are
+    /// placed nowhere — in no window, on no rail. They keep the size
+    /// they last had, are in every list that names panes, and come
+    /// forward into a window by group or one at a time. In the order
+    /// they went back, so the last is the one most lately sent.
+    shelf: std.ArrayList(u32) = .empty,
     /// Column of the rail/window seam in the current layout, if any,
     /// and the row it starts on.
     dock_x: ?u16 = null,
@@ -623,6 +629,7 @@ pub const Server = struct {
         self.sessions.deinit(self.gpa);
         self.global_pins.deinit(self.gpa);
         self.pin_origins.deinit(self.gpa);
+        self.shelf.deinit(self.gpa);
         self.frame.deinit();
         self.over.deinit();
         self.sheet.deinit();
@@ -689,15 +696,30 @@ pub const Server = struct {
     /// Close the named session: hang up every pane in it; reap does
     /// the accounting and the view falls back if it was current.
     fn closeSession(self: *Server, name: []const u8) void {
+        // What it kept in the background goes with it: a group is named
+        // for the workspace it serves, and a workspace closed on purpose
+        // must not leave its services holding their ports.
+        for (self.shelf.items) |id| {
+            const p = self.pane(id) orelse continue;
+            if (std.mem.eql(u8, p.groupName(), name)) self.closePane(p);
+        }
         for (self.sessions.items) |sn| {
             if (sn.home or !std.mem.eql(u8, sn.label(), name)) continue;
             for (sn.windows.items) |w| {
                 for (self.panes.items) |p| {
-                    if (w.layout.contains(p.id)) p.hangup();
+                    if (w.layout.contains(p.id)) self.closePane(p);
                 }
             }
             return;
         }
+    }
+
+    /// Hang a pane up — or, for a service already dead and kept for
+    /// reading, let it go.
+    fn closePane(self: *Server, p: *panepkg.Pane) void {
+        // closed on purpose: not a death to keep and announce
+        p.drop = true;
+        if (p.held) self.pending = true else p.hangup();
     }
 
     fn switchSession(self: *Server, i: usize) void {
@@ -1548,6 +1570,7 @@ pub const Server = struct {
                 },
                 @intFromEnum(proto.c2s.config) => self.reloadConfig(c, msg.payload),
                 @intFromEnum(proto.c2s.class) => self.classCmd(c, msg.payload),
+                @intFromEnum(proto.c2s.bg) => self.bgCmd(c, msg.payload),
                 @intFromEnum(proto.c2s.popup) => {
                     if (msg.payload.len > 0) self.openPopup(self.popupSized(msg.payload)) catch {};
                 },
@@ -1618,6 +1641,9 @@ pub const Server = struct {
         for (self.global_pins.items) |id| self.blockLine(out, id, "global", "pin");
         for (self.sessions.items) |sn| {
             for (sn.pins.items) |id| self.blockLine(out, id, sn.label(), "pin");
+        }
+        for (self.shelf.items) |id| {
+            if (self.pane(id)) |p| self.blockLine(out, id, "bg", p.groupName());
         }
         for (self.sessions.items) |sn| {
             for (sn.windows.items, 0..) |w, wi| {
@@ -1835,6 +1861,12 @@ pub const Server = struct {
             // A globally pinned pane belongs to no workspace — it is
             // in every one — so it is named by its scope, not a name.
             out.place = "pin";
+            return out;
+        }
+        for (self.shelf.items) |pid| {
+            if (pid != id) continue;
+            // In the background: running, and in no workspace at all.
+            out.place = "bg";
             return out;
         }
         for (self.sessions.items) |sn| {
@@ -2221,6 +2253,12 @@ pub const Server = struct {
     /// starting work on someone's behalf must not pull the desk.
     /// Returns the pane made, for the ops that make one.
     fn paneOp(self: *Server, bid: u32, op: u8, cwd_override: ?[*:0]const u8, focus: bool) ?u32 {
+        // a pane in the background is in no window to split, but it
+        // can still be hung up
+        if (op == 'x' and containsId(self.shelf.items, bid)) {
+            if (self.pane(bid)) |p| self.closePane(p);
+            return null;
+        }
         const loc = self.findBlock(bid) orelse return null;
         var cwd_buf: [1024]u8 = undefined;
         var cwd: ?[*:0]const u8 = cwd_override;
@@ -2252,7 +2290,7 @@ pub const Server = struct {
                 return p.id;
             },
             'x' => {
-                if (self.pane(bid)) |p| p.hangup();
+                if (self.pane(bid)) |p| self.closePane(p);
                 return null;
             },
             else => return null,
@@ -2742,6 +2780,9 @@ pub const Server = struct {
     /// workspace. The popup is not somewhere focus can be sent.
     fn focusPane(self: *Server, id: u32) void {
         if (self.ownPane(id)) return;
+        // From the background it comes into the window on the glass
+        // first: there is nowhere else for focus to find it.
+        if (containsId(self.shelf.items, id)) self.unshelve(&.{id}, self.cur_sess, false) catch return;
         for (self.sessions.items, 0..) |sn, si| {
             var here = false;
             for (sn.pins.items) |pid| {
@@ -2906,7 +2947,10 @@ pub const Server = struct {
     }
 
     fn markUnread(self: *Server, p: *panepkg.Pane, now: i64) void {
-        _ = self;
+        // A pane in the background is not waiting to be read: a dev
+        // server that rings its bell must not send `jump` to fetch it
+        // into the window. What it has to say is the bar's `bg` count.
+        if (containsId(self.shelf.items, p.id)) return;
         if (p.unread_ms == 0) p.unread_ms = now;
     }
 
@@ -3040,7 +3084,7 @@ pub const Server = struct {
                 self.relayout() catch {};
             },
             .copy_mode => self.scrollStart(),
-            .kill_pane => if (self.focusedPane()) |p| p.hangup(),
+            .kill_pane => if (self.focusedPane()) |p| self.closePane(p),
             .detach => self.detach(c),
             .next_unread => _ = self.jumpUnread(),
             .inspect => self.inspect = !self.inspect,
@@ -3057,6 +3101,9 @@ pub const Server = struct {
             },
             .pin => self.togglePin(),
             .pin_global => self.toggleGlobalPin(),
+            // To the background and back (docs/background.md).
+            .background => self.backgroundFocused(),
+            .foreground => self.foregroundHere(),
             // Whatever the config floats: a picker, an agent, a
             // manager. The popup is only a view — closing it ends
             // what it ran, and a program with a life of its own (a
@@ -3355,58 +3402,24 @@ pub const Server = struct {
                 removed = true;
                 continue;
             }
-            // a pinned pane: drop it from its rail
-            removeId(&self.global_pins, p.id);
-            self.forgetOrigin(p.id);
-            for (self.sessions.items) |sn| {
-                removeId(&sn.pins, p.id);
-                if (sn.focus_pin == p.id) sn.focus_pin = null;
-                if (sn.last_focus == p.id) sn.last_focus = null;
-            }
-            // remove from whichever session's window holds it
-            outer: for (self.sessions.items, 0..) |sn, si| {
-                var wi: usize = 0;
-                while (wi < sn.windows.items.len) : (wi += 1) {
-                    const w = sn.windows.items[wi];
-                    if (!w.layout.contains(p.id)) continue;
-                    const still = w.layout.remove(p.id);
-                    if (!still) {
-                        w.layout.deinit();
-                        self.gpa.destroy(w);
-                        _ = sn.windows.orderedRemove(wi);
-                        if (sn.cur >= sn.windows.items.len and sn.cur > 0) sn.cur -= 1;
-                        if (sn.windows.items.len == 0) {
-                            const was_home = sn.home;
-                            const was_cur = si == self.cur_sess;
-                            sn.windows.deinit(self.gpa);
-                            sn.pins.deinit(self.gpa);
-                            self.gpa.destroy(sn);
-                            _ = self.sessions.orderedRemove(si);
-                            // indices past the gap move down one
-                            if (self.last_sess) |ls| {
-                                self.last_sess = if (ls == si) null else if (ls > si) ls - 1 else ls;
-                            }
-                            if (self.home_back) |hb| {
-                                self.home_back = if (hb == si) null else if (hb > si) hb - 1 else hb;
-                            }
-                            if (self.cur_sess > si) self.cur_sess -= 1;
-                            if (self.cur_sess >= self.sessions.items.len and self.cur_sess > 0) self.cur_sess -= 1;
-                            // Home's last pane closed while you were in
-                            // it: back to the space you came from, and
-                            // home starts over the next time — or, with
-                            // `on_empty = "stay"`, it starts over now.
-                            // With no space to go back to, it starts
-                            // over either way: rook does not end
-                            // because the scratch pad was cleared.
-                            if (was_home and was_cur) home_left = true;
-                        }
-                    } else {
-                        w.zoomed = false;
-                        if (w.focused == p.id) w.focused = w.layout.firstLeaf() orelse 0;
-                    }
-                    break :outer;
+            // A service that died is kept where it is, in the background
+            // or in a window, with its last screen and its history: the
+            // reason is in there. It is said once, on the bar, and it
+            // goes when somebody closes it.
+            if (p.svc.len > 0 and !p.drop and !self.shutdown) {
+                if (!p.held) {
+                    p.held = true;
+                    p.exit_ms = panepkg.epochMs();
+                    var sb: [200]u8 = undefined;
+                    const cmd = chromepkg.clip(p.svc, 60);
+                    self.say('f', std.fmt.bufPrint(&sb, "bg {s}: {s} exited  (rook bg)", .{ p.groupName(), cmd }) catch "a background pane exited");
+                    self.state_dirty = true;
                 }
+                i += 1;
+                continue;
             }
+            removeId(&self.shelf, p.id);
+            if (self.unplace(p.id)) home_left = true;
             // block clients riding this pane get a clean goodbye
             for (self.clients.items) |bc| {
                 if (bc.block == p.id) {
@@ -3420,19 +3433,436 @@ pub const Server = struct {
             removed = true;
         }
         if (removed) self.updateTees();
-        if (home_left) {
-            const back = if (self.home_conf.stay) null else self.awayFromHome();
-            if (back) |b| {
-                self.cur_sess = b;
-            } else if (self.ensureHome()) |h| {
-                self.cur_sess = h;
-            } else |_| {}
-            self.scrolling = false;
-            self.selecting = false;
-            self.focusEvents(0, self.focusedId());
-            _ = self.touch();
-        }
+        if (home_left) self.leftHome();
         if (removed and self.sessions.items.len > 0) try self.relayout();
+    }
+
+    /// Home's last pane left it while it was showing — closed, or sent
+    /// to the background: back to the space you came from, and home
+    /// starts over the next time — or, with `on_empty = "stay"`, it
+    /// starts over now. With no space to go back to, it starts over
+    /// either way: rook does not end because the scratch pad was
+    /// cleared.
+    fn leftHome(self: *Server) void {
+        const back = if (self.home_conf.stay) null else self.awayFromHome();
+        if (back) |b| {
+            self.cur_sess = b;
+        } else if (self.ensureHome()) |h| {
+            self.cur_sess = h;
+        } else |_| {}
+        self.scrolling = false;
+        self.selecting = false;
+        self.focusEvents(0, self.focusedId());
+        _ = self.touch();
+    }
+
+    /// Take a pane out of wherever it is placed — a rail, or a window,
+    /// and with its last pane the window, and with its last window the
+    /// workspace — and leave the pane itself alone: the half of closing
+    /// a pane that is about where it was. True when that emptied home
+    /// while home was showing (`leftHome` is the caller's to run).
+    fn unplace(self: *Server, id: u32) bool {
+        var home_left = false;
+        // a pinned pane: drop it from its rail
+        removeId(&self.global_pins, id);
+        self.forgetOrigin(id);
+        for (self.sessions.items) |sn| {
+            removeId(&sn.pins, id);
+            if (sn.focus_pin == id) sn.focus_pin = null;
+            if (sn.last_focus == id) sn.last_focus = null;
+        }
+        // remove from whichever session's window holds it
+        outer: for (self.sessions.items, 0..) |sn, si| {
+            var wi: usize = 0;
+            while (wi < sn.windows.items.len) : (wi += 1) {
+                const w = sn.windows.items[wi];
+                if (!w.layout.contains(id)) continue;
+                const still = w.layout.remove(id);
+                if (!still) {
+                    w.layout.deinit();
+                    self.gpa.destroy(w);
+                    _ = sn.windows.orderedRemove(wi);
+                    if (sn.cur >= sn.windows.items.len and sn.cur > 0) sn.cur -= 1;
+                    if (sn.windows.items.len == 0) {
+                        const was_home = sn.home;
+                        const was_cur = si == self.cur_sess;
+                        sn.windows.deinit(self.gpa);
+                        sn.pins.deinit(self.gpa);
+                        self.gpa.destroy(sn);
+                        _ = self.sessions.orderedRemove(si);
+                        // indices past the gap move down one
+                        if (self.last_sess) |ls| {
+                            self.last_sess = if (ls == si) null else if (ls > si) ls - 1 else ls;
+                        }
+                        if (self.home_back) |hb| {
+                            self.home_back = if (hb == si) null else if (hb > si) hb - 1 else hb;
+                        }
+                        if (self.cur_sess > si) self.cur_sess -= 1;
+                        if (self.cur_sess >= self.sessions.items.len and self.cur_sess > 0) self.cur_sess -= 1;
+                        if (was_home and was_cur) home_left = true;
+                    }
+                } else {
+                    w.zoomed = false;
+                    if (w.focused == id) w.focused = w.layout.firstLeaf() orelse 0;
+                }
+                break :outer;
+            }
+        }
+        return home_left;
+    }
+
+    // ---- the background ----
+
+    /// Is this pane the only one placed anywhere? Rook always has
+    /// something to show, so that one stays where it is.
+    fn onlyPlaced(self: *Server, id: u32) bool {
+        if (self.global_pins.items.len > 0) return false;
+        if (self.sessions.items.len != 1) return false;
+        const sn = self.sessions.items[0];
+        // home starts itself over when it is emptied
+        if (sn.home) return false;
+        if (sn.pins.items.len > 0 or sn.windows.items.len != 1) return false;
+        const w = sn.windows.items[0];
+        return w.layout.isSingle() and w.layout.contains(id);
+    }
+
+    /// Send a pane to the background: out of its window or its rail,
+    /// still running, under `group` — else the group it already has,
+    /// else the name of the workspace it was in.
+    fn shelve(self: *Server, id: u32, group: []const u8) error{ NoPane, Popup, Last, OutOfMemory }!void {
+        const p = self.pane(id) orelse return error.NoPane;
+        if (self.popup == id) return error.Popup;
+        if (group.len > 0) p.setGroup(group);
+        if (containsId(self.shelf.items, id)) return;
+        if (self.onlyPlaced(id)) return error.Last;
+        if (p.group_len == 0) {
+            const from = if (self.placeOf(id)) |at| at.workspace else "";
+            var home = false;
+            for (self.sessions.items) |sn| {
+                if (sn.home and self.paneIn(sn, id)) home = true;
+            }
+            p.setGroup(if (home) "home" else if (from.len > 0) from else "bg");
+        }
+        try self.shelf.append(self.gpa, id);
+        const old = self.focusedId();
+        if (self.unplace(id)) self.leftHome();
+        p.unread_ms = 0;
+        self.scrolling = false;
+        self.selecting = false;
+        self.focusEvents(old, self.focusedId());
+        self.relayout() catch {};
+        _ = self.touch();
+    }
+
+    /// Bring panes out of the background into a workspace: beside the
+    /// focused pane of its current window, the first to its right and
+    /// the rest stacked under that one — or, `as_window`, into a window
+    /// of their own, named for the group. Nothing is refocused here.
+    fn unshelve(self: *Server, ids: []const u32, si: usize, as_window: bool) !void {
+        if (ids.len == 0 or si >= self.sessions.items.len) return;
+        const sn = self.sessions.items[si];
+        var w = sn.windows.items[sn.cur];
+        var prev: u32 = w.focused;
+        for (ids, 0..) |id, i| {
+            const p = self.pane(id) orelse continue;
+            if (!containsId(self.shelf.items, id)) continue;
+            if (as_window and i == 0) {
+                w = try self.gpa.create(Window);
+                w.* = .{ .layout = layoutpkg.Layout.init(self.gpa), .seen_ms = panepkg.epochMs() };
+                errdefer self.gpa.destroy(w);
+                try w.layout.seed(id);
+                try sn.windows.append(self.gpa, w);
+                w.focused = id;
+                if (p.group_len > 0) {
+                    w.setName(p.groupName());
+                    w.named = true;
+                    w.name_by = .program;
+                }
+            } else {
+                try w.layout.split(prev, id, i == @intFromBool(as_window));
+            }
+            removeId(&self.shelf, id);
+            prev = id;
+        }
+        w.zoomed = false;
+        self.relayout() catch {};
+        _ = self.touch();
+    }
+
+    /// The panes of a group, in pane order: those in the background,
+    /// or (`placed`) those that are out in a window or on a rail.
+    fn groupPanes(self: *Server, group: []const u8, placed: bool, buf: []u32) []u32 {
+        var n: usize = 0;
+        if (!placed) {
+            // in the order they went back
+            for (self.shelf.items) |id| {
+                const p = self.pane(id) orelse continue;
+                if (n < buf.len and std.mem.eql(u8, p.groupName(), group)) {
+                    buf[n] = id;
+                    n += 1;
+                }
+            }
+            return buf[0..n];
+        }
+        for (self.panes.items) |p| {
+            if (n == buf.len) break;
+            if (p.group_len == 0 or !std.mem.eql(u8, p.groupName(), group)) continue;
+            if (containsId(self.shelf.items, p.id) or self.popup == p.id) continue;
+            buf[n] = p.id;
+            n += 1;
+        }
+        return buf[0..n];
+    }
+
+    /// The `background` key: the focused pane goes back — and with it
+    /// every pane of its group that is out, so what came forward
+    /// together goes back together.
+    fn backgroundFocused(self: *Server) void {
+        const p = self.focusedPane() orelse return;
+        var buf: [64]u32 = undefined;
+        var ids: []const u32 = &.{p.id};
+        if (p.group_len > 0) ids = self.groupPanes(p.groupName(), true, &buf);
+        var sent: usize = 0;
+        for (ids) |id| {
+            self.shelve(id, "") catch |e| {
+                if (e == error.Last) self.say('-', "the last pane stays: there would be nothing left to show");
+                continue;
+            };
+            sent += 1;
+        }
+        if (sent == 0) return;
+        // said once, with the way back: a pane that vanished without a
+        // word is a pane somebody thinks they closed
+        var sb: [96]u8 = undefined;
+        var kb: [16]u8 = undefined;
+        const said = if (self.chord(.foreground, &kb)) |k|
+            std.fmt.bufPrint(&sb, "{d} pane{s} to the background · {s} brings {s} back", .{ sent, plural(sent), k, if (sent == 1) "it" else "them" })
+        else
+            std.fmt.bufPrint(&sb, "{d} pane{s} to the background · rook bg", .{ sent, plural(sent) });
+        self.say('-', said catch "to the background");
+    }
+
+    /// The `foreground` key: this workspace's group comes into the
+    /// window, when it has one in the background; else the group most
+    /// lately sent back.
+    fn foregroundHere(self: *Server) void {
+        if (self.shelf.items.len == 0) {
+            self.say('-', "nothing in the background");
+            return;
+        }
+        var buf: [64]u32 = undefined;
+        var ids = self.groupPanes(self.sess().label(), false, &buf);
+        if (ids.len == 0 or self.sess().home) {
+            const last = self.pane(self.shelf.items[self.shelf.items.len - 1]) orelse return;
+            var gb: [32]u8 = undefined;
+            const g = gb[0..last.group_len];
+            @memcpy(g, last.groupName());
+            ids = self.groupPanes(g, false, &buf);
+        }
+        if (ids.len == 0) return;
+        const first = ids[0];
+        self.unshelve(ids, self.cur_sess, false) catch return;
+        self.focusPane(first);
+    }
+
+    /// A `bg` target: `p:<id>` is one pane, `g:<name>` a group.
+    const BgTarget = union(enum) { pane: u32, group: []const u8 };
+
+    fn bgTarget(word: []const u8) ?BgTarget {
+        if (word.len < 3 or word[1] != ':') return null;
+        return switch (word[0]) {
+            'p' => .{ .pane = std.fmt.parseInt(u32, word[2..], 10) catch return null },
+            'g' => .{ .group = word[2..] },
+            else => null,
+        };
+    }
+
+    /// `rook bg`, the front door's verbs on the background: [op u8]
+    /// then tab-separated words.
+    ///   'r' caller \t group \t by \t port \t cwd \t command
+    ///                                           start a service there
+    ///   'h' target \t group                     send to the background
+    ///   's' target \t flags \t workspace        bring forward (flags: 1
+    ///                                           its own window, 2 focus)
+    ///   'k' target                              hang up
+    ///   'l'                                     the table, as JSON
+    /// `run` answers with the pane it made, `l` with text, the rest
+    /// with the serial; what cannot be done answers `exit` and why.
+    fn bgCmd(self: *Server, c: *Client, payload: []const u8) void {
+        if (payload.len < 1) return;
+        const op = payload[0];
+        var words = std.mem.splitScalar(u8, payload[1..], '\t');
+        const no = @intFromEnum(proto.s2c.exit);
+        switch (op) {
+            'l' => {
+                var out: std.ArrayList(u8) = .empty;
+                defer out.deinit(self.gpa);
+                self.bgJson(&out);
+                self.sendTo(c, @intFromEnum(proto.s2c.text), out.items);
+                return;
+            },
+            'r' => {
+                const caller = std.fmt.parseInt(u32, words.next() orelse "", 10) catch 0;
+                var group = words.next() orelse "";
+                const by = words.next() orelse "";
+                const port = std.fmt.parseInt(u16, words.next() orelse "", 10) catch 0;
+                const dir = words.next() orelse "";
+                const cmd = words.rest();
+                if (cmd.len == 0) return self.sendTo(c, no, "bg run: no command");
+                if (group.len == 0) {
+                    // the caller's own group, else the workspace it is
+                    // in, else the directory's name
+                    if (self.pane(caller)) |cp| {
+                        group = cp.groupName();
+                        if (group.len == 0) {
+                            if (self.placeOf(caller)) |at| group = at.workspace;
+                        }
+                    }
+                    if (group.len == 0) group = std.fs.path.basename(dir);
+                    if (group.len == 0) group = "bg";
+                }
+                const cmd_z = self.gpa.dupeZ(u8, cmd) catch return;
+                defer self.gpa.free(cmd_z);
+                var dir_buf: [1024]u8 = undefined;
+                const dir_z: ?[*:0]const u8 = if (dir.len > 0 and dir.len < dir_buf.len) blk: {
+                    @memcpy(dir_buf[0..dir.len], dir);
+                    dir_buf[dir.len] = 0;
+                    break :blk @ptrCast(&dir_buf);
+                } else null;
+                var gb: [32]u8 = undefined;
+                const g = gb[0..@min(group.len, gb.len)];
+                @memcpy(g, group[0..g.len]);
+                const id = self.startService(g, dir_z, cmd_z) catch
+                    return self.sendTo(c, no, "bg run: could not start the pane");
+                if (self.pane(id)) |p| {
+                    p.by_len = @min(by.len, p.by.len);
+                    @memcpy(p.by[0..p.by_len], by[0..p.by_len]);
+                    p.port = port;
+                }
+                self.replyCreated(c, id);
+            },
+            'h', 's', 'k' => {
+                const target = bgTarget(words.next() orelse "") orelse return self.sendTo(c, no, "bg: no such target");
+                var buf: [64]u32 = undefined;
+                var one: [1]u32 = undefined;
+                var ids: []const u32 = &.{};
+                switch (target) {
+                    .pane => |id| {
+                        if (self.pane(id) == null) return self.sendTo(c, no, "no such pane");
+                        one[0] = id;
+                        ids = &one;
+                    },
+                    .group => |g| {
+                        ids = switch (op) {
+                            'h' => self.groupPanes(g, true, &buf),
+                            's' => self.groupPanes(g, false, &buf),
+                            else => blk: {
+                                var n: usize = 0;
+                                for (self.panes.items) |p| {
+                                    if (n < buf.len and p.group_len > 0 and std.mem.eql(u8, p.groupName(), g)) {
+                                        buf[n] = p.id;
+                                        n += 1;
+                                    }
+                                }
+                                break :blk buf[0..n];
+                            },
+                        };
+                        if (ids.len == 0) return self.sendTo(c, no, switch (op) {
+                            'h' => "bg hide: no pane of that group is out",
+                            's' => "bg show: nothing of that group is in the background",
+                            else => "bg kill: no such group",
+                        });
+                    },
+                }
+                switch (op) {
+                    'h' => {
+                        const group = words.next() orelse "";
+                        for (ids) |id| {
+                            self.shelve(id, group) catch |e| return self.sendTo(c, no, switch (e) {
+                                error.Last => "bg hide: the last pane stays, or there would be nothing left to show",
+                                error.Popup => "bg hide: a popup is not a pane to keep",
+                                else => "bg hide: could not",
+                            });
+                        }
+                    },
+                    's' => {
+                        const flags = std.fmt.parseInt(u8, words.next() orelse "0", 10) catch 0;
+                        const space = words.next() orelse "";
+                        var si = self.cur_sess;
+                        if (space.len > 0) si = self.sessionNamed(space) orelse return self.sendTo(c, no, "bg show: no such workspace");
+                        if (target == .pane and !containsId(self.shelf.items, ids[0])) return self.sendTo(c, no, "bg show: that pane is not in the background");
+                        const first = ids[0];
+                        self.unshelve(ids, si, flags & 1 != 0) catch return self.sendTo(c, no, "bg show: could not place the panes");
+                        if (flags & 2 != 0) self.focusPane(first);
+                    },
+                    else => for (ids) |id| {
+                        if (self.pane(id)) |p| self.closePane(p);
+                    },
+                }
+                _ = self.touch();
+                self.ack(c);
+            },
+            else => return self.sendTo(c, no, "unknown bg op"),
+        }
+        self.state_dirty = true;
+        self.blocks_check_ms = 0;
+        self.full = true;
+        self.pending = true;
+    }
+
+    /// A pane born in the background running `cmd`: a service.
+    fn startService(self: *Server, group: []const u8, cwd: ?[*:0]const u8, cmd: [:0]const u8) !u32 {
+        const svc = try self.gpa.dupe(u8, cmd);
+        errdefer self.gpa.free(svc);
+        try self.shelf.ensureUnusedCapacity(self.gpa, 1);
+        const p = try self.startPane(cwd, cmd.ptr);
+        p.svc = svc;
+        p.born_ms = panepkg.epochMs();
+        p.setGroup(group);
+        self.shelf.appendAssumeCapacity(p.id);
+        _ = self.touch();
+        return p.id;
+    }
+
+    /// Every pane with a group, and every pane in the background, as
+    /// one JSON array: what `rook bg` lists.
+    fn bgJson(self: *Server, out: *std.ArrayList(u8)) void {
+        const gpa = self.gpa;
+        out.append(gpa, '[') catch return;
+        var n: usize = 0;
+        for (self.panes.items) |p| {
+            const back = containsId(self.shelf.items, p.id);
+            if (p.group_len == 0 and !back) continue;
+            const at = self.placeOf(p.id) orelse continue;
+            if (n > 0) out.append(gpa, ',') catch return;
+            n += 1;
+            var nb: [64]u8 = undefined;
+            var cb: [1024]u8 = undefined;
+            out.print(gpa, "{{\"id\":{d},\"pid\":{d},\"group\":", .{ p.id, p.pid }) catch return;
+            statefeed.str(gpa, out, p.groupName());
+            out.appendSlice(gpa, ",\"place\":") catch return;
+            statefeed.str(gpa, out, at.place);
+            out.appendSlice(gpa, ",\"workspace\":") catch return;
+            statefeed.str(gpa, out, at.workspace);
+            out.appendSlice(gpa, ",\"window\":") catch return;
+            if (at.window) |wi| out.print(gpa, "{d}", .{wi}) catch return else out.appendSlice(gpa, "null") catch return;
+            out.appendSlice(gpa, ",\"program\":") catch return;
+            statefeed.str(gpa, out, if (p.held) "" else p.fgName(&nb) orelse "shell");
+            out.appendSlice(gpa, ",\"command\":") catch return;
+            statefeed.str(gpa, out, p.svc);
+            out.appendSlice(gpa, ",\"by\":") catch return;
+            statefeed.str(gpa, out, p.by[0..p.by_len]);
+            out.print(gpa, ",\"port\":{d}", .{p.port}) catch return;
+            out.appendSlice(gpa, ",\"cwd\":") catch return;
+            statefeed.str(gpa, out, if (p.fgCwd(&cb)) |cc| cc else "");
+            out.print(gpa, ",\"bornMs\":{d},\"exited\":{s},\"exitMs\":{d},\"lastOutputMs\":{d}}}", .{
+                p.born_ms,
+                if (p.held) "true" else "false",
+                p.exit_ms,
+                p.last_output_ms.load(.acquire),
+            }) catch return;
+        }
+        out.appendSlice(gpa, "]\n") catch return;
     }
 
     fn redraw(self: *Server) !void {
@@ -3748,7 +4178,23 @@ pub const Server = struct {
                 self.savePane(&out, "pin ", id, false) catch return;
             }
             for (sn.windows.items, 0..) |w, wi| {
-                self.savePane(&out, "window ", w.focused, wi == sn.cur) catch return;
+                // A service comes back in the background (its `bg`
+                // line, below), so the window is saved by a pane that
+                // is not one — and not at all when it held only those.
+                var anchor: ?u32 = null;
+                if (self.pane(w.focused)) |fp| {
+                    if (fp.svc.len == 0) anchor = fp.id;
+                }
+                if (anchor == null) {
+                    for (self.panes.items) |p| {
+                        if (p.svc.len == 0 and w.layout.contains(p.id)) {
+                            anchor = p.id;
+                            break;
+                        }
+                    }
+                }
+                const focused = anchor orelse continue;
+                self.savePane(&out, "window ", focused, wi == sn.cur) catch return;
                 // a minted name survives the restart: it is identity,
                 // and identity is what a restore is for
                 if (w.named and std.mem.indexOfScalar(u8, w.label(), '\n') == null) {
@@ -3765,9 +4211,29 @@ pub const Server = struct {
                     out.append(self.gpa, '\n') catch return;
                 }
                 for (self.panes.items) |p| {
-                    if (p.id == w.focused or !w.layout.contains(p.id)) continue;
+                    if (p.id == focused or p.svc.len > 0 or !w.layout.contains(p.id)) continue;
                     if (p.resumeLive().len == 0) continue;
                     self.savePane(&out, "pane ", p.id, false) catch return;
+                }
+            }
+        }
+        // The background: `bg group \t by \t port \t cwd \t command`. A
+        // service is saved wherever it is and comes back in the
+        // background, run again; one that has died is not saved. A
+        // plain pane sent back is a shell there again, with its
+        // `resume` under it like any other.
+        for (self.panes.items) |p| {
+            const back = containsId(self.shelf.items, p.id);
+            if (p.svc.len == 0 and !back) continue;
+            if (p.held or p.exited.load(.acquire)) continue;
+            if (std.mem.indexOfScalar(u8, p.svc, '\n') != null) continue;
+            var cb: [1024]u8 = undefined;
+            const cwd: []const u8 = if (p.fgCwd(&cb)) |cc| cc else "";
+            out.print(self.gpa, "bg {s}\t{s}\t{d}\t{s}\t{s}\n", .{ p.groupName(), p.by[0..p.by_len], p.port, cwd, p.svc }) catch return;
+            if (p.svc.len == 0) {
+                const back_cmd = p.resumeLive();
+                if (back_cmd.len > 0 and std.mem.indexOfScalar(u8, back_cmd, '\n') == null) {
+                    out.print(self.gpa, "resume {s}\n", .{back_cmd}) catch return;
                 }
             }
         }
@@ -3841,6 +4307,36 @@ pub const Server = struct {
                 continue;
             }
             last_pane = null;
+            if (std.mem.startsWith(u8, line, "bg ")) {
+                var f = std.mem.splitScalar(u8, line["bg ".len..], '\t');
+                const group = f.next() orelse "";
+                const by = f.next() orelse "";
+                const port = std.fmt.parseInt(u16, f.next() orelse "", 10) catch 0;
+                const dir = f.next() orelse "";
+                const cmd = f.rest();
+                var cwd_z: [1024]u8 = undefined;
+                const cwd_arg: ?[*:0]const u8 = if (dir.len > 0 and dir.len < cwd_z.len) blk: {
+                    @memcpy(cwd_z[0..dir.len], dir);
+                    cwd_z[dir.len] = 0;
+                    break :blk @ptrCast(&cwd_z);
+                } else null;
+                var p: *panepkg.Pane = undefined;
+                if (cmd.len > 0) {
+                    const cmd_z = try self.gpa.dupeZ(u8, cmd);
+                    defer self.gpa.free(cmd_z);
+                    const id = self.startService(group, cwd_arg, cmd_z) catch continue;
+                    p = self.pane(id) orelse continue;
+                } else {
+                    p = try self.startPane(cwd_arg, null);
+                    p.setGroup(group);
+                    try self.shelf.append(self.gpa, p.id);
+                }
+                p.by_len = @min(by.len, p.by.len);
+                @memcpy(p.by[0..p.by_len], by[0..p.by_len]);
+                p.port = port;
+                last_pane = p;
+                continue;
+            }
             if (std.mem.startsWith(u8, line, "session ")) {
                 var name = line["session ".len..];
                 const starred = std.mem.endsWith(u8, name, " *");
@@ -4536,6 +5032,28 @@ pub const Server = struct {
             const n = self.countUnseen();
             if (n == 0) return 0;
             return ui.countModule(out, t, .unread, n);
+        }
+        if (std.mem.eql(u8, name, "bg")) {
+            // what runs where nobody is looking: how many panes are in
+            // the background, and how many services have died — out in
+            // a window or not — and are waiting to be read
+            const n = self.shelf.items.len;
+            var dead: usize = 0;
+            for (self.panes.items) |p| {
+                if (p.held) dead += 1;
+            }
+            if (n == 0 and dead == 0) return 0;
+            var b: [32]u8 = undefined;
+            if (n > 0) {
+                vis += ui.module(out, t, "bg ", t.muted, false);
+                vis += ui.module(out, t, std.fmt.bufPrint(&b, "{d}", .{n}) catch "?", t.secondary, false);
+            }
+            if (dead > 0) {
+                if (n > 0) vis += ui.module(out, t, " · ", t.muted, false);
+                vis += ui.module(out, t, ui.markGlyph(t, .failed), t.err, false);
+                vis += ui.module(out, t, std.fmt.bufPrint(&b, " {d} exited", .{dead}) catch "", t.err, false);
+            }
+            return vis;
         }
         if (std.mem.eql(u8, name, "pins")) {
             const n = self.global_pins.items.len;

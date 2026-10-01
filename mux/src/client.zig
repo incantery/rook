@@ -551,6 +551,51 @@ pub fn paneCmd(gpa: std.mem.Allocator, sock_path: []const u8, id: u32, op: u8, f
     return error.Timeout;
 }
 
+/// One-shot: a verb on the background (Server.bgCmd). `run` prints
+/// the pane it made, `ls` the table as JSON, the rest the serial.
+pub fn bg(gpa: std.mem.Allocator, sock_path: []const u8, payload: []const u8) !void {
+    const sock = ptypkg.unixConnect(sock_path);
+    if (sock < 0) return error.ConnectFailed;
+    defer ptypkg.closeFd(sock);
+    try proto.write(sock, @intFromEnum(proto.c2s.bg), payload);
+    _ = ptypkg.setNonblockFd(sock);
+    var reader = proto.Reader.init(gpa);
+    defer reader.deinit();
+    var fds = [1]ptypkg.Pollfd{.{ .fd = sock, .events = ptypkg.POLLIN }};
+    var waited: usize = 0;
+    while (waited < 3000) : (waited += 100) {
+        _ = ptypkg.pollMany(&fds, 1, 100);
+        if (!reader.fill(sock)) return error.ServerGone;
+        while (reader.next()) |msg| {
+            defer reader.consume();
+            switch (msg.kind) {
+                @intFromEnum(proto.s2c.block_created) => {
+                    if (msg.payload.len < 4) return error.BadReply;
+                    const made = std.mem.readInt(u32, msg.payload[0..4], .little);
+                    var lb: [64]u8 = undefined;
+                    const line = if (isatty(1) != 0)
+                        std.fmt.bufPrint(&lb, "{d}\n", .{made}) catch return
+                    else
+                        std.fmt.bufPrint(&lb, "{{\"ok\":true,\"pane\":{d}}}\n", .{made}) catch return;
+                    _ = ptypkg.writeAllFd(1, line);
+                    return;
+                },
+                @intFromEnum(proto.s2c.text) => {
+                    _ = ptypkg.writeAllFd(1, msg.payload);
+                    return;
+                },
+                @intFromEnum(proto.s2c.ack) => {
+                    if (msg.payload.len >= 8) printAck(std.mem.readInt(u64, msg.payload[0..8], .little));
+                    return;
+                },
+                @intFromEnum(proto.s2c.exit) => return refused(msg.payload),
+                else => {},
+            }
+        }
+    }
+    return error.Timeout;
+}
+
 /// Wait on a pane: until `match` appears in its last `lines` lines,
 /// or until it has been quiet — its text unchanged — for `quiet_ms`.
 /// Polls a capture every 250 ms; a pane is text, and text is what a
